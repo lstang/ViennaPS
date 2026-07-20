@@ -315,6 +315,10 @@ fields/
 - `ProcessOrchestrator` is extended to optionally use the new `DiffusionEngine` when MFEM is present.
 - Existing `PhysicsField` 1D profile API remains for backward compatibility with existing tests.
 
+## 11.1. Environment
+
+Prebuilt MFEM is at `f:/dev/mfem/build` (Release) and `f:/dev/mfem/build_debug` (Debug). This resolves the MSVC CRT mismatch: link Release app with Release MFEM (`build`), Debug app with Debug MFEM (`build_debug`). vcpkg installed deps at `f:/dev/vcpkg/installed/x64-windows/`.
+
 ## 12. Implementation Phasing
 
 Although this spec covers the full scope, implementation will be phased:
