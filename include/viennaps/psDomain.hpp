@@ -8,6 +8,8 @@
 #include "psVTKRenderWindow.hpp"
 #include "psVersion.hpp"
 
+#include "fields/PhysicsField.hpp"
+
 #include <lsBooleanOperation.hpp>
 #include <lsDomain.hpp>
 #include <lsExpand.hpp>
@@ -66,6 +68,18 @@ private:
   MaterialMapType materialMap_ = nullptr;
   MetaDataLevel metaDataLevel_ = MetaDataLevel::NONE;
   MetaDataType metaData_;
+
+  // Unified physics field for dopants, defects, stress etc. (for high-fid parity)
+  std::shared_ptr<PhysicsField<NumericType>> physicsField_ = nullptr;
+
+public:
+  void setPhysicsField(std::shared_ptr<PhysicsField<NumericType>> field) {
+    physicsField_ = field;
+  }
+
+  std::shared_ptr<PhysicsField<NumericType>> getPhysicsField() const {
+    return physicsField_;
+  }
 
 public:
   // Default constructor.

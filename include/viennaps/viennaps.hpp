@@ -42,6 +42,20 @@
 #include <models/psTEOSDeposition.hpp>
 #include <models/psTEOSPECVD.hpp>
 #include <models/psWetEtching.hpp>
+#include <models/psAnalyticImplant.hpp>
+
+#include <fields/PhysicsField.hpp>
+#include <fields/MaterialPropertySystem.hpp>
+#include <fields/PhysicsKernel.hpp>
+#include <fields/SimpleDiffusionKernel.hpp>
+#include <fields/DiffusionKernel.hpp>
+#include <fields/FermiDiffusionKernel.hpp>
+#include <fields/SundialsTimeIntegrator.hpp>
+#include <fields/StressKernel.hpp>
+#include <fields/DefectClusterKernel.hpp>
+#include <ProcessOrchestrator.hpp>
+#include <process/psPhysicsFieldAdapter.hpp>
+#include <models/psBasicDiffusion.hpp>
 
 // These macros might be defined on some systems (MSCV), undefine them to avoid
 // conflicts

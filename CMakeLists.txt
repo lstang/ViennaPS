@@ -43,6 +43,33 @@ set(VIENNAPS_LOOKUP_DIRS
 
 list(APPEND CMAKE_PREFIX_PATH ${VIENNAPS_LOOKUP_DIRS})
 
+# Force skip vcpkg manifest install when using custom prebuilts (like your mfem in f:/dev/mfem/build)
+# This prevents "vcpkg install failed" when baseline doesn't have all ports or for custom setups.
+if(NOT DEFINED VCPKG_MANIFEST_INSTALL)
+  set(VCPKG_MANIFEST_INSTALL OFF CACHE BOOL "Skip vcpkg manifest install for prebuilt/custom deps" FORCE)
+endif()
+
+# --------------------------------------------------------------------------------------------------------
+# Early hints for custom / vcpkg dependencies (especially MFEM at user-specified location)
+# --------------------------------------------------------------------------------------------------------
+list(APPEND CMAKE_PREFIX_PATH
+     "f:/dev/mfem/build"
+     "F:/dev/vcpkg/installed/x64-windows")
+
+# Help transitive deps from VTK/HDF5 (zlib etc.) when using vcpkg toolchain
+if(NOT ZLIB_ROOT)
+  set(ZLIB_ROOT "F:/dev/vcpkg/installed/x64-windows" CACHE PATH "Hint for ZLIB used by VTK/HDF5")
+endif()
+if(NOT ZLIB_DIR)
+  set(ZLIB_DIR "F:/dev/vcpkg/installed/x64-windows/share/zlib" CACHE PATH "")
+endif()
+
+# Force early discovery of custom MFEM (build tree)
+if(EXISTS "f:/dev/mfem/build/MFEMConfig.cmake" OR EXISTS "F:/dev/mfem/build/MFEMConfig.cmake")
+  set(mfem_DIR "f:/dev/mfem/build" CACHE PATH "MFEM build/install tree containing MFEMConfig.cmake" FORCE)
+  set(MFEM_DIR "f:/dev/mfem/build" CACHE PATH "" FORCE)
+endif()
+
 # --------------------------------------------------------------------------------------------------------
 # Global CMake Configuration
 # └ We depend on the vtk python package for our python build and re-use
@@ -163,15 +190,28 @@ CPMAddPackage(
   EXCLUDE_FROM_ALL ${VIENNAPS_BUILD_PYTHON}
   OPTIONS "VIENNARAY_USE_GPU ${VIENNAPS_USE_GPU}")
 
-viennaps_prepare_vtk()
-
-set(_VIENNAPS_HAD_CMAKE_SKIP_INSTALL_RULES FALSE)
-if(DEFINED CMAKE_SKIP_INSTALL_RULES)
-  set(_VIENNAPS_HAD_CMAKE_SKIP_INSTALL_RULES TRUE)
-  set(_VIENNAPS_PREVIOUS_CMAKE_SKIP_INSTALL_RULES "${CMAKE_SKIP_INSTALL_RULES}")
+# --------------------------------------------------------------------------------------------------------
+# Pre-resolve common transitive dependencies that VTK/HDF5 pull in (ZLIB etc.)
+# This helps when vcpkg toolchain + manifest are used together with custom locations.
+# --------------------------------------------------------------------------------------------------------
+find_package(ZLIB QUIET)
+if(NOT ZLIB_FOUND)
+  set(ZLIB_ROOT "F:/dev/vcpkg/installed/x64-windows" CACHE PATH "" FORCE)
+  set(ZLIB_INCLUDE_DIR "F:/dev/vcpkg/installed/x64-windows/include" CACHE PATH "" FORCE)
+  if(EXISTS "F:/dev/vcpkg/installed/x64-windows/lib/zlib.lib")
+    set(ZLIB_LIBRARY "F:/dev/vcpkg/installed/x64-windows/lib/zlib.lib" CACHE FILEPATH "" FORCE)
+  elseif(EXISTS "F:/dev/vcpkg/installed/x64-windows/lib/zlibd.lib")
+    set(ZLIB_LIBRARY "F:/dev/vcpkg/installed/x64-windows/lib/zlibd.lib" CACHE FILEPATH "" FORCE)
+  endif()
+  find_package(ZLIB QUIET)
+endif()
+if(ZLIB_FOUND)
+  message(STATUS "[ViennaPS] ZLIB resolved: ${ZLIB_LIBRARIES}")
 endif()
 
-if(VIENNAPS_BUILD_PYTHON)
+viennaps_prepare_vtk()
+
+if(VIENNAPS_BUILD_PYTHON OR NOT VTK_FOUND)
   set(CMAKE_SKIP_INSTALL_RULES TRUE)
 endif()
 
@@ -183,14 +223,6 @@ CPMAddPackage(
   OPTIONS "VIENNALS_PRECOMPILE_HEADERS ${VIENNAPS_PRECOMPILE_HEADERS}"
           "VIENNALS_VTK_RENDERING ${VIENNAPS_VTK_RENDERING}" "VIENNALS_USE_GPU ${VIENNAPS_USE_GPU}")
 
-if(_VIENNAPS_HAD_CMAKE_SKIP_INSTALL_RULES)
-  set(CMAKE_SKIP_INSTALL_RULES "${_VIENNAPS_PREVIOUS_CMAKE_SKIP_INSTALL_RULES}")
-else()
-  unset(CMAKE_SKIP_INSTALL_RULES)
-endif()
-unset(_VIENNAPS_HAD_CMAKE_SKIP_INSTALL_RULES)
-unset(_VIENNAPS_PREVIOUS_CMAKE_SKIP_INSTALL_RULES)
-
 CPMAddPackage(
   NAME ViennaCS
   VERSION 2.0.1
@@ -198,6 +230,97 @@ CPMAddPackage(
   EXCLUDE_FROM_ALL ${VIENNAPS_BUILD_PYTHON})
 
 target_link_libraries(${PROJECT_NAME} INTERFACE ViennaCore ViennaLS ViennaRay ViennaCS)
+
+# --------------------------------------------------------------------------------------------------------
+# Multipysics Dependencies (for unified field layer, high-fidelity diffusion/stress)
+# --------------------------------------------------------------------------------------------------------
+# MFEM for FEM discretization of bulk fields (dopants, defects, stress)
+# We use a custom/prebuilt MFEM at f:/dev/mfem/build (not from vcpkg)
+set(_mfem_candidate "f:/dev/mfem/build")
+if(EXISTS "${_mfem_candidate}/MFEMConfig.cmake")
+  set(mfem_DIR "${_mfem_candidate}" CACHE PATH "Location of MFEMConfig.cmake (build or install tree)" FORCE)
+  set(MFEM_DIR "${_mfem_candidate}" CACHE PATH "" FORCE)
+endif()
+if(NOT mfem_DIR AND NOT MFEM_DIR)
+  set(mfem_DIR "f:/dev/mfem/build" CACHE PATH "Location of MFEMConfig.cmake (build or install tree)")
+endif()
+
+# Prioritize the custom MFEM location
+find_package(mfem CONFIG QUIET
+             HINTS "${mfem_DIR}" "${MFEM_DIR}" "${_mfem_candidate}"
+             PATHS "${mfem_DIR}" "${MFEM_DIR}" "${_mfem_candidate}"
+             NO_DEFAULT_PATH)
+if(mfem_FOUND)
+  message(STATUS "[ViennaPS] Found MFEM ${MFEM_VERSION} for multiphysics fields at ${mfem_DIR}")
+  message(STATUS "           MFEM_INCLUDE_DIRS=${MFEM_INCLUDE_DIRS}")
+
+  # If MFEM was built with CUDA, try to locate toolkit but do not fail configure
+  # (our current multiphysics code is host-only; full CUDA kernels later)
+  if(MFEM_USE_CUDA)
+    message(STATUS "[ViennaPS] MFEM built with CUDA support — locating CUDAToolkit (optional for now)")
+    if(NOT DEFINED CMAKE_CUDA_COMPILER AND EXISTS "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.4/bin/nvcc.exe")
+      set(CMAKE_CUDA_COMPILER "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.4/bin/nvcc.exe" CACHE FILEPATH "")
+    endif()
+    find_package(CUDAToolkit QUIET)
+    if(CUDAToolkit_FOUND)
+      message(STATUS "           CUDAToolkit version ${CUDAToolkit_VERSION}")
+    else()
+      message(WARNING "MFEM wants CUDA but CUDAToolkit not found — will link mfem but CUDA kernels disabled for now")
+    endif()
+    # Do NOT call enable_language(CUDA) here to avoid hard failure if no full CUDA setup for host compile.
+  endif()
+
+  if(TARGET mfem)
+    target_link_libraries(${PROJECT_NAME} INTERFACE mfem)
+  elseif(DEFINED MFEM_LIBRARY AND MFEM_LIBRARY)
+    target_link_libraries(${PROJECT_NAME} INTERFACE ${MFEM_LIBRARY})
+  else()
+    # Fallback: some build trees expose it via imported target after include
+    include("${mfem_DIR}/MFEMTargets.cmake" OPTIONAL)
+    if(TARGET mfem)
+      target_link_libraries(${PROJECT_NAME} INTERFACE mfem)
+    endif()
+  endif()
+
+  if(MFEM_INCLUDE_DIRS)
+    target_include_directories(${PROJECT_NAME} INTERFACE ${MFEM_INCLUDE_DIRS})
+  elseif(MFEM_INCLUDE_DIR)
+    target_include_directories(${PROJECT_NAME} INTERFACE ${MFEM_INCLUDE_DIR})
+  endif()
+
+  target_compile_definitions(${PROJECT_NAME} INTERFACE VIENNAPS_HAS_MFEM)
+else()
+  message(WARNING "[ViennaPS] MFEM not found (tried mfem_DIR=${mfem_DIR}). Multipysics features limited. Build MFEM or point -Dmfem_DIR=... to f:/dev/mfem/build")
+endif()
+
+# SUNDIALS for stiff time integration (diffusion, clustering, coupled systems)
+find_package(SUNDIALS CONFIG QUIET)
+if(SUNDIALS_FOUND)
+  message(STATUS "[ViennaPS] Found SUNDIALS for time integration")
+  target_link_libraries(${PROJECT_NAME} INTERFACE
+    SUNDIALS::cvode
+    SUNDIALS::ida
+    SUNDIALS::nvecserial
+    SUNDIALS::sunmatrixdense
+    SUNDIALS::sunlinsoldense
+    SUNDIALS::core)
+  target_compile_definitions(${PROJECT_NAME} INTERFACE VIENNAPS_HAS_SUNDIALS)
+else()
+  message(WARNING "[ViennaPS] SUNDIALS not found - time stepping for stiff systems limited.")
+endif()
+
+# Eigen3 for auxiliary linear algebra (used by amgcl adapters etc.)
+find_package(Eigen3 CONFIG QUIET)
+if(Eigen3_FOUND)
+  message(STATUS "[ViennaPS] Found Eigen3")
+  target_link_libraries(${PROJECT_NAME} INTERFACE Eigen3::Eigen)
+endif()
+
+# amgcl (local in 3rdparty) for AMG solvers/preconditioners
+# Use BUILD_INTERFACE to avoid "prefixed in the source directory" error for INTERFACE targets
+target_include_directories(${PROJECT_NAME} INTERFACE
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/3rdparty/amgcl>
+)
 
 # --------------------------------------------------------------------------------------------------------
 # Setup Sanitizer or Clang-Tidy
