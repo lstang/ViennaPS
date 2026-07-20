@@ -14,6 +14,8 @@
 #include <iostream>
 #include <memory>
 #include <cmath>
+#include <utility>
+#include <vector>
 
 namespace viennaps {
 
@@ -84,13 +86,58 @@ public:
               << " newOxideBottom=" << lastOxideBottom_ << "\n";
   }
 
+  /// Live material-map coupling: mark from a dense material-id sampler
+  /// (Domain MaterialMap / cell set query). Signature: matId = f(x,y,z).
+  /// This is the Domain-facing path without requiring ViennaLS headers here.
+  int markFromMaterialMap(
+      const std::function<int(double x, double y, double z)>& materialAt,
+      double x0 = -0.5, double x1 = 0.5, double y0 = 0.0, double y1 = 1.0,
+      int nx = 32, int ny = 32) {
+    if (!field_ || !materialAt) return 0;
+    field_->initMeshFromBounds(x0, x1, y0, y1, nx, ny);
+    field_->markMeshRegions(materialAt);
+    // Count unique materials in profile MaterialID
+    int nSi = 0, nOx = 0, nMask = 0, nAmb = 0;
+    auto n = field_->getProfileSize();
+    for (std::size_t i = 0; i < n; ++i) {
+      int m = field_->getMaterialAtNormalizedDepth(
+          static_cast<NumericType>(i) / static_cast<NumericType>(std::max<std::size_t>(1, n)));
+      if (m == 1) nSi++;
+      else if (m == 2) nOx++;
+      else if (m == 3) nMask++;
+      else nAmb++;
+    }
+    lastMapCounts_ = nSi + nOx + nMask + nAmb;
+    std::cout << "[GeometryFieldCoupler] markFromMaterialMap bins: Si=" << nSi
+              << " Ox=" << nOx << " Mask=" << nMask << " Amb=" << nAmb << "\n";
+    return lastMapCounts_;
+  }
+
+  /// Convenience: Domain-like LS stack inferred from material layers at depths.
+  /// materials ordered from surface to bulk, each with thickness in normalized y.
+  int markFromLayerStack(
+      const std::vector<std::pair<int, NumericType>>& layersFromSurface) {
+    if (!field_) return 0;
+    return markFromMaterialMap([=](double /*x*/, double y, double /*z*/) -> int {
+      NumericType depth = static_cast<NumericType>(y);
+      NumericType acc = 0;
+      for (const auto& [mat, th] : layersFromSurface) {
+        acc += th;
+        if (depth < static_cast<double>(acc)) return mat;
+      }
+      return 1; // default Si bulk
+    });
+  }
+
   NumericType getLastSurfaceY() const { return lastSurfaceY_; }
   NumericType getLastOxideBottom() const { return lastOxideBottom_; }
+  int getLastMapCounts() const { return lastMapCounts_; }
 
 private:
   std::shared_ptr<PhysicsField<NumericType>> field_;
   NumericType lastSurfaceY_ = NumericType(0.5);
   NumericType lastOxideBottom_ = NumericType(0.3);
+  int lastMapCounts_ = 0;
 };
 
 } // namespace viennaps

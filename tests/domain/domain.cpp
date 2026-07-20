@@ -13,6 +13,15 @@
 #include "fields/DefectClusterKernel.hpp"
 #include "fields/SundialsTimeIntegrator.hpp"
 #include "fields/GeometryFieldCoupler.hpp"
+#include "fields/AmgclSolver.hpp"
+#include "fields/BandLimitedSolver.hpp"
+#include "fields/MfemElasticityKernel.hpp"
+#include "fields/ParameterDatabase.hpp"
+#include "fields/SPERKernel.hpp"
+#include "fields/LocosDopingValidator.hpp"
+#include "models/psMCBcaImplant.hpp"
+#include "models/psSilicidation.hpp"
+#include "models/psLithography.hpp"
 #include "process/psPhysicsFieldAdapter.hpp"
 #include "ProcessOrchestrator.hpp"
 
@@ -22,6 +31,7 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace viennacore {
@@ -301,8 +311,198 @@ void RunTest() {
               << " OED-ish I=" << f3->getTotalDose("Interstitial") << "\n";
   }
 
+  // ========== Deferred Phase 1–2 items ==========
+  // MC BCA implant: channeling + cascade
+  {
+    auto fB = std::make_shared<Field>();
+    fB->setProfileSize(64);
+    viennaps::MCBcaImplant<NumericType, 2> bca;
+    bca.setEnergy(40);
+    bca.setDose(static_cast<NumericType>(1e13));
+    bca.setTilt(0);
+    bca.setCrystalMode("crystal");
+    bca.setChannelAxis("110");
+    bca.setNumIons(64);
+    bca.setSeed(7);
+    auto res = bca.applyFieldOnly(*fB);
+    VC_TEST_ASSERT(fB->getTotalDose("Dopant") > 0);
+    VC_TEST_ASSERT(fB->getTotalDose("NuclearDeposition") > 0);
+    VC_TEST_ASSERT(fB->getTotalDose("CascadeIons") > 0);
+    VC_TEST_ASSERT(res.channeledFraction > 0);
+    VC_TEST_ASSERT(res.totalCascadePairs > 0);
+    std::cout << "[bca-check] dopant=" << fB->getTotalDose("Dopant")
+              << " cascade=" << res.totalCascadePairs
+              << " channelFrac=" << res.channeledFraction
+              << " amorph=" << fB->getTotalDose("AmorphousFraction") << "\n";
+  }
+
+  // MFEM vector elasticity + stress tensor species
+  {
+    auto fE = std::make_shared<Field>();
+    fE->setProfileSize(16);
+    fE->initMeshFromBounds(0, 1, 0, 1, 12, 12);
+    viennaps::MfemElasticityKernel<NumericType> ek(1273.15);
+    ek.setPhysicsField(fE);
+    ek.setMaterialProperties(mats);
+    ek.setMismatchStrain(NumericType(0.002));
+    ek.setTractionMagnitude(NumericType(5));
+    ek.setup();
+    ek.evolve(1.0);
+    VC_TEST_ASSERT(fE->getTotalDose("VonMisesStress") > 0);
+    VC_TEST_ASSERT(fE->getTotalDose("StressXX") != 0 || fE->getTotalDose("HydrostaticStress") > 0);
+    std::cout << "[mfem-elastic-check] vonMises=" << fE->getTotalDose("VonMisesStress")
+              << " usedMFEM=" << (ek.usedMFEMSolve() ? 1 : 0)
+              << " StressXX=" << fE->getTotalDose("StressXX") << "\n";
+  }
+
+  // amgcl / Jacobi-CG profile diffusion solve
+  {
+    std::vector<NumericType> prof(32, 0);
+    prof[8] = NumericType(1e12);
+    auto ar = viennaps::solveProfileDiffusion(prof, NumericType(0.25));
+    VC_TEST_ASSERT(ar.ok);
+    NumericType sum = 0;
+    for (auto v : prof) sum += v;
+    VC_TEST_ASSERT(sum > 0);
+    std::cout << "[amgcl-check] ok=" << ar.ok << " usedAmgcl=" << ar.usedAmgcl
+              << " iters=" << ar.iters << " residual=" << ar.residual
+              << " sum=" << sum << "\n";
+  }
+
+  // Domain material-map live coupling (layer stack sampler)
+  {
+    auto fM = std::make_shared<Field>();
+    fM->setProfileSize(32);
+    viennaps::GeometryFieldCoupler<NumericType> geo(fM);
+    std::vector<std::pair<int, NumericType>> layers = {
+        {3, NumericType(0.05)}, // mask
+        {2, NumericType(0.15)}, // oxide
+        {1, NumericType(0.80)}, // Si
+    };
+    int counted = geo.markFromLayerStack(layers);
+    VC_TEST_ASSERT(counted > 0);
+    VC_TEST_ASSERT(fM->getMaterialAtNormalizedDepth(NumericType(0.02)) == 3);
+    VC_TEST_ASSERT(fM->getMaterialAtNormalizedDepth(NumericType(0.10)) == 2);
+    VC_TEST_ASSERT(fM->getMaterialAtNormalizedDepth(NumericType(0.50)) == 1);
+    std::cout << "[material-map-check] bins=" << counted
+              << " surface=" << fM->getMaterialAtNormalizedDepth(NumericType(0.02))
+              << " bulk=" << fM->getMaterialAtNormalizedDepth(NumericType(0.5)) << "\n";
+  }
+
+  // LOCOS doping qualitative regression
+  {
+    viennaps::LocosDopingValidator<NumericType> locos;
+    auto rep = locos.run();
+    VC_TEST_ASSERT(rep.ok);
+    VC_TEST_ASSERT(rep.oxideOpen > rep.oxideUnderMask);
+    VC_TEST_ASSERT(rep.oedDeltaI > 0);
+    std::cout << "[locos-check] ok=" << rep.ok << " beak=" << rep.beakLength
+              << " " << rep.message << "\n";
+  }
+
+  // 3D mesh + band-limited solve
+  {
+    auto f3d = std::make_shared<Field>();
+    f3d->setProfileSize(32);
+    f3d->injectImplantProfile("Dopant",
+                              std::vector<NumericType>(32, NumericType(1e12 / 32)));
+    viennaps::BandLimitedSolver<NumericType> band;
+    band.setDimension(3);
+    band.setBand(NumericType(0.25), NumericType(0.75));
+    band.initMesh(*f3d, 8);
+#ifdef VIENNAPS_HAS_MFEM
+    VC_TEST_ASSERT(f3d->getMeshDimension() == 3);
+#endif
+    auto br = band.diffuseSpeciesBand(*f3d, "Dopant", NumericType(0.2));
+    VC_TEST_ASSERT(br.ok);
+    VC_TEST_ASSERT(band.getLastActive() < band.getLastTotal());
+    VC_TEST_ASSERT(band.getLastActive() > 0);
+    std::cout << "[band3d-check] dimMesh=" << f3d->getMeshDimension()
+              << " active=" << band.getLastActive() << "/" << band.getLastTotal()
+              << " amgcl=" << br.usedAmgcl << "\n";
+  }
+
+  // Phase 2: Parameter DB inheritance + blend
+  {
+    viennaps::ParameterDatabase<NumericType> db;
+    VC_TEST_ASSERT(db.parentCount() > 0);
+    auto dSi = db.get("Si", "YoungModulus");
+    auto dPoly = db.get("PolySi", "YoungModulus");
+    VC_TEST_ASSERT(dPoly > 0);
+    auto blend = db.blend("Si", "SiO2", "YoungModulus", NumericType(0.5));
+    VC_TEST_ASSERT(blend > 0);
+    std::cout << "[paramdb-check] Si.E=" << dSi << " PolySi.E=" << dPoly
+              << " blendSiSiO2=" << blend << " parents=" << db.parentCount() << "\n";
+  }
+
+  // Phase 2: SPER
+  {
+    auto fS = std::make_shared<Field>();
+    fS->setProfileSize(16);
+    fS->addDose("AmorphousFraction", NumericType(1e12));
+    fS->addDose("Dopant", NumericType(1e12));
+    viennaps::SPERKernel<NumericType> sper(873.15);
+    sper.setPhysicsField(fS);
+    sper.setMaterialProperties(mats);
+    sper.setup();
+    sper.evolve(10.0);
+    VC_TEST_ASSERT(sper.getLastRegrown() > 0);
+    VC_TEST_ASSERT(fS->getTotalDose("EOR_Defects") > 0);
+    VC_TEST_ASSERT(fS->getTotalDose("CrystallineFraction") > 0);
+    std::cout << "[sper-check] regrown=" << sper.getLastRegrown()
+              << " EOR=" << fS->getTotalDose("EOR_Defects") << "\n";
+  }
+
+  // Phase 2: Silicidation
+  {
+    auto fSi = std::make_shared<Field>();
+    fSi->setProfileSize(16);
+    fSi->addDose("Dopant", NumericType(1e13));
+    auto db = std::make_shared<viennaps::ParameterDatabase<NumericType>>();
+    viennaps::SilicidationModel<NumericType> sil("NiSi", 773.15);
+    sil.setParameterDatabase(db);
+    sil.setMetalDose(NumericType(1e15));
+    sil.setTime(60);
+    auto th = sil.evolve(*fSi);
+    VC_TEST_ASSERT(th > 0);
+    VC_TEST_ASSERT(fSi->getTotalDose("SilicideThickness") > 0);
+    std::cout << "[silicide-check] thickness=" << th
+              << " stress=" << fSi->getTotalDose("SilicideStress") << "\n";
+  }
+
+  // Phase 2: Lithography aerial/mask
+  {
+    auto fL = std::make_shared<Field>();
+    fL->setProfileSize(64);
+    viennaps::LithographyModel<NumericType> litho;
+    litho.setWavelength(193);
+    litho.setNA(0.93);
+    litho.setThreshold(0.3);
+    litho.setLineWidth(0.08);
+    litho.setPitch(0.16);
+    litho.setNumLines(3);
+    litho.apply(*fL, 64);
+    VC_TEST_ASSERT(fL->getTotalDose("AerialImage") > 0);
+    VC_TEST_ASSERT(fL->getTotalDose("LithoMask") > 0);
+    VC_TEST_ASSERT(litho.getOpenFraction() > 0 && litho.getOpenFraction() < 1);
+    std::cout << "[litho-check] openFraction=" << litho.getOpenFraction()
+              << " maskDose=" << fL->getTotalDose("LithoMask") << "\n";
+  }
+
+  // Debug/CRT note compile-time marker
+  {
+#ifdef VIENNAPS_MFEM_CRT_NOTE
+    std::cout << "[crt-check] VIENNAPS_MFEM_CRT_NOTE defined (Release↔Release mfem)\n";
+#else
+    std::cout << "[crt-check] MFEM CRT note not defined (MFEM missing or non-MSVC)\n";
+#endif
+  }
+
   std::cout << "[domain test] Track 1 physics smoke passed (field-dofs CVODE + pair/charged + "
                "elastic + geo + clustering + adapter + orchestrator).\n";
+  std::cout << "[domain test] Deferred Phase1-2 markers: bca-check mfem-elastic-check "
+               "amgcl-check material-map-check locos-check band3d-check paramdb-check "
+               "sper-check silicide-check litho-check crt-check OK\n";
   std::cout << "[domain test] Multiphysics validation markers: dose-check state-check geo-check "
                "pair-check charged-check stress-check elastic-check cluster-check "
                "cvode-field-check adapter-check orchestrator-check OK\n";

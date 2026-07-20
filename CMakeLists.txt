@@ -289,6 +289,18 @@ if(mfem_FOUND)
   endif()
 
   target_compile_definitions(${PROJECT_NAME} INTERFACE VIENNAPS_HAS_MFEM)
+
+  # Debug vs Release CRT mismatch (MSVC MD/MDd) when linking a Release-prebuilt mfem.
+  # Option: build a matching Debug mfem, or force Release for multiphysics targets.
+  option(VIENNAPS_MFEM_REQUIRE_MATCHING_CRT
+         "Warn if CMAKE_BUILD_TYPE/config may mismatch prebuilt MFEM CRT" ON)
+  if(VIENNAPS_MFEM_REQUIRE_MATCHING_CRT AND MSVC)
+    message(STATUS
+      "[ViennaPS] MFEM linked from ${mfem_DIR}. "
+      "Use matching CRT: Release app ↔ Release mfem (MD). "
+      "Debug (MDd) against Release mfem is unsupported — build Debug mfem or use Release.")
+    target_compile_definitions(${PROJECT_NAME} INTERFACE VIENNAPS_MFEM_CRT_NOTE=1)
+  endif()
 else()
   message(WARNING "[ViennaPS] MFEM not found (tried mfem_DIR=${mfem_DIR}). Multipysics features limited. Build MFEM or point -Dmfem_DIR=... to f:/dev/mfem/build")
 endif()

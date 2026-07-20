@@ -54,11 +54,20 @@
 #include <fields/ChargedReactKernel.hpp>
 #include <fields/SundialsTimeIntegrator.hpp>
 #include <fields/StressKernel.hpp>
+#include <fields/MfemElasticityKernel.hpp>
 #include <fields/DefectClusterKernel.hpp>
 #include <fields/GeometryFieldCoupler.hpp>
+#include <fields/AmgclSolver.hpp>
+#include <fields/BandLimitedSolver.hpp>
+#include <fields/ParameterDatabase.hpp>
+#include <fields/SPERKernel.hpp>
+#include <fields/LocosDopingValidator.hpp>
 #include <ProcessOrchestrator.hpp>
 #include <process/psPhysicsFieldAdapter.hpp>
 #include <models/psBasicDiffusion.hpp>
+#include <models/psMCBcaImplant.hpp>
+#include <models/psSilicidation.hpp>
+#include <models/psLithography.hpp>
 
 // These macros might be defined on some systems (MSCV), undefine them to avoid
 // conflicts

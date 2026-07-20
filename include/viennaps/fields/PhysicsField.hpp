@@ -166,14 +166,7 @@ public:
 
   NumericType getConcentration(const std::string& species,
                                NumericType normalizedDepth01) const {
-#ifdef VIENNAPS_HAS_MFEM
-    if (gridFunctions_.count(species) && mesh_) {
-      mfem::Vector pt(mesh_->Dimension());
-      pt = 0.0;
-      if (pt.Size() > 1) pt[1] = static_cast<double>(normalizedDepth01) * 2.0;
-      return static_cast<NumericType>((*gridFunctions_.at(species)).GetValue(pt));
-    }
-#endif
+    // Profile path is authoritative for multiphysics smoke; MFEM GF is optional storage.
     auto it = profiles_.find(species);
     if (it == profiles_.end() || it->second.empty()) return NumericType(0);
     size_t idx = static_cast<size_t>(
@@ -298,6 +291,67 @@ public:
 #else
     (void)xMin; (void)xMax; (void)yMin; (void)yMax; (void)nx; (void)ny;
     std::cout << "[PhysicsField] initMeshFromBounds: MFEM not available, profile-only mode\n";
+#endif
+  }
+
+  /// 3D structured mesh for production / band-limited 3D validation.
+  void initMesh3D(double x0, double x1, double y0, double y1, double z0, double z1,
+                  int nx = 12, int ny = 12, int nz = 8) {
+#ifdef VIENNAPS_HAS_MFEM
+    mesh_ = std::make_unique<mfem::Mesh>(mfem::Mesh::MakeCartesian3D(
+        nx, ny, nz, mfem::Element::HEXAHEDRON, false, x1 - x0, y1 - y0, z1 - z0));
+    mesh_->Transform([&](const mfem::Vector& x, mfem::Vector& p) {
+      p = x;
+      p[0] += x0;
+      p[1] += y0;
+      p[2] += z0;
+    });
+    fec_ = std::make_unique<mfem::H1_FECollection>(1, 3);
+    fespace_ = std::make_unique<mfem::FiniteElementSpace>(mesh_.get(), fec_.get());
+    gridFunctions_.clear();
+    std::cout << "[PhysicsField] MFEM 3D mesh dofs=" << fespace_->GetTrueVSize()
+              << " ne=" << mesh_->GetNE() << "\n";
+#else
+    (void)x0; (void)x1; (void)y0; (void)y1; (void)z0; (void)z1;
+    (void)nx; (void)ny; (void)nz;
+    std::cout << "[PhysicsField] initMesh3D: MFEM not available\n";
+#endif
+  }
+
+  int getMeshDimension() const {
+#ifdef VIENNAPS_HAS_MFEM
+    return mesh_ ? mesh_->Dimension() : 0;
+#else
+    return 0;
+#endif
+  }
+
+  /// Pack true dofs of a species GridFunction (MFEM production path).
+  std::vector<double> packGridFunctionDofs(const std::string& species) const {
+    std::vector<double> out;
+#ifdef VIENNAPS_HAS_MFEM
+    auto it = gridFunctions_.find(species);
+    if (it == gridFunctions_.end() || !it->second) return out;
+    const mfem::GridFunction& gf = *it->second;
+    out.resize(gf.Size());
+    for (int i = 0; i < gf.Size(); ++i) out[i] = gf(i);
+#else
+    (void)species;
+#endif
+    return out;
+  }
+
+  void unpackGridFunctionDofs(const std::string& species,
+                              const std::vector<double>& dofs) {
+#ifdef VIENNAPS_HAS_MFEM
+    ensureGridFunction(species);
+    auto* gf = gridFunctions_[species].get();
+    if (!gf) return;
+    const int n = std::min(gf->Size(), static_cast<int>(dofs.size()));
+    for (int i = 0; i < n; ++i) (*gf)(i) = dofs[static_cast<std::size_t>(i)];
+#else
+    (void)species;
+    (void)dofs;
 #endif
   }
 

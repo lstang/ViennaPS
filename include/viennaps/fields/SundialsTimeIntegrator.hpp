@@ -95,6 +95,10 @@ public:
   /// Prefer packed field state (true) when field has species profiles.
   void setUseFieldState(bool v) { preferFieldState_ = v; }
 
+  /// When true and MFEM GridFunction exists for species, pack GF true dofs
+  /// (production path). Falls back to profile pack if GF missing.
+  void setUseMfemDofs(bool v) { preferMfemDofs_ = v; }
+
   void evolve(NumericType t0, NumericType tf, NumericType dt) {
     std::cout << "[SundialsTimeIntegrator] Evolving from t=" << t0 << " to " << tf << "\n";
 
@@ -113,6 +117,7 @@ private:
   std::vector<std::shared_ptr<PhysicsKernel<NumericType>>> kernels_;
   std::shared_ptr<PhysicsField<NumericType>> field_;
   bool preferFieldState_ = true;
+  bool preferMfemDofs_ = false;
 
   void evolveExplicit(NumericType t0, NumericType tf, NumericType dt) {
     NumericType t = t0;
@@ -139,8 +144,24 @@ private:
     std::vector<NumericType> packed;
     std::size_t packStride = 1; // subsample every packStride profile bins if needed
 
+    bool usedMfemDofs = false;
     if (useField) {
-      packed = field_->packState();
+#ifdef VIENNAPS_HAS_MFEM
+      if (preferMfemDofs_ && field_->getFESpace()) {
+        // Production: pack first species GF dofs (or Dopant)
+        std::string sp = "Dopant";
+        if (!field_->hasSpecies(sp) && !field_->getSpeciesOrder().empty())
+          sp = field_->getSpeciesOrder().front();
+        auto dofs = field_->packGridFunctionDofs(sp);
+        if (!dofs.empty()) {
+          packed.assign(dofs.begin(), dofs.end());
+          usedMfemDofs = true;
+          std::cout << "[SundialsTimeIntegrator] MFEM GridFunction dofs for "
+                    << sp << " n=" << dofs.size() << "\n";
+        }
+      }
+#endif
+      if (!usedMfemDofs) packed = field_->packState();
       neq = static_cast<int>(packed.size());
       // Dense SUNDIALS is O(n^3); cap for smoke tests
       const int maxDense = 256;
