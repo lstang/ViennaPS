@@ -1,16 +1,13 @@
 #pragma once
 
 /// PhysicsKernel base for the unified multiphysics framework.
-/// Inspired by MOOSE kernels: each kernel contributes to the residual/Jacobian
-/// of a coupled system (dopant diffusion, defect reactions, stress, etc.).
+/// Inspired by MOOSE kernels: each kernel contributes residual / Jacobian terms.
 ///
-/// In full implementation:
-/// - Kernels assemble into MFEM weak forms (Bilinear/Linear forms)
-/// - SUNDIALS (CVODE/IDA) drives time integration of the stiff nonlinear system
-/// - amgcl provides AMG preconditioned solves
+/// Two RHS styles:
+///   1. addToRHS(t, y, ydot, myIndex)  — legacy per-kernel scalar state
+///   2. addToFieldRHS(t, y, ydot)      — full packed multi-species profile state
 ///
-/// Currently provides a working stub interface for early integration with
-/// AnalyticImplant + BasicDiffusion and the Oxidation adapter.
+/// SundialsTimeIntegrator prefers (2) when the field has packable species state.
 
 #include <string>
 #include <memory>
@@ -33,7 +30,6 @@ public:
   virtual void setName(const std::string& n) { name_ = n; }
   const std::string& getName() const { return name_; }
 
-  // Associate with the unified field and material property system
   virtual void setPhysicsField(std::shared_ptr<PhysicsField<NumericType>> field) {
     field_ = field;
   }
@@ -41,29 +37,21 @@ public:
     material_ = mat;
   }
 
-  // Called once before time stepping (allocate temporaries, setup BCs, etc.)
   virtual void setup() {}
-
-  // Contribute to residual (for nonlinear solve / time integrator)
   virtual void computeResidual() {}
-
-  // Contribute to Jacobian (for implicit methods)
   virtual void computeJacobian() {}
 
-  // Simple explicit-style evolve for early demos and stub models
-  // Full version will be driven by SUNDIALS through the kernel assembly
-  virtual void evolve(NumericType dt) {
-    // Derived kernels override to advance their species/reactions
-  }
+  virtual void evolve(NumericType /*dt*/) {}
 
-  // Contribute to RHS for SUNDIALS/CVODE: ydot[myIndex] += f(t, y) from this kernel
-  // In the integrator, y is a flat vector (one entry per active kernel for demo).
-  // Real version: kernels would read/write MFEM dofs for their species.
-  virtual void addToRHS(NumericType t, const std::vector<NumericType>& y, std::vector<NumericType>& ydot, int myIndex) {
-    // Default: no contribution. Override in concrete kernels.
-  }
+  /// Legacy: one state entry per kernel.
+  virtual void addToRHS(NumericType /*t*/, const std::vector<NumericType>& /*y*/,
+                        std::vector<NumericType>& /*ydot*/, int /*myIndex*/) {}
 
-  // Hook for geometry change (level-set moved) — remap or invalidate cached data
+  /// Field-packed residual: y / ydot are concatenations of all species profiles.
+  /// Default no-op; diffusion / reaction kernels override.
+  virtual void addToFieldRHS(NumericType /*t*/, const std::vector<NumericType>& /*y*/,
+                             std::vector<NumericType>& /*ydot*/) {}
+
   virtual void onGeometryUpdate() {}
 
 protected:

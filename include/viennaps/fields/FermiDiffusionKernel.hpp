@@ -76,6 +76,25 @@ public:
     }
   }
 
+  void addToFieldRHS(NumericType /*t*/, const std::vector<NumericType>& y,
+                     std::vector<NumericType>& ydot) override {
+    if (!this->field_) return;
+    auto off = this->field_->getSpeciesOffset(species_);
+    if (off == static_cast<std::size_t>(-1)) return;
+    auto n = this->field_->getProfileSize();
+    if (off + n > y.size() || off + n > ydot.size()) return;
+
+    for (std::size_t i = 0; i < n; ++i) {
+      NumericType c = y[off + i];
+      NumericType Deff = D0_ * (NumericType(1) + c / std::max(Cref_, NumericType(1)));
+      NumericType Dscale =
+          std::min(NumericType(0.5), std::max(NumericType(1e-4), Deff * NumericType(1e10)));
+      NumericType left = (i > 0) ? y[off + i - 1] : c;
+      NumericType right = (i + 1 < n) ? y[off + i + 1] : c;
+      ydot[off + i] += Dscale * (left - NumericType(2) * c + right);
+    }
+  }
+
 private:
   std::string species_;
   NumericType T_ = 1273.15;

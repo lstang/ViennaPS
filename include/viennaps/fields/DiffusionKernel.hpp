@@ -1,9 +1,8 @@
 #pragma once
 
 /// DiffusionKernel - Transport kernel for dopant/defect diffusion.
-/// Uses MaterialPropertySystem for D(T, conc, stress).
-/// For now: explicit update on stub profiles (or MFEM GF in future).
-/// Later: assembles MFEM DiffusionIntegrator + mass, driven by SUNDIALS.
+/// Field-packed RHS: 1D discrete Laplacian on the species profile segment.
+/// Explicit evolve: mild profile smoothing + total-dose conserving scale.
 
 #include "PhysicsKernel.hpp"
 #include "PhysicsField.hpp"
@@ -11,6 +10,8 @@
 
 #include <iostream>
 #include <cmath>
+#include <algorithm>
+#include <vector>
 
 namespace viennaps {
 
@@ -28,45 +29,69 @@ public:
     if (this->material_) {
       D_ = this->material_->getDiffusivity(species_, "Si", T_);
     } else {
-      D_ = NumericType(1e-14); // fallback
+      D_ = NumericType(1e-14);
     }
-    std::cout << "[DiffusionKernel] " << species_ << " D=" << D_ << " cm^2/s at T=" << T_ << " K\n";
+    std::cout << "[DiffusionKernel] " << species_ << " D=" << D_ << " cm^2/s at T=" << T_
+              << " K\n";
   }
 
   void evolve(NumericType dt) override {
     if (!this->field_) return;
-
-    // Very simple explicit "diffusion" demo on the stub profile:
-    // In practice this will be replaced by MFEM + SUNDIALS time step.
-    // Here we just apply a decay/spread factor proportional to D*dt (toy model for visibility).
+    auto* prof = this->field_->getProfileMutable(species_);
+    if (!prof || prof->empty()) return;
 
     auto totalBefore = this->field_->getTotalDose(species_);
     if (totalBefore <= 0) return;
 
-    // Effective reduction factor (simulates some loss + spreading)
-    NumericType alpha = D_ * dt * NumericType(1e10); // tune scale for demo
-    NumericType factor = NumericType(1) / (NumericType(1) + alpha * 0.1);
-    if (factor < NumericType(0.7)) factor = NumericType(0.7);
+    // One explicit smoothing pass (conserves total approximately)
+    std::vector<NumericType> next = *prof;
+    NumericType alpha = std::min(NumericType(0.25), D_ * dt * NumericType(1e12));
+    for (std::size_t i = 1; i + 1 < prof->size(); ++i) {
+      next[i] = (*prof)[i] + alpha * ((*prof)[i - 1] - NumericType(2) * (*prof)[i] + (*prof)[i + 1]);
+      next[i] = std::max(NumericType(0), next[i]);
+    }
+    *prof = next;
 
-    this->field_->scaleProfile(species_, factor);
-
-    // TODO (MFEM path): when PhysicsField exposes GridFunction, we will
-    // assemble a simple mass-matrix update or call SUNDIALS here.
+    // Keep dose ~ stable under pure diffusion
+    NumericType sum = 0;
+    for (auto v : *prof) sum += v;
+    if (sum > 0 && totalBefore > 0) {
+      NumericType scale = totalBefore / sum;
+      for (auto& v : *prof) v *= scale;
+    }
+    this->field_->refreshDose(species_);
 
     std::cout << "[DiffusionKernel] " << species_ << " evolved dt=" << dt
-              << "  factor=" << factor
-              << "  total " << totalBefore << " -> " << this->field_->getTotalDose(species_) << "\n";
+              << "  total " << totalBefore << " -> " << this->field_->getTotalDose(species_)
+              << "\n";
   }
 
-  // Contribute rate to RHS for SUNDIALS: ydot = -alpha(D) * y  (collected by CVODE)
   void addToRHS(NumericType /*t*/, const std::vector<NumericType>& y,
                 std::vector<NumericType>& ydot, int myIndex) override {
     if (myIndex >= 0 && myIndex < static_cast<int>(ydot.size()) &&
         myIndex < static_cast<int>(y.size())) {
-      // Rate scaled from diffusivity so real D feeds the residual
       NumericType alpha = (D_ > 0) ? (D_ * NumericType(1e10)) : NumericType(0.01);
-      if (alpha > NumericType(1)) alpha = NumericType(1); // clamp for stability in demo
+      if (alpha > NumericType(1)) alpha = NumericType(1);
       ydot[myIndex] += -alpha * y[myIndex];
+    }
+  }
+
+  void addToFieldRHS(NumericType /*t*/, const std::vector<NumericType>& y,
+                     std::vector<NumericType>& ydot) override {
+    if (!this->field_) return;
+    auto off = this->field_->getSpeciesOffset(species_);
+    if (off == static_cast<std::size_t>(-1)) return;
+    auto n = this->field_->getProfileSize();
+    if (off + n > y.size() || off + n > ydot.size()) return;
+
+    // Dimensionless diffusion rate for packed residual (stable for CVODE demo)
+    NumericType Dscale = std::min(NumericType(0.5),
+                                  std::max(NumericType(1e-4), D_ * NumericType(1e12)));
+    for (std::size_t i = 0; i < n; ++i) {
+      NumericType left = (i > 0) ? y[off + i - 1] : y[off + i];
+      NumericType right = (i + 1 < n) ? y[off + i + 1] : y[off + i];
+      NumericType center = y[off + i];
+      ydot[off + i] += Dscale * (left - NumericType(2) * center + right);
     }
   }
 

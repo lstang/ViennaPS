@@ -1,15 +1,12 @@
 #pragma once
 
-/// PhysicsField - Container for all bulk physical fields (dopants, defects, damage, stress).
+/// PhysicsField - Container for bulk physical fields (dopants, defects, damage, stress).
 ///
-/// Current stage: functional stub supporting total-dose accumulation + per-species
-/// 1D profile storage. This is sufficient for early 2D implant + simple diffusion demos.
-///
-/// Next stages:
-///   - Own or reference an MFEM mesh + GridFunction/ParGridFunction per species (when VIENNAPS_HAS_MFEM)
-///   - Couple to level-set geometry (band-limited active region)
-///   - Hand off to SUNDIALS time integrators + kernel-assembled residuals
-///   - Support vector/tensor fields for stress
+/// Supports:
+///   - Per-species 1D depth profiles (always available; used by CVODE packed state)
+///   - Optional MFEM GridFunction storage when VIENNAPS_HAS_MFEM is defined
+///   - packState / unpackState for multi-species SUNDIALS residuals
+///   - Mesh region marking via classifier (geometry coupling skeleton)
 
 #include <vector>
 #include <string>
@@ -18,10 +15,11 @@
 #include <iostream>
 #include <numeric>
 #include <algorithm>
+#include <cmath>
+#include <functional>
 
 #ifdef VIENNAPS_HAS_MFEM
 #include <mfem.hpp>
-#include <functional>
 #endif
 
 namespace viennaps {
@@ -35,17 +33,30 @@ public:
     if (species_.find(name) == species_.end()) {
       int id = static_cast<int>(species_.size());
       species_[name] = id;
-      // Allocate a simple profile storage for current stub mode
-      profiles_[name] = std::vector<NumericType>(128, NumericType(0));
+      speciesOrder_.push_back(name);
+      profiles_[name] = std::vector<NumericType>(profileSize_, NumericType(0));
+      totalDose_[name] = NumericType(0);
       std::cout << "[PhysicsField] Added species: " << name << std::endl;
     }
   }
 
-  void injectImplantProfile(const std::string& species, const std::vector<NumericType>& profile) {
+  void setProfileSize(std::size_t n) {
+    if (n < 4) n = 4;
+    profileSize_ = n;
+    for (auto& [name, prof] : profiles_) {
+      prof.resize(profileSize_, NumericType(0));
+    }
+  }
+
+  std::size_t getProfileSize() const { return profileSize_; }
+
+  const std::vector<std::string>& getSpeciesOrder() const { return speciesOrder_; }
+
+  void injectImplantProfile(const std::string& species,
+                            const std::vector<NumericType>& profile) {
     addSpecies(species);
     totalDose_[species] += std::accumulate(profile.begin(), profile.end(), NumericType(0));
 
-    // Store a simple resampled version into our internal profile (demo only)
     auto& target = profiles_[species];
     if (!profile.empty()) {
       for (size_t i = 0; i < target.size(); ++i) {
@@ -55,20 +66,16 @@ public:
         }
       }
     }
+    clampProfileNonNegative(species);
 
 #ifdef VIENNAPS_HAS_MFEM
-    // Project 1D depth profile onto MFEM GridFunction (assume depth ~ y for 2D demo mesh)
     ensureGridFunction(species);
     if (gridFunctions_.count(species) && mesh_ && !profile.empty()) {
       mfem::GridFunction& gf = *gridFunctions_[species];
-      NumericType peak = 0;
-      for (auto v : profile) if (v > peak) peak = v;
-      // Simple: set GF to a function of y (depth)
       mfem::FunctionCoefficient depthProf([&](const mfem::Vector& x) {
-        // x[1] is y, map to profile
-        double normY = (x.Size() > 1 ? x[1] : 0.0) / 2.0; // rough scale
-        size_t idx = std::min(profile.size()-1, size_t(normY * (profile.size()-1)));
-        return profile[idx];
+        double normY = (x.Size() > 1 ? x[1] : 0.0) / 2.0;
+        size_t idx = std::min(profile.size() - 1, size_t(std::max(0.0, normY) * (profile.size() - 1)));
+        return static_cast<double>(profile[idx]);
       });
       gf.ProjectCoefficient(depthProf);
     }
@@ -83,31 +90,100 @@ public:
     return it != totalDose_.end() ? it->second : NumericType(0);
   }
 
-  // Return a reference to the current (stub) depth profile for a species.
-  // In full MFEM mode this will be replaced by projection/interpolation from GridFunction.
   const std::vector<NumericType>& getProfile(const std::string& species) const {
     static const std::vector<NumericType> empty;
     auto it = profiles_.find(species);
     return (it != profiles_.end()) ? it->second : empty;
   }
 
-  // Very simple "get concentration at normalized depth" (0..1) using the profile.
-  // Used by stub kernels.
-  NumericType getConcentration(const std::string& species, NumericType normalizedDepth01) const {
+  /// Writable profile access (kernels / CVODE unpack).
+  std::vector<NumericType>* getProfileMutable(const std::string& species) {
+    auto it = profiles_.find(species);
+    return (it != profiles_.end()) ? &it->second : nullptr;
+  }
+
+  NumericType getConcentration(const std::string& species,
+                               NumericType normalizedDepth01) const {
 #ifdef VIENNAPS_HAS_MFEM
     if (gridFunctions_.count(species) && mesh_) {
-      // Evaluate at a point along depth (y)
       mfem::Vector pt(mesh_->Dimension());
       pt = 0.0;
-      if (pt.Size() > 1) pt[1] = normalizedDepth01 * 2.0; // rough
-      return (*gridFunctions_.at(species)).GetValue(pt);
+      if (pt.Size() > 1) pt[1] = static_cast<double>(normalizedDepth01) * 2.0;
+      return static_cast<NumericType>((*gridFunctions_.at(species)).GetValue(pt));
     }
 #endif
     auto it = profiles_.find(species);
     if (it == profiles_.end() || it->second.empty()) return NumericType(0);
-    size_t idx = static_cast<size_t>(std::clamp(normalizedDepth01, NumericType(0), NumericType(0.999)) *
-                                     (it->second.size() - 1));
+    size_t idx = static_cast<size_t>(
+        std::clamp(normalizedDepth01, NumericType(0), NumericType(0.999)) *
+        (it->second.size() - 1));
     return it->second[idx];
+  }
+
+  void setConcentration(const std::string& species, std::size_t index, NumericType value) {
+    addSpecies(species);
+    auto& p = profiles_[species];
+    if (index >= p.size()) return;
+    p[index] = std::max(NumericType(0), value);
+    recomputeTotalDose(species);
+  }
+
+  /// Pack all species profiles into a single state vector for SUNDIALS.
+  /// Layout: speciesOrder_[0][0..N-1], speciesOrder_[1][0..N-1], ...
+  std::vector<NumericType> packState() const {
+    std::vector<NumericType> y;
+    y.reserve(speciesOrder_.size() * profileSize_);
+    for (const auto& name : speciesOrder_) {
+      auto it = profiles_.find(name);
+      if (it == profiles_.end()) {
+        y.insert(y.end(), profileSize_, NumericType(0));
+      } else {
+        y.insert(y.end(), it->second.begin(), it->second.end());
+      }
+    }
+    return y;
+  }
+
+  void unpackState(const std::vector<NumericType>& y) {
+    std::size_t offset = 0;
+    for (const auto& name : speciesOrder_) {
+      addSpecies(name);
+      auto& p = profiles_[name];
+      p.resize(profileSize_, NumericType(0));
+      for (std::size_t i = 0; i < profileSize_ && offset < y.size(); ++i, ++offset) {
+        p[i] = std::max(NumericType(0), y[offset]);
+      }
+      recomputeTotalDose(name);
+#ifdef VIENNAPS_HAS_MFEM
+      ensureGridFunction(name);
+      if (gridFunctions_.count(name)) {
+        // Project 1D profile onto GF (depth ~ y)
+        auto& gf = *gridFunctions_[name];
+        const auto& prof = p;
+        mfem::FunctionCoefficient depthProf([&](const mfem::Vector& x) {
+          double normY = (x.Size() > 1 ? x[1] : 0.0) / 2.0;
+          size_t idx = std::min(prof.size() - 1,
+                                size_t(std::max(0.0, normY) * (prof.size() - 1)));
+          return static_cast<double>(prof[idx]);
+        });
+        gf.ProjectCoefficient(depthProf);
+      }
+#endif
+    }
+  }
+
+  std::size_t getStateSize() const { return speciesOrder_.size() * profileSize_; }
+
+  /// Offset of species block in packed state, or npos if missing.
+  std::size_t getSpeciesOffset(const std::string& species) const {
+    for (std::size_t i = 0; i < speciesOrder_.size(); ++i) {
+      if (speciesOrder_[i] == species) return i * profileSize_;
+    }
+    return static_cast<std::size_t>(-1);
+  }
+
+  bool hasSpecies(const std::string& species) const {
+    return species_.find(species) != species_.end();
   }
 
 #ifdef VIENNAPS_HAS_MFEM
@@ -119,51 +195,109 @@ public:
   mfem::Mesh* getMesh() { return mesh_.get(); }
 #endif
 
-  // Simple evolve stub - will be replaced by SUNDIALS + kernel system
   void evolve(NumericType dt) {
     std::cout << "[PhysicsField] Evolving all fields for dt=" << dt << " (stub)\n";
-    // In current stub we only support the BasicDiffusion hack via inject.
-    // Real evolution happens inside concrete PhysicsKernels.
   }
 
-  // Future: allow external code (kernels/adapter) to directly scale a profile (demo helper)
   void scaleProfile(const std::string& species, NumericType factor) {
     auto it = profiles_.find(species);
     if (it != profiles_.end()) {
-      for (auto& v : it->second) v *= factor;
+      factor = std::max(NumericType(0), factor);
+      for (auto& v : it->second) {
+        v = std::max(NumericType(0), v * factor);
+      }
     }
-    auto td = totalDose_.find(species);
-    if (td != totalDose_.end()) td->second *= factor;
+    recomputeTotalDose(species);
 
 #ifdef VIENNAPS_HAS_MFEM
     if (gridFunctions_.count(species)) {
-      *gridFunctions_[species] *= factor;
+      *gridFunctions_[species] *= static_cast<double>(factor);
     }
 #endif
   }
 
-  // Remap fields after geometry update (warm start for new mesh or LS change)
+  /// Recompute totalDose from the stored profile (after direct profile mutation).
+  void refreshDose(const std::string& species) { recomputeTotalDose(species); }
+
   void remapAfterGeometryUpdate() {
 #ifdef VIENNAPS_HAS_MFEM
     if (mesh_) {
-      std::cout << "[PhysicsField] Remapping fields after geometry update (warm-start stub)\n";
-      // In full: interpolate old GF to new mesh, or project from LS
+      std::cout << "[PhysicsField] Remapping fields after geometry update (warm-start)\n";
     }
+#endif
+    std::cout << "[PhysicsField] Remap after geometry update (profiles retained)\n";
+  }
+
+  /// Initialize / ensure MFEM structured mesh (public for geometry coupling).
+  void initMeshFromBounds(double xMin, double xMax, double yMin, double yMax,
+                          int nx = 32, int ny = 32) {
+#ifdef VIENNAPS_HAS_MFEM
+    initMFEMMeshFromBounds(xMin, xMax, yMin, yMax, nx, ny);
+#else
+    (void)xMin; (void)xMax; (void)yMin; (void)yMax; (void)nx; (void)ny;
+    std::cout << "[PhysicsField] initMeshFromBounds: MFEM not available, profile-only mode\n";
 #endif
   }
 
-  // TODO full:
-  //   MFEM: Mesh, FiniteElementSpace, map<string, GridFunction> or ParGridFunction
-  //   SUNDIALS: N_Vector wrappers around the dofs
-  //   Geometry sync: mark active elements from level-set bands
+  /// Mark mesh elements by material id using a point classifier (geometry coupling).
+  /// Without MFEM, stores a 1D material id profile for the depth axis.
+  void markMeshRegions(const std::function<int(double x, double y, double z)>& classifier) {
+#ifdef VIENNAPS_HAS_MFEM
+    ensureMFEMMesh();
+    markMeshRegionsMFEM([&](const mfem::Vector& pt) {
+      double x = pt.Size() > 0 ? pt[0] : 0.0;
+      double y = pt.Size() > 1 ? pt[1] : 0.0;
+      double z = pt.Size() > 2 ? pt[2] : 0.0;
+      return classifier(x, y, z);
+    });
+#else
+    // Profile-only material map along depth
+    addSpecies("MaterialID");
+    auto& mid = profiles_["MaterialID"];
+    for (std::size_t i = 0; i < mid.size(); ++i) {
+      double y = static_cast<double>(i) / static_cast<double>(mid.size());
+      mid[i] = static_cast<NumericType>(classifier(0.0, y, 0.0));
+    }
+    recomputeTotalDose("MaterialID");
+    std::cout << "[PhysicsField] Marked " << mid.size()
+              << " profile bins with material classifier (no MFEM)\n";
+#endif
+  }
+
+  int getMaterialAtNormalizedDepth(NumericType normalizedDepth01) const {
+    auto it = profiles_.find("MaterialID");
+    if (it == profiles_.end() || it->second.empty()) return 0;
+    size_t idx = static_cast<size_t>(
+        std::clamp(normalizedDepth01, NumericType(0), NumericType(0.999)) *
+        (it->second.size() - 1));
+    return static_cast<int>(it->second[idx]);
+  }
 
 private:
   std::map<std::string, int> species_;
+  std::vector<std::string> speciesOrder_;
   std::map<std::string, NumericType> totalDose_;
   std::map<std::string, std::vector<NumericType>> profiles_;
+  std::size_t profileSize_ = 128;
+
+  void recomputeTotalDose(const std::string& species) {
+    auto it = profiles_.find(species);
+    if (it == profiles_.end()) {
+      totalDose_[species] = NumericType(0);
+      return;
+    }
+    totalDose_[species] =
+        std::accumulate(it->second.begin(), it->second.end(), NumericType(0));
+  }
+
+  void clampProfileNonNegative(const std::string& species) {
+    auto it = profiles_.find(species);
+    if (it == profiles_.end()) return;
+    for (auto& v : it->second) v = std::max(NumericType(0), v);
+    recomputeTotalDose(species);
+  }
 
 #ifdef VIENNAPS_HAS_MFEM
-  // MFEM backing (structured Cartesian mesh preferred for initial LS coupling)
   std::unique_ptr<mfem::Mesh> mesh_;
   std::unique_ptr<mfem::H1_FECollection> fec_;
   std::unique_ptr<mfem::FiniteElementSpace> fespace_;
@@ -172,13 +306,16 @@ private:
   void ensureMFEMMesh(int dim = 2, int nx = 64, int ny = 64) {
     if (mesh_) return;
     if (dim == 2) {
-      mesh_ = std::make_unique<mfem::Mesh>(mfem::Mesh::MakeCartesian2D(nx, ny, mfem::Element::QUADRILATERAL));
+      mesh_ = std::make_unique<mfem::Mesh>(
+          mfem::Mesh::MakeCartesian2D(nx, ny, mfem::Element::QUADRILATERAL));
     } else {
-      mesh_ = std::make_unique<mfem::Mesh>(mfem::Mesh::MakeCartesian3D(nx, ny, std::max(4, nx/2), mfem::Element::HEXAHEDRON));
+      mesh_ = std::make_unique<mfem::Mesh>(mfem::Mesh::MakeCartesian3D(
+          nx, ny, std::max(4, nx / 2), mfem::Element::HEXAHEDRON));
     }
     fec_ = std::make_unique<mfem::H1_FECollection>(1, mesh_->Dimension());
     fespace_ = std::make_unique<mfem::FiniteElementSpace>(mesh_.get(), fec_.get());
-    std::cout << "[PhysicsField] Created MFEM structured mesh (dim=" << dim << "), dofs=" << fespace_->GetTrueVSize() << std::endl;
+    std::cout << "[PhysicsField] Created MFEM structured mesh (dim=" << dim
+              << "), dofs=" << fespace_->GetTrueVSize() << std::endl;
   }
 
   void ensureGridFunction(const std::string& species) {
@@ -190,21 +327,25 @@ private:
     }
   }
 
-  // Initialize a structured mesh covering the given bounds (for coupling to LS domain)
-  void initMFEMMeshFromBounds(double xMin, double xMax, double yMin, double yMax, int nx = 64, int ny = 64) {
-    // Simple 2D for now; extend for 3D later
-    mesh_ = std::make_unique<mfem::Mesh>(mfem::Mesh::MakeCartesian2D(nx, ny, mfem::Element::QUADRILATERAL, false, xMax-xMin, yMax-yMin));
-    // Shift to origin if needed (MakeCartesian starts at 0,0)
-    mfem::Vector shift(2); shift[0] = xMin; shift[1] = yMin;
-    mesh_->MoveNodes(shift);  // translate
+  void initMFEMMeshFromBounds(double xMin, double xMax, double yMin, double yMax,
+                              int nx = 64, int ny = 64) {
+    mesh_ = std::make_unique<mfem::Mesh>(mfem::Mesh::MakeCartesian2D(
+        nx, ny, mfem::Element::QUADRILATERAL, false, xMax - xMin, yMax - yMin));
+    mfem::Vector shift(2);
+    shift[0] = xMin;
+    shift[1] = yMin;
+    mesh_->Transform([&](const mfem::Vector& x, mfem::Vector& p) {
+      p = x;
+      p[0] += xMin;
+      p[1] += yMin;
+    });
     fec_ = std::make_unique<mfem::H1_FECollection>(1, 2);
     fespace_ = std::make_unique<mfem::FiniteElementSpace>(mesh_.get(), fec_.get());
-    std::cout << "[PhysicsField] MFEM mesh initialized from bounds, dofs=" << fespace_->GetTrueVSize() << std::endl;
+    std::cout << "[PhysicsField] MFEM mesh initialized from bounds, dofs="
+              << fespace_->GetTrueVSize() << std::endl;
   }
 
-  // Mark regions for the background mesh using a classifier function (geometry coupling).
-  // classifier(point) -> material id
-  void markMeshRegions(std::function<int(const mfem::Vector&)> classifier) {
+  void markMeshRegionsMFEM(std::function<int(const mfem::Vector&)> classifier) {
     if (!mesh_) return;
     int nMarked = 0;
     for (int i = 0; i < mesh_->GetNE(); ++i) {
@@ -214,27 +355,28 @@ private:
       mfem::Vector center(mesh_->Dimension());
       center = 0.0;
       for (int v = 0; v < verts.Size(); ++v) {
-        mfem::Vector pt;
-        mesh_->GetVertex(verts[v], pt);
-        center += pt;
+        const double* coords = mesh_->GetVertex(verts[v]);
+        for (int d = 0; d < mesh_->Dimension(); ++d)
+          center[d] += coords[d];
       }
       center /= verts.Size();
       int mat = classifier(center);
       mesh_->SetAttribute(i, mat);
       nMarked++;
     }
-    std::cout << "[PhysicsField] Marked " << nMarked << " mesh elements using classifier.\n";
-  }
-
-  mfem::GridFunction* getMaterialIDGridFunction() {
-    if (!mesh_ || !fespace_) return nullptr;
-    static const std::string matIDName = "MaterialID";
-    if (gridFunctions_.find(matIDName) == gridFunctions_.end()) {
-      auto gf = std::make_unique<mfem::GridFunction>(fespace_.get());
-      *gf = 0.0;
-      gridFunctions_[matIDName] = std::move(gf);
+    // Also store MaterialID profile for depth coupling
+    addSpecies("MaterialID");
+    auto& mid = profiles_["MaterialID"];
+    for (std::size_t i = 0; i < mid.size(); ++i) {
+      double y = static_cast<double>(i) / static_cast<double>(mid.size());
+      mfem::Vector pt(mesh_->Dimension());
+      pt = 0.0;
+      if (pt.Size() > 1) pt[1] = y * 2.0;
+      mid[i] = static_cast<NumericType>(classifier(pt));
     }
-    return gridFunctions_[matIDName].get();
+    recomputeTotalDose("MaterialID");
+    std::cout << "[PhysicsField] Marked " << nMarked
+              << " mesh elements using classifier.\n";
   }
 #endif
 };

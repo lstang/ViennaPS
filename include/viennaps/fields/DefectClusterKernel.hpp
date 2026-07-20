@@ -81,11 +81,39 @@ public:
     ydot[myIndex] += -rate * y[myIndex];
   }
 
+  void addToFieldRHS(NumericType /*t*/, const std::vector<NumericType>& y,
+                     std::vector<NumericType>& ydot) override {
+    if (!this->field_) return;
+    auto offI = this->field_->getSpeciesOffset("Interstitial");
+    auto offV = this->field_->getSpeciesOffset("Vacancy");
+    auto n = this->field_->getProfileSize();
+    if (offI == static_cast<std::size_t>(-1) || offI + n > y.size()) return;
+
+    NumericType rate = NumericType(0.05);
+    if (model_ == "recomb") rate = NumericType(0.08);
+    else if (model_ == "311") rate = NumericType(0.05);
+    else if (model_ == "bic") rate = NumericType(0.04);
+    else if (model_ == "loop") rate = NumericType(0.03);
+
+    for (std::size_t i = 0; i < n; ++i) {
+      NumericType Ii = std::max(NumericType(0), y[offI + i]);
+      ydot[offI + i] += -rate * Ii;
+      if (offV != static_cast<std::size_t>(-1) && offV + n <= y.size() &&
+          (model_ == "recomb" || model_ == "combined")) {
+        NumericType Vi = std::max(NumericType(0), y[offV + i]);
+        NumericType r = std::min(Ii, Vi) * rate;
+        ydot[offI + i] += -r;
+        ydot[offV + i] += -r;
+      }
+    }
+  }
+
 private:
   void runRecombination(NumericType dt) {
-    NumericType I = this->field_->getTotalDose("Interstitial");
-    NumericType V = this->field_->getTotalDose("Vacancy");
-    NumericType recomb = std::min(I, V) * NumericType(0.15) * dt;
+    NumericType I = std::max(NumericType(0), this->field_->getTotalDose("Interstitial"));
+    NumericType V = std::max(NumericType(0), this->field_->getTotalDose("Vacancy"));
+    NumericType recomb = std::min(I, V) * NumericType(0.15) * std::min(dt, NumericType(1));
+    recomb = std::min(recomb, std::min(I, V) * NumericType(0.9));
     if (recomb <= 0) return;
     if (I > 0) this->field_->scaleProfile("Interstitial", (I - recomb) / I);
     if (V > 0) this->field_->scaleProfile("Vacancy", (V - recomb) / V);

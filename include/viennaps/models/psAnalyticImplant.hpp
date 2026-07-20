@@ -17,6 +17,8 @@
 #include <cmath>
 #include <vector>
 #include <map>
+#include <utility>
+#include <algorithm>
 
 namespace viennaps {
 
@@ -66,14 +68,9 @@ public:
     auto profile = computeAnalyticProfile(params_.model, params_.dose, Rp, dRp, 128);
 
     if (params_.model == "mc" || params_.model == "bca") {
-      // Basic MC/BCA simulation for Track 1
-      std::vector<NumericType> mc(128, 0);
-      for (int i = 0; i < 128; ++i) {
-        NumericType depth = i * Rp / 64.0;
-        mc[i] = params_.dose / 128.0 * std::exp(-0.5 * std::pow((depth - Rp) / dRp, 2)) * (1.0 + 0.3 * ((i % 5) - 2));
-      }
-      profile = mc;
-      std::cout << "  MC/BCA sampling applied.\n";
+      // Improved MC/BCA sampling stub: nuclear stopping peak + electronic tail + noise
+      profile = computeMCSampledProfile(params_.dose, Rp, dRp, 128);
+      std::cout << "  MC/BCA sampling applied (nuclear peak + electronic tail).\n";
     }
 
     // Use domain's field if set, else create
@@ -90,15 +87,22 @@ public:
     fld->addSpecies("Interstitial");
     fld->addSpecies("Vacancy");
 
-    // Damage model (Hobler-like simplified): ~ 0.3 * dose in point defects + amorphization tail
-    NumericType damageFactor = 0.3;
-    std::vector<NumericType> iDamage = profile;
-    for (auto& v : iDamage) v *= damageFactor;
-    fld->injectImplantProfile("Interstitial", iDamage);
+    // Hobler-like damage: peak damage slightly shallower than dopant Rp, I/V asymmetry
+    auto damage = computeHoblerDamage(profile, params_.energy, params_.dose);
+    fld->injectImplantProfile("Interstitial", damage.first);
+    fld->injectImplantProfile("Vacancy", damage.second);
 
-    std::vector<NumericType> vDamage = profile;
-    for (auto& v : vDamage) v *= damageFactor * 0.8;  // slightly less V
-    fld->injectImplantProfile("Vacancy", vDamage);
+    // Amorphous fraction proxy when dose*energy high
+    NumericType amorphDose = params_.dose * (params_.energy / NumericType(50));
+    if (amorphDose > NumericType(5e13)) {
+      fld->addSpecies("AmorphousFraction");
+      std::vector<NumericType> am(profile.size());
+      for (size_t i = 0; i < profile.size(); ++i) {
+        am[i] = std::min(NumericType(1), damage.first[i] / NumericType(1e20));
+      }
+      fld->injectImplantProfile("AmorphousFraction", am);
+      std::cout << "  Amorphization proxy injected (dose*E threshold exceeded).\n";
+    }
 
     // TODO: full integration - project onto LS/MFEM mesh, GDS masks, multilayer stopping powers
     // Use domain materials + material_ system to choose Rp, straggle etc.
@@ -150,6 +154,54 @@ public:
       }
     }
     return prof;
+  }
+
+  /// MC-like sampled profile: nuclear stopping (shallow Gaussian) + electronic channeling tail.
+  static std::vector<NumericType> computeMCSampledProfile(NumericType dose, NumericType Rp,
+                                                          NumericType dRp, int nPoints = 128) {
+    std::vector<NumericType> mc(nPoints, 0);
+    NumericType dz = (Rp * 4.0) / nPoints;
+    NumericType Rn = Rp * NumericType(0.85); // nuclear peak shallower
+    NumericType dRn = dRp * NumericType(0.7);
+    NumericType Re = Rp * NumericType(1.7);  // electronic / channeling
+    NumericType dRe = dRp * NumericType(2.0);
+    // LCG noise for stochastic sampling appearance (deterministic seed)
+    unsigned seed = 12345u;
+    auto rnd = [&]() {
+      seed = seed * 1664525u + 1013904223u;
+      return NumericType(seed & 0xFFFF) / NumericType(65535);
+    };
+    for (int i = 0; i < nPoints; ++i) {
+      NumericType z = i * dz;
+      NumericType nuclear =
+          NumericType(0.75) * std::exp(-NumericType(0.5) * std::pow((z - Rn) / dRn, 2));
+      NumericType electronic =
+          NumericType(0.25) * std::exp(-NumericType(0.5) * std::pow((z - Re) / dRe, 2));
+      NumericType noise = NumericType(1) + NumericType(0.15) * (rnd() - NumericType(0.5));
+      mc[i] = (dose / nPoints) * (nuclear + electronic) * noise * nPoints /
+              (dRn * std::sqrt(2 * 3.14159265));
+      if (mc[i] < 0) mc[i] = 0;
+    }
+    return mc;
+  }
+
+  /// Hobler-style I/V damage profiles from dopant profile + energy.
+  static std::pair<std::vector<NumericType>, std::vector<NumericType>>
+  computeHoblerDamage(const std::vector<NumericType>& dopantProfile, NumericType energyKeV,
+                      NumericType dose) {
+    const size_t n = dopantProfile.size();
+    std::vector<NumericType> I(n, 0), V(n, 0);
+    // Frenkel pairs ~ energy / Ed (~15 eV), scaled; damage peak shift ~ 0.8 of dopant depth
+    NumericType pairsPerIon = std::max(NumericType(1), energyKeV * NumericType(1000) / NumericType(15) * NumericType(0.01));
+    NumericType damageFactor = NumericType(0.25) + NumericType(0.05) * std::log10(std::max(dose, NumericType(1e10)));
+    for (size_t i = 0; i < n; ++i) {
+      size_t src = static_cast<size_t>(i * 10 / 8); // shallower peak
+      if (src >= n) src = n - 1;
+      NumericType d = dopantProfile[src] * damageFactor * pairsPerIon / NumericType(100);
+      I[i] = d;
+      V[i] = d * NumericType(0.85); // slight I surplus typical after implant
+    }
+    return {I, V};
   }
 
 private:

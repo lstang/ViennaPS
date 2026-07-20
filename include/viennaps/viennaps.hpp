@@ -50,9 +50,12 @@
 #include <fields/SimpleDiffusionKernel.hpp>
 #include <fields/DiffusionKernel.hpp>
 #include <fields/FermiDiffusionKernel.hpp>
+#include <fields/PairDiffusionKernel.hpp>
+#include <fields/ChargedReactKernel.hpp>
 #include <fields/SundialsTimeIntegrator.hpp>
 #include <fields/StressKernel.hpp>
 #include <fields/DefectClusterKernel.hpp>
+#include <fields/GeometryFieldCoupler.hpp>
 #include <ProcessOrchestrator.hpp>
 #include <process/psPhysicsFieldAdapter.hpp>
 #include <models/psBasicDiffusion.hpp>
