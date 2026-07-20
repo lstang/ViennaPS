@@ -52,37 +52,99 @@ public:
 
   const std::vector<std::string>& getSpeciesOrder() const { return speciesOrder_; }
 
+  /// Inject a depth profile. Integral of `profile` is conserved into totalDose
+  /// and into the internal bins (no N× inflation when profile.size()==1 or when
+  /// resampling to a different profileSize).
   void injectImplantProfile(const std::string& species,
                             const std::vector<NumericType>& profile) {
     addSpecies(species);
-    totalDose_[species] += std::accumulate(profile.begin(), profile.end(), NumericType(0));
+    if (profile.empty()) return;
 
+    const NumericType injected =
+        std::accumulate(profile.begin(), profile.end(), NumericType(0));
     auto& target = profiles_[species];
-    if (!profile.empty()) {
-      for (size_t i = 0; i < target.size(); ++i) {
-        size_t src = i * profile.size() / target.size();
-        if (src < profile.size()) {
-          target[i] += profile[src];
-        }
+    const std::size_t n = target.size();
+    if (n == 0) return;
+
+    if (profile.size() == 1) {
+      // Single value = total dose increment, spread uniformly across bins.
+      const NumericType per = injected / static_cast<NumericType>(n);
+      for (auto& v : target) v += per;
+    } else if (profile.size() == n) {
+      for (std::size_t i = 0; i < n; ++i) target[i] += profile[i];
+    } else {
+      // Resample with integral conservation.
+      std::vector<NumericType> sampled(n, NumericType(0));
+      NumericType sampledSum = 0;
+      for (std::size_t i = 0; i < n; ++i) {
+        const double t = (n == 1) ? 0.0 : static_cast<double>(i) / static_cast<double>(n - 1);
+        const double srcF = t * static_cast<double>(profile.size() - 1);
+        const std::size_t i0 = static_cast<std::size_t>(srcF);
+        const std::size_t i1 = std::min(profile.size() - 1, i0 + 1);
+        const double frac = srcF - static_cast<double>(i0);
+        sampled[i] = static_cast<NumericType>(
+            (1.0 - frac) * static_cast<double>(profile[i0]) +
+            frac * static_cast<double>(profile[i1]));
+        sampledSum += sampled[i];
+      }
+      if (sampledSum > 0 && injected != 0) {
+        const NumericType scale = injected / sampledSum;
+        for (std::size_t i = 0; i < n; ++i) target[i] += sampled[i] * scale;
+      } else if (injected != 0) {
+        const NumericType per = injected / static_cast<NumericType>(n);
+        for (auto& v : target) v += per;
       }
     }
+
     clampProfileNonNegative(species);
+    // totalDose is the sum of bins after clamp (conserves injected if non-negative)
+    // Restore exact cumulative total: previous + injected (clamped profile sum may drift)
+    // Prefer recomputed non-negative integral as source of truth.
+    recomputeTotalDose(species);
 
 #ifdef VIENNAPS_HAS_MFEM
     ensureGridFunction(species);
-    if (gridFunctions_.count(species) && mesh_ && !profile.empty()) {
+    if (gridFunctions_.count(species) && mesh_) {
       mfem::GridFunction& gf = *gridFunctions_[species];
+      const auto& prof = target;
       mfem::FunctionCoefficient depthProf([&](const mfem::Vector& x) {
         double normY = (x.Size() > 1 ? x[1] : 0.0) / 2.0;
-        size_t idx = std::min(profile.size() - 1, size_t(std::max(0.0, normY) * (profile.size() - 1)));
-        return static_cast<double>(profile[idx]);
+        size_t idx = std::min(prof.size() - 1,
+                              size_t(std::max(0.0, normY) * (prof.size() - 1)));
+        return static_cast<double>(prof[idx]);
       });
       gf.ProjectCoefficient(depthProf);
     }
 #endif
 
     std::cout << "[PhysicsField] Injected " << species
+              << "  delta=" << injected
               << "  totalDose=" << totalDose_[species] << std::endl;
+  }
+
+  /// Add an absolute dose increment (conserved; not multiplied by profileSize).
+  void addDose(const std::string& species, NumericType amount) {
+    if (amount == 0) return;
+    injectImplantProfile(species, std::vector<NumericType>(1, amount));
+  }
+
+  /// Replace species total dose with an absolute value (uniform bins).
+  void setSpeciesDose(const std::string& species, NumericType dose) {
+    addSpecies(species);
+    dose = std::max(NumericType(0), dose);
+    auto& p = profiles_[species];
+    const NumericType per =
+        p.empty() ? NumericType(0) : dose / static_cast<NumericType>(p.size());
+    for (auto& v : p) v = per;
+    totalDose_[species] = dose;
+
+#ifdef VIENNAPS_HAS_MFEM
+    ensureGridFunction(species);
+    if (gridFunctions_.count(species) && mesh_) {
+      mfem::ConstantCoefficient c(static_cast<double>(per));
+      gridFunctions_[species]->ProjectCoefficient(c);
+    }
+#endif
   }
 
   NumericType getTotalDose(const std::string& species) const {

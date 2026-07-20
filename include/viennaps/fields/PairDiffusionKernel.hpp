@@ -59,8 +59,7 @@ public:
       this->field_->scaleProfile("Interstitial", keep);
     }
 
-    this->field_->addSpecies("PairBI");
-    this->field_->injectImplantProfile("PairBI", std::vector<NumericType>(1, pairRate));
+    this->field_->addDose("PairBI", pairRate);
 
     std::cout << "[PairDiffusionKernel] pairRate=" << pairRate << " dt=" << dt
               << " B=" << this->field_->getTotalDose(dopant_)

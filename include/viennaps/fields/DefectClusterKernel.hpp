@@ -117,9 +117,7 @@ private:
     if (recomb <= 0) return;
     if (I > 0) this->field_->scaleProfile("Interstitial", (I - recomb) / I);
     if (V > 0) this->field_->scaleProfile("Vacancy", (V - recomb) / V);
-    this->field_->addSpecies("RecombinedIV");
-    this->field_->injectImplantProfile("RecombinedIV",
-                                       std::vector<NumericType>(1, recomb));
+    this->field_->addDose("RecombinedIV", recomb);
   }
 
   void run311(NumericType dt) {
@@ -129,8 +127,7 @@ private:
     NumericType excessI = I - V;
     if (excessI <= 0) return;
     NumericType cluster = excessI * NumericType(0.08) * dt;
-    this->field_->injectImplantProfile("Cluster311",
-                                       std::vector<NumericType>(1, cluster));
+    this->field_->addDose("Cluster311", cluster);
     if (I > 0)
       this->field_->scaleProfile("Interstitial",
                                  std::max(NumericType(0.5), (I - cluster) / I));
@@ -145,7 +142,7 @@ private:
     NumericType I = this->field_->getTotalDose("Interstitial");
     NumericType form = std::min(B, I) * NumericType(0.06) * dt;
     if (form <= 0) return;
-    this->field_->injectImplantProfile("BIC", std::vector<NumericType>(1, form));
+    this->field_->addDose("BIC", form);
     if (B > 0) this->field_->scaleProfile("Dopant", (B - form) / B);
     if (I > 0) this->field_->scaleProfile("Interstitial", (I - form) / I);
   }
@@ -157,8 +154,7 @@ private:
     NumericType I = this->field_->getTotalDose("Interstitial");
     if (I <= 0) return;
     NumericType loop = I * NumericType(0.04) * dt;
-    this->field_->injectImplantProfile("DislocationLoop",
-                                       std::vector<NumericType>(1, loop));
+    this->field_->addDose("DislocationLoop", loop);
     this->field_->scaleProfile("Interstitial",
                                std::max(NumericType(0.6), (I - loop) / I));
   }

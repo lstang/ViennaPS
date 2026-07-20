@@ -60,9 +60,9 @@ public:
     NumericType growthStress =
         this->material_ ? this->material_->getProperty("Si", "GrowthStress", T_) : 300.0e6;
     NumericType currentGrowth = this->field_->getTotalDose("GrowthStress");
+    // Absolute bookkeeping: set totals (do not accumulate size-1 injects)
     NumericType newGrowth = currentGrowth + growthStress * 0.01 * dt;
-
-    this->field_->injectImplantProfile("GrowthStress", std::vector<NumericType>(1, newGrowth));
+    this->field_->setSpeciesDose("GrowthStress", newGrowth);
 
     NumericType G = E_ / (2.0 * (1.0 + nu_));
     NumericType tau = (eta_ > 0) ? (eta_ / G) * 1e-9 : 1e10;
@@ -70,9 +70,7 @@ public:
     NumericType relaxed =
         currentStress * std::exp(-dt / std::max(tau, NumericType(1e-6)));
     NumericType totalStress = relaxed + newGrowth * 0.1;
-
-    this->field_->injectImplantProfile("HydrostaticStress",
-                                       std::vector<NumericType>(1, totalStress));
+    this->field_->setSpeciesDose("HydrostaticStress", totalStress);
 
     std::cout << "[ViscoelasticStressKernel] stress evolved dt=" << dt
               << "  hydrostatic=" << totalStress / 1e6 << " MPa (relaxed)\n";
@@ -152,25 +150,17 @@ public:
     NumericType target = sigma;
     NumericType updated = current + (target - current) * std::min(NumericType(1), dt * NumericType(0.1));
 
-    this->field_->injectImplantProfile("ElasticStress",
-                                       std::vector<NumericType>(1, updated));
-    // Couple into hydrostatic channel for oxidation adapter
-    this->field_->injectImplantProfile("HydrostaticStress",
-                                       std::vector<NumericType>(1, updated * NumericType(0.5)));
+    this->field_->setSpeciesDose("ElasticStress", updated);
+    // Couple into hydrostatic channel for oxidation adapter (absolute set)
+    this->field_->setSpeciesDose("HydrostaticStress", updated * NumericType(0.5));
 
 #ifdef VIENNAPS_HAS_MFEM
     // Project hydrostatic residual onto MFEM GF if mesh exists
     if (this->field_->getMesh() && this->field_->getFESpace()) {
       auto* gf = this->field_->getGridFunction("HydrostaticStress");
-      if (!gf) {
-        this->field_->injectImplantProfile("HydrostaticStress",
-                                           std::vector<NumericType>(1, updated));
-        gf = this->field_->getGridFunction("HydrostaticStress");
-      }
       if (gf) {
-        mfem::ConstantCoefficient sigmaCoef(static_cast<double>(updated));
+        mfem::ConstantCoefficient sigmaCoef(static_cast<double>(updated * NumericType(0.5)));
         gf->ProjectCoefficient(sigmaCoef);
-        // Assemble a mass residual check (elasticity skeleton)
         mfem::BilinearForm mass(this->field_->getFESpace());
         mass.AddDomainIntegrator(new mfem::MassIntegrator);
         mass.Assemble();

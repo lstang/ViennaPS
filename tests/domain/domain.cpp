@@ -40,6 +40,24 @@ void RunTest() {
   mats->setProperty("Si", "PoissonRatio", 0.28);
   mats->setProperty("Si", "GrowthStress", 300.0e6);
 
+  // Dose integrity: size-1 inject must NOT inflate by profileSize
+  {
+    auto fDose = std::make_shared<Field>();
+    fDose->setProfileSize(16);
+    fDose->addDose("Probe", NumericType(3e6));
+    auto d = fDose->getTotalDose("Probe");
+    VC_TEST_ASSERT(std::abs(d - NumericType(3e6)) < NumericType(1e-3) * NumericType(3e6) + NumericType(1));
+    // Not inflated to 16 * 3e6
+    VC_TEST_ASSERT(d < NumericType(3e6) * NumericType(2));
+    fDose->addDose("Probe", NumericType(1e6));
+    VC_TEST_ASSERT(std::abs(fDose->getTotalDose("Probe") - NumericType(4e6)) <
+                   NumericType(1e-3) * NumericType(4e6) + NumericType(1));
+    fDose->setSpeciesDose("Probe", NumericType(5e5));
+    VC_TEST_ASSERT(std::abs(fDose->getTotalDose("Probe") - NumericType(5e5)) < NumericType(1));
+    std::cout << "[dose-check] size-1 addDose/setSpeciesDose conserved: Probe="
+              << fDose->getTotalDose("Probe") << " (profileSize=16)\n";
+  }
+
   // Implant-like seed
   std::vector<NumericType> profile(32, static_cast<NumericType>(1e12 / 32));
   field->injectImplantProfile("Dopant", profile);
@@ -47,6 +65,9 @@ void RunTest() {
   field->injectImplantProfile("Vacancy",
                               std::vector<NumericType>(32, static_cast<NumericType>(5e11 / 32)));
   VC_TEST_ASSERT(field->getTotalDose("Dopant") > 0);
+  // Multi-bin inject conserves integral (~1e12)
+  VC_TEST_ASSERT(std::abs(field->getTotalDose("Dopant") - NumericType(1e12)) <
+                 NumericType(1e12) * NumericType(1e-6) + NumericType(1));
   VC_TEST_ASSERT(field->getStateSize() == field->getSpeciesOrder().size() * 32);
 
   // Pack / unpack round-trip
@@ -110,11 +131,23 @@ void RunTest() {
               << " V=" << field->getTotalDose("Vacancy") << "\n";
   }
   {
+    // Fresh field for stress so totals are absolute, not N-inflated
+    auto fS = std::make_shared<Field>();
+    fS->setProfileSize(16);
     viennaps::ViscoelasticStressKernel<NumericType> k(1273.15);
-    k.setPhysicsField(field);
+    k.setPhysicsField(fS);
     k.setMaterialProperties(mats);
     k.setup();
     k.evolve(30.0);
+    // GrowthStress = 0 + 300e6 * 0.01 * 30 = 9e7
+    auto gs = fS->getTotalDose("GrowthStress");
+    VC_TEST_ASSERT(std::abs(gs - NumericType(9e7)) < NumericType(9e7) * NumericType(0.01) + NumericType(1));
+    // Must not be ~16x (1.44e9)
+    VC_TEST_ASSERT(gs < NumericType(2e8));
+    std::cout << "[stress-check] GrowthStress=" << gs << " (expect ~9e7, profileSize=16)\n";
+    // Copy hydrostatic into main field for adapter later
+    field->setSpeciesDose("HydrostaticStress", fS->getTotalDose("HydrostaticStress"));
+    field->setSpeciesDose("GrowthStress", gs);
   }
   {
     viennaps::ElasticStressKernel<NumericType> k(1273.15);
@@ -124,6 +157,9 @@ void RunTest() {
     k.setup();
     k.evolve(30.0);
     VC_TEST_ASSERT(field->getTotalDose("ElasticStress") > 0);
+    // Elastic absolute set: updated = 0 + target*min(1,3) with target ~ K*eps*1e9
+    // Should be O(1e8..1e9), not *32
+    VC_TEST_ASSERT(field->getTotalDose("ElasticStress") < NumericType(1e11));
     std::cout << "[elastic-check] ElasticStress=" << field->getTotalDose("ElasticStress")
               << "\n";
   }
@@ -139,16 +175,28 @@ void RunTest() {
     auto V0 = field->getTotalDose("Vacancy");
     VC_TEST_ASSERT(I0 > 0 && V0 > 0);
 
+    auto recombBefore = field->getTotalDose("RecombinedIV");
+    // Expected recomb amount from kernel formula: min(I,V)*0.15*min(dt,1) capped
+    NumericType expectedRecomb =
+        std::min(I0, V0) * NumericType(0.15) * std::min(NumericType(10), NumericType(1));
+    expectedRecomb = std::min(expectedRecomb, std::min(I0, V0) * NumericType(0.9));
+
     viennaps::DefectClusterKernel<NumericType> recomb(1273.15, "recomb");
     recomb.setPhysicsField(field);
     recomb.setMaterialProperties(mats);
     recomb.setup();
     recomb.evolve(10.0);
-    VC_TEST_ASSERT(field->getTotalDose("RecombinedIV") > 0);
+    auto recombDose = field->getTotalDose("RecombinedIV") - recombBefore;
+    VC_TEST_ASSERT(recombDose > 0);
+    // Must not be inflated by profileSize (~32x)
+    VC_TEST_ASSERT(recombDose < expectedRecomb * NumericType(3) + NumericType(1));
+    VC_TEST_ASSERT(std::abs(recombDose - expectedRecomb) <
+                   expectedRecomb * NumericType(0.05) + NumericType(1));
     VC_TEST_ASSERT(field->getTotalDose("Vacancy") >= 0);
     VC_TEST_ASSERT(field->getTotalDose("Interstitial") >= 0);
     std::cout << "[cluster-check] recomb: I0=" << I0 << " V0=" << V0
-              << " RecombinedIV=" << field->getTotalDose("RecombinedIV") << "\n";
+              << " RecombinedIV_delta=" << recombDose
+              << " expected=" << expectedRecomb << "\n";
 
     field->injectImplantProfile("Interstitial", profile);
     viennaps::DefectClusterKernel<NumericType> c311(1273.15, "311");
@@ -226,12 +274,17 @@ void RunTest() {
     adapter.updateFromOxidationFieldOnly(static_cast<NumericType>(1.5));
     auto I_after = field->getTotalDose("Interstitial");
     auto oed = field->getTotalDose("OxidationDefects");
+    auto lastOED = adapter.getLastOEDDose();
     VC_TEST_ASSERT(I_after > I_before);
     VC_TEST_ASSERT(oed > 0);
-    VC_TEST_ASSERT(adapter.getLastOEDDose() > 0);
+    VC_TEST_ASSERT(lastOED > 0);
+    // OED dose conserved: OxidationDefects ≈ lastOED (single inject)
+    VC_TEST_ASSERT(std::abs(oed - lastOED) < lastOED * NumericType(0.05) + NumericType(1));
+    // I increase ≈ lastOED (not *32)
+    VC_TEST_ASSERT(std::abs((I_after - I_before) - lastOED) < lastOED * NumericType(0.05) + NumericType(1));
     std::cout << "[adapter-check] OED: I_before=" << I_before << " I_after=" << I_after
               << " OxidationDefects=" << oed
-              << " lastOEDDose=" << adapter.getLastOEDDose() << "\n";
+              << " lastOEDDose=" << lastOED << "\n";
 
     adapter.syncStressToOxidation();
     adapter.syncStressFromOxidation(static_cast<NumericType>(1e6));
@@ -250,9 +303,9 @@ void RunTest() {
 
   std::cout << "[domain test] Track 1 physics smoke passed (field-dofs CVODE + pair/charged + "
                "elastic + geo + clustering + adapter + orchestrator).\n";
-  std::cout << "[domain test] Multiphysics validation markers: state-check geo-check "
-               "pair-check charged-check elastic-check cluster-check cvode-field-check "
-               "adapter-check orchestrator-check OK\n";
+  std::cout << "[domain test] Multiphysics validation markers: dose-check state-check geo-check "
+               "pair-check charged-check stress-check elastic-check cluster-check "
+               "cvode-field-check adapter-check orchestrator-check OK\n";
 }
 
 } // namespace viennacore

@@ -66,12 +66,11 @@ public:
     NumericType enh = getDopantEnhancedOxidationFactor();
     dose *= enh;
 
-    std::vector<NumericType> oed(32, dose / NumericType(32));
-    field_->injectImplantProfile("Interstitial", oed);
+    // Dose-conserving inject via size-1 total (not hardcoded profile length)
+    field_->addDose("Interstitial", dose);
     // Vacancies slightly less than I for net interstitial injection (classic OED)
-    std::vector<NumericType> oedV(32, dose * NumericType(0.7) / NumericType(32));
-    field_->injectImplantProfile("Vacancy", oedV);
-    field_->injectImplantProfile("OxidationDefects", oed);
+    field_->addDose("Vacancy", dose * NumericType(0.7));
+    field_->addDose("OxidationDefects", dose);
 
     lastOEDDose_ = dose;
     std::cout << "[PhysicsFieldAdapter] OED inject dose=" << dose
@@ -120,9 +119,8 @@ public:
   void syncStressFromOxidation(NumericType residualStress = NumericType(0)) {
     if (!field_) return;
     if (residualStress != 0) {
-      field_->addSpecies("HydrostaticStress");
-      field_->injectImplantProfile("HydrostaticStress",
-                                   std::vector<NumericType>(1, residualStress));
+      // Add residual onto existing hydrostatic channel (dose-conserving)
+      field_->addDose("HydrostaticStress", residualStress);
     }
     std::cout << "[PhysicsFieldAdapter] syncStressFromOxidation residual="
               << residualStress << "\n";

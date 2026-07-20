@@ -52,9 +52,7 @@ public:
     if (I > 0) this->field_->scaleProfile("Interstitial", (I - recomb) / I);
     if (V > 0) this->field_->scaleProfile("Vacancy", (V - recomb) / V);
 
-    this->field_->addSpecies("RecombinedIV");
-    this->field_->injectImplantProfile("RecombinedIV",
-                                       std::vector<NumericType>(1, recomb));
+    this->field_->addDose("RecombinedIV", recomb);
 
     std::cout << "[ChargedReactKernel] recomb=" << recomb << " dt=" << dt
               << " I=" << this->field_->getTotalDose("Interstitial")
