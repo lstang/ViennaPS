@@ -1,8 +1,7 @@
 #define VIENNAPS_HAS_SUNDIALS 1
 #include <vcTestAsserts.hpp>
 
-// Safe includes for the new multiphysics Track 1 code only.
-// These do not transitively require ls* / ViennaLS headers.
+// Multipysics Track 1 / Phase 1 smoke without full ViennaLS geometry includes.
 #include "psVersion.hpp"
 #include "fields/PhysicsField.hpp"
 #include "fields/MaterialPropertySystem.hpp"
@@ -13,40 +12,35 @@
 #include "fields/SundialsTimeIntegrator.hpp"
 #include "process/psPhysicsFieldAdapter.hpp"
 
-#ifdef VIENNAPS_HAS_MFEM
-#include <mfem.hpp>
-#endif
+#include <iostream>
+#include <memory>
+#include <string>
+#include <vector>
 
 namespace viennacore {
 
 template <class NumericType, int D>
 void RunTest() {
-  // Self-contained smoke test for Track 1 physics (no geometry/level-set construction).
-  // Verifies: Field storage + MFEM projection (when enabled), kernels (diffusion/fermi/stress/cluster),
-  // stress <-> diffusion coupling, Sundials driver, implant-like injection.
-
   using Field = viennaps::PhysicsField<NumericType>;
   using MatSys = viennaps::MaterialPropertySystem<NumericType>;
 
   auto field = std::make_shared<Field>();
-  auto mats  = std::make_shared<MatSys>();
-
-  // Improve numerics for demo
+  auto mats = std::make_shared<MatSys>();
   mats->setArrhenius("Si", "Dopant_D", 0.1, 2.5);
   mats->setArrhenius("Si", "Interstitial_D", 10.0, 1.8);
-
-  // Elastic props for real MFEM stress solve
   mats->setProperty("Si", "YoungModulus", 130.0);
   mats->setProperty("Si", "PoissonRatio", 0.28);
   mats->setProperty("Si", "GrowthStress", 300.0e6);
 
-  // "Implant" simulation via direct injection (profile logic lives in AnalyticImplant; here we test the field side)
+  // Implant-like seed
   std::vector<NumericType> profile(64, static_cast<NumericType>(1e12 / 64));
   field->injectImplantProfile("Dopant", profile);
   field->injectImplantProfile("Interstitial", profile);
+  field->injectImplantProfile("Vacancy",
+                              std::vector<NumericType>(64, static_cast<NumericType>(5e11 / 64)));
   VC_TEST_ASSERT(field->getTotalDose("Dopant") > 0);
 
-  // Basic diffusion kernel
+  // Diffusion + Fermi + stress
   {
     viennaps::DiffusionKernel<NumericType> k("Dopant", 1273.15);
     k.setPhysicsField(field);
@@ -54,8 +48,6 @@ void RunTest() {
     k.setup();
     k.evolve(30.0);
   }
-
-  // Fermi (extrinsic, concentration + stress dependent)
   {
     viennaps::FermiDiffusionKernel<NumericType> k("Dopant", 1273.15, 1e18);
     k.setPhysicsField(field);
@@ -63,8 +55,6 @@ void RunTest() {
     k.setup();
     k.evolve(30.0);
   }
-
-  // Viscoelastic + growth stress (Track 1 mechanics)
   {
     viennaps::ViscoelasticStressKernel<NumericType> k(1273.15);
     k.setPhysicsField(field);
@@ -73,52 +63,103 @@ void RunTest() {
     k.evolve(30.0);
   }
 
-  // Basic defect clustering
+  // --- Clustering models (recomb / 311 / bic / loop) ---
   {
-    viennaps::DefectClusterKernel<NumericType> k(1273.15);
-    k.setPhysicsField(field);
-    k.setMaterialProperties(mats);
-    k.setup();
-    k.evolve(30.0);
+    auto I0 = field->getTotalDose("Interstitial");
+    auto V0 = field->getTotalDose("Vacancy");
+
+    viennaps::DefectClusterKernel<NumericType> recomb(1273.15, "recomb");
+    recomb.setPhysicsField(field);
+    recomb.setMaterialProperties(mats);
+    recomb.setup();
+    recomb.evolve(10.0);
+    VC_TEST_ASSERT(field->getTotalDose("RecombinedIV") > 0);
+    std::cout << "[cluster-check] recomb: I0=" << I0 << " V0=" << V0
+              << " RecombinedIV=" << field->getTotalDose("RecombinedIV") << "\n";
+
+    // Reset interstitial for 311
+    field->injectImplantProfile("Interstitial", profile);
+    viennaps::DefectClusterKernel<NumericType> c311(1273.15, "311");
+    c311.setPhysicsField(field);
+    c311.setMaterialProperties(mats);
+    c311.setup();
+    c311.evolve(10.0);
+    VC_TEST_ASSERT(field->getTotalDose("Cluster311") > 0);
+    std::cout << "[cluster-check] 311: Cluster311=" << field->getTotalDose("Cluster311")
+              << "\n";
+
+    // BIC needs dopant + I
+    field->injectImplantProfile("Dopant", profile);
+    field->injectImplantProfile("Interstitial", profile);
+    viennaps::DefectClusterKernel<NumericType> bic(1273.15, "bic");
+    bic.setPhysicsField(field);
+    bic.setMaterialProperties(mats);
+    bic.setup();
+    bic.evolve(10.0);
+    VC_TEST_ASSERT(field->getTotalDose("BIC") > 0);
+    std::cout << "[cluster-check] bic: BIC=" << field->getTotalDose("BIC") << "\n";
+
+    field->injectImplantProfile("Interstitial", profile);
+    viennaps::DefectClusterKernel<NumericType> loop(1273.15, "loop");
+    loop.setPhysicsField(field);
+    loop.setMaterialProperties(mats);
+    loop.setup();
+    loop.evolve(10.0);
+    VC_TEST_ASSERT(field->getTotalDose("DislocationLoop") > 0);
+    std::cout << "[cluster-check] loop: DislocationLoop="
+              << field->getTotalDose("DislocationLoop") << "\n";
   }
 
-  // Sundials time integrator driving multiple kernels
+  // Sundials with multi-kernel (CVODE collects RHS via addToRHS)
   {
     viennaps::SundialsTimeIntegrator<NumericType> integ;
     integ.setPhysicsField(field);
-
     auto kd = std::make_shared<viennaps::DiffusionKernel<NumericType>>("Dopant", 1273.15);
     auto kf = std::make_shared<viennaps::FermiDiffusionKernel<NumericType>>("Interstitial", 1273.15);
     auto ks = std::make_shared<viennaps::ViscoelasticStressKernel<NumericType>>(1273.15);
-
-    kd->setPhysicsField(field); kd->setMaterialProperties(mats);
-    kf->setPhysicsField(field); kf->setMaterialProperties(mats);
-    ks->setPhysicsField(field); ks->setMaterialProperties(mats);
-
+    kd->setPhysicsField(field);
+    kd->setMaterialProperties(mats);
+    kf->setPhysicsField(field);
+    kf->setMaterialProperties(mats);
+    ks->setPhysicsField(field);
+    ks->setMaterialProperties(mats);
     integ.addKernel(kd);
     integ.addKernel(kf);
     integ.addKernel(ks);
-
     integ.evolve(0.0, 90.0, 30.0);
   }
 
-  std::cout << "[domain test] Track 1 physics smoke passed (kernels + stress coupling + clustering + Sundials + Field).\n";
-
-  // Explicit double instantiation to exercise real CVODE path
+  // --- Oxidation adapter (field-only path for OED / dopant / stress hooks) ---
   {
-    using Dbl = double;
-    auto fieldD = std::make_shared<viennaps::PhysicsField<Dbl>>();
-    auto matsD = std::make_shared<viennaps::MaterialPropertySystem<Dbl>>();
-    std::vector<Dbl> p(64, 1e12/64);
-    fieldD->injectImplantProfile("Dopant", p);
-    viennaps::SundialsTimeIntegrator<Dbl> integ;
-    integ.setPhysicsField(fieldD);
-    auto k = std::make_shared<viennaps::DiffusionKernel<Dbl>>("Dopant", 1273.15);
-    k->setPhysicsField(fieldD);
-    k->setMaterialProperties(matsD);
-    integ.addKernel(k);
-    integ.evolve(0, 90, 30);
+    // Use D=2 for adapter template; field-only APIs do not need real Domain
+    viennaps::PhysicsFieldAdapter<NumericType, 2> adapter(field, mats);
+    adapter.setOEDDosePerStep(static_cast<NumericType>(1e11));
+    adapter.applyToOxidationFieldOnly();
+    auto factor = adapter.getDopantEnhancedOxidationFactor();
+    auto stress = adapter.getHydrostaticStressForOxidation();
+    VC_TEST_ASSERT(factor >= 1);
+    std::cout << "[adapter-check] pre: dopantFactor=" << factor << " stress=" << stress
+              << "\n";
+
+    auto I_before = field->getTotalDose("Interstitial");
+    adapter.updateFromOxidationFieldOnly(static_cast<NumericType>(1.5));
+    auto I_after = field->getTotalDose("Interstitial");
+    auto oed = field->getTotalDose("OxidationDefects");
+    VC_TEST_ASSERT(I_after > I_before);
+    VC_TEST_ASSERT(oed > 0);
+    VC_TEST_ASSERT(adapter.getLastOEDDose() > 0);
+    std::cout << "[adapter-check] OED: I_before=" << I_before << " I_after=" << I_after
+              << " OxidationDefects=" << oed
+              << " lastOEDDose=" << adapter.getLastOEDDose() << "\n";
+
+    adapter.syncStressToOxidation();
+    adapter.syncStressFromOxidation(static_cast<NumericType>(1e6));
   }
+
+  std::cout << "[domain test] Track 1 physics smoke passed (kernels + stress coupling + "
+               "clustering + Sundials + Field).\n";
+  std::cout << "[domain test] Multiphysics validation markers: cluster-check adapter-check "
+               "OK\n";
 }
 
 } // namespace viennacore

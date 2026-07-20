@@ -1,78 +1,145 @@
 #pragma once
 
-/// PhysicsFieldAdapter - Thin coupling layer between the new unified PhysicsField
-/// (dopants, defects, stress) and existing high-quality models (especially Oxidation).
+/// PhysicsFieldAdapter - Thin coupling between PhysicsField and existing Oxidation.
 ///
-/// Design principle: NEVER modify the internals of psOxidation / existing models.
-/// Instead, the adapter:
-///   - Extracts current field state (dose, profiles, stress) before oxidation step
-///   - Injects OED defects, dopant-modified rates, stress info into the existing model (via public params when available)
-///   - Pulls back newly generated interstitials / vacancies / stress updates after oxidation
-///
-/// This preserves all the validated LOCOS, mask bending, viscous flow, stress, and Deal-Grove logic.
+/// Does NOT modify psOxidation internals. Provides:
+///  - Pre-oxidation hooks: dopant-enhanced rate factor, hydrostatic stress readout
+///  - Post-oxidation OED defect injection into unified fields
+///  - Field-only APIs for unit tests without a full Domain/level-set setup
 
 #include "fields/PhysicsField.hpp"
 #include "fields/MaterialPropertySystem.hpp"
-#include "psDomain.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <iostream>
+#include <memory>
+#include <vector>
 
 namespace viennaps {
+
+// Forward declare to avoid pulling ViennaLS headers into multiphysics-only tests.
+template <class NumericType, int D>
+class Domain;
 
 template <class NumericType, int D>
 class PhysicsFieldAdapter {
 public:
   PhysicsFieldAdapter(std::shared_ptr<PhysicsField<NumericType>> field,
                       std::shared_ptr<MaterialPropertySystem<NumericType>> mat = nullptr)
-      : field_(field), material_(mat) {}
+      : field_(std::move(field)), material_(std::move(mat)) {}
 
-  void setPhysicsField(std::shared_ptr<PhysicsField<NumericType>> f) { field_ = f; }
-  void setMaterialProperties(std::shared_ptr<MaterialPropertySystem<NumericType>> m) { material_ = m; }
-
-  // Called before invoking the existing Oxidation model.
-  // Here we would configure dopant-dependent oxidation rate, supply stress, etc.
-  void applyToOxidation(Domain<NumericType, D>& domain) {
-    if (!field_) return;
-
-    std::cout << "[PhysicsFieldAdapter] Pre-oxidation sync:\n"
-              << "  Dopant total dose = " << field_->getTotalDose("Dopant") << "\n"
-              << "  Interstitials     = " << field_->getTotalDose("Interstitial") << "\n";
-
-    // Placeholder for real coupling:
-    // - Read current dopant profile near the Si/SiO2 interface
-    // - Modify oxidation parameters (e.g. linear/parabolic rates via dopant effect)
-    // - Pass hydrostatic stress from field to oxidation stress solver
-    //
-    // Example (when Oxidation exposes setters):
-    //   auto& oxParams = ... ;
-    //   NumericType surfB = field_->getConcentration("Boron", 0.0);
-    //   oxParams.setDopantEnhancedFactor( computeEnhancement(surfB) );
+  void setPhysicsField(std::shared_ptr<PhysicsField<NumericType>> f) { field_ = std::move(f); }
+  void setMaterialProperties(std::shared_ptr<MaterialPropertySystem<NumericType>> m) {
+    material_ = std::move(m);
   }
 
-  // Called after the existing Oxidation step.
-  // Pull newly injected defects (OED) back into the unified field.
-  void updateFromOxidation(Domain<NumericType, D>& domain) {
-    if (!field_) return;
+  void setOEDDosePerStep(NumericType dose) { oedDose_ = dose; }
+  void setDopantEnhancementScale(NumericType s) { dopantScale_ = s; }
 
-    // In real implementation the oxidation model (or its velocity/stress output)
-    // would tell us how many interstitials were injected.
-    // For now we demonstrate by adding a small OED source.
+  /// Dopant-dependent oxidation enhancement factor (linear in surface-ish dopant dose).
+  /// Returns ~1.0 with no dopant; grows gently with Dopant total dose.
+  NumericType getDopantEnhancedOxidationFactor() const {
+    if (!field_) return NumericType(1);
+    NumericType dose = field_->getTotalDose("Dopant");
+    // Reference dose 1e13 cm^-2 -> +10% max enhancement in demo units
+    NumericType enh = NumericType(1) + dopantScale_ * dose / NumericType(1e14);
+    return std::min(NumericType(2), std::max(NumericType(1), enh));
+  }
+
+  /// Hydrostatic stress available for oxidation stress coupling (Pa-like units).
+  NumericType getHydrostaticStressForOxidation() const {
+    if (!field_) return NumericType(0);
+    return field_->getTotalDose("HydrostaticStress");
+  }
+
+  /// Inject OED-style interstitial/vacancy defects after oxidation growth.
+  /// oxideThicknessDelta: relative growth proxy (dimensionless or um); scales OED dose.
+  void injectOEDDefects(NumericType oxideThicknessDelta = NumericType(1)) {
+    if (!field_) return;
     field_->addSpecies("Interstitial");
+    field_->addSpecies("Vacancy");
     field_->addSpecies("OxidationDefects");
 
-    // Simulate a small OED injection (orders of magnitude will be calibrated)
-    std::vector<NumericType> oed(32, static_cast<NumericType>(1e11));
+    NumericType dose = oedDose_ * std::max(NumericType(0), oxideThicknessDelta);
+    // Dopant can slightly increase OED (TED-like coupling)
+    NumericType enh = getDopantEnhancedOxidationFactor();
+    dose *= enh;
+
+    std::vector<NumericType> oed(32, dose / NumericType(32));
     field_->injectImplantProfile("Interstitial", oed);
+    // Vacancies slightly less than I for net interstitial injection (classic OED)
+    std::vector<NumericType> oedV(32, dose * NumericType(0.7) / NumericType(32));
+    field_->injectImplantProfile("Vacancy", oedV);
     field_->injectImplantProfile("OxidationDefects", oed);
 
+    lastOEDDose_ = dose;
+    std::cout << "[PhysicsFieldAdapter] OED inject dose=" << dose
+              << " (oxideDelta=" << oxideThicknessDelta
+              << ", dopantEnh=" << enh << ")\n";
+  }
+
+  /// Called before existing Oxidation model: log coupling state and cache factors.
+  void applyToOxidation(Domain<NumericType, D>& /*domain*/) {
+    if (!field_) return;
+    preOxDopantFactor_ = getDopantEnhancedOxidationFactor();
+    preOxStress_ = getHydrostaticStressForOxidation();
+    std::cout << "[PhysicsFieldAdapter] Pre-oxidation sync:\n"
+              << "  Dopant total dose = " << field_->getTotalDose("Dopant") << "\n"
+              << "  Interstitials     = " << field_->getTotalDose("Interstitial") << "\n"
+              << "  Dopant ox factor  = " << preOxDopantFactor_ << "\n"
+              << "  HydrostaticStress = " << preOxStress_ << "\n";
+  }
+
+  /// Called after existing Oxidation: inject OED defects into unified field.
+  void updateFromOxidation(Domain<NumericType, D>& /*domain*/) {
+    if (!field_) return;
+    // Use a default growth proxy; real path would read oxide thickness from domain
+    injectOEDDefects(NumericType(1));
     std::cout << "[PhysicsFieldAdapter] Post-oxidation: OED defects injected into unified field.\n";
   }
 
-  // Future: stress feedback round-trip
-  void syncStressToOxidation() { /* TODO */ }
-  void syncStressFromOxidation() { /* TODO */ }
+  /// Field-only apply/update for tests without Domain construction.
+  void applyToOxidationFieldOnly() {
+    if (!field_) return;
+    preOxDopantFactor_ = getDopantEnhancedOxidationFactor();
+    preOxStress_ = getHydrostaticStressForOxidation();
+    std::cout << "[PhysicsFieldAdapter] Pre-oxidation (field-only) dopantFactor="
+              << preOxDopantFactor_ << " stress=" << preOxStress_ << "\n";
+  }
+
+  void updateFromOxidationFieldOnly(NumericType oxideThicknessDelta = NumericType(1)) {
+    injectOEDDefects(oxideThicknessDelta);
+  }
+
+  void syncStressToOxidation() {
+    preOxStress_ = getHydrostaticStressForOxidation();
+    std::cout << "[PhysicsFieldAdapter] syncStressToOxidation stress=" << preOxStress_ << "\n";
+  }
+
+  void syncStressFromOxidation(NumericType residualStress = NumericType(0)) {
+    if (!field_) return;
+    if (residualStress != 0) {
+      field_->addSpecies("HydrostaticStress");
+      field_->injectImplantProfile("HydrostaticStress",
+                                   std::vector<NumericType>(1, residualStress));
+    }
+    std::cout << "[PhysicsFieldAdapter] syncStressFromOxidation residual="
+              << residualStress << "\n";
+  }
+
+  NumericType getLastOEDDose() const { return lastOEDDose_; }
+  NumericType getCachedDopantFactor() const { return preOxDopantFactor_; }
+  NumericType getCachedStress() const { return preOxStress_; }
 
 private:
   std::shared_ptr<PhysicsField<NumericType>> field_;
   std::shared_ptr<MaterialPropertySystem<NumericType>> material_;
+  NumericType oedDose_ = static_cast<NumericType>(1e11);
+  NumericType dopantScale_ = static_cast<NumericType>(0.1);
+  NumericType lastOEDDose_ = 0;
+  NumericType preOxDopantFactor_ = 1;
+  NumericType preOxStress_ = 0;
 };
 
 } // namespace viennaps

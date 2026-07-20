@@ -66,12 +66,9 @@ public:
     // Step 3: Oxidize via adapter (OED, defect injection, stress feedback)
     {
       PhysicsFieldAdapter<NumericType, D> adapter(field, mats);
-      // In full integration:
-      //   adapter.applyToOxidation(domain);
-      //   // call existing Oxidation model on domain
-      //   adapter.updateFromOxidation(domain);
-      // For demo we simulate the update
-      adapter.updateFromOxidation(/* no real domain in this stub */);
+      // Full integration: adapter.applyToOxidation(domain); run Oxidation; updateFromOxidation(domain)
+      adapter.applyToOxidationFieldOnly();
+      adapter.updateFromOxidationFieldOnly(NumericType(1));
       std::cout << "  [Step 3] Oxidize via adapter completed (OED + stress feedback)\n";
     }
 
