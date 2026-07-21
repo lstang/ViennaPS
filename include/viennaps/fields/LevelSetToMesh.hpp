@@ -19,12 +19,6 @@
 
 #include "MeshAttributes.hpp"
 
-#include <mfem.hpp>
-
-#include <hrleSparseIterator.hpp>
-#include <lsDomain.hpp>
-#include <psDomain.hpp>
-
 #include <algorithm>
 #include <cmath>
 #include <memory>
@@ -32,11 +26,19 @@
 #include <string>
 #include <utility>
 
+#ifdef VIENNAPS_HAS_MFEM
+
+#include <mfem.hpp>
+
+#include <hrleSparseIterator.hpp>
+#include <lsDomain.hpp>
+#include <psDomain.hpp>
+
 namespace viennaps {
 
 /// Result of a level-set → mesh conversion. Owns the produced mesh and the
 /// attribute → material-name mapping. The mesh pointer is non-null on success.
-template <class NumericType> struct LevelSetToMeshResult {
+struct LevelSetToMeshResult {
   std::unique_ptr<mfem::Mesh> mesh;
   MeshAttributes attributes;
 };
@@ -57,7 +59,7 @@ template <class NumericType, int D> class LevelSetToMeshConverter {
 public:
   /// Convert `domain` to `{unique_ptr<mfem::Mesh>, MeshAttributes}`.
   /// Throws `std::runtime_error` if the domain has no level sets.
-  LevelSetToMeshResult<NumericType>
+  LevelSetToMeshResult
   convert(const Domain<NumericType, D> &domain) const {
     throw std::runtime_error(
         "3D LevelSetToMeshConverter not implemented in Phase 1");
@@ -68,7 +70,7 @@ public:
 /// the domain's material map.
 template <class NumericType> class LevelSetToMeshConverter<NumericType, 2> {
 public:
-  LevelSetToMeshResult<NumericType>
+  LevelSetToMeshResult
   convert(const Domain<NumericType, 2> &domain) const {
     const auto &levelSets = domain.getLevelSets();
     if (levelSets.empty()) {
@@ -192,3 +194,5 @@ private:
 };
 
 } // namespace viennaps
+
+#endif // VIENNAPS_HAS_MFEM
