@@ -69,6 +69,15 @@
 #include <models/psSilicidation.hpp>
 #include <models/psLithography.hpp>
 
+#include <fields/MeshAttributes.hpp>
+#include <fields/DiffusionModel.hpp>
+#include <fields/DiffusionPhysics.hpp>
+#include <fields/models/ConstantDiffusion.hpp>
+#ifdef VIENNAPS_HAS_MFEM
+#include <fields/LevelSetToMesh.hpp>
+#include <fields/DiffusionEngine.hpp>
+#endif
+
 // These macros might be defined on some systems (MSCV), undefine them to avoid
 // conflicts
 #ifdef ERROR
