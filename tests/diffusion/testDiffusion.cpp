@@ -1,9 +1,11 @@
 #include <cmath>
 #include <iostream>
+#include <memory>
 #include <vcTestAsserts.hpp>
 #include <fields/MeshAttributes.hpp>
 #include <fields/DiffusionModel.hpp>
 #include <fields/models/ConstantDiffusion.hpp>
+#include <fields/DiffusionPhysics.hpp>
 
 #ifdef VIENNAPS_HAS_MFEM
 using namespace viennaps;
@@ -47,10 +49,90 @@ void TestConstantDiffusion() {
   VC_TEST_ASSERT(std::abs(model.getDiffusivity() - expectedD) / expectedD < 1e-6);
 }
 
+// ---- Minimal stubs for Phase 2/3 models referenced by the composition test ----
+// These exist ONLY so TestDiffusionPhysicsComposition can run in Phase 1.
+// Real FermiDiffusion (Phase 2) and CddDiffusion (Phase 3 Task 10) will
+// replace them. Each stub claims the same single species ("Boron") so the
+// gatekeeper test exercises the double-dC/dt prevention path.
+template <class NumericType>
+class FermiDiffusionStub : public DiffusionModel<NumericType> {
+public:
+  explicit FermiDiffusionStub(const std::string& species = "Boron") {
+    this->setName("FermiDiffusion");
+    species_ = species;
+  }
+  int numSpecies() const override { return 1; }
+  std::vector<std::string> speciesNames() const override { return {species_}; }
+
+private:
+  std::string species_;
+};
+
+template <class NumericType>
+class CddDiffusionStub : public DiffusionModel<NumericType> {
+public:
+  CddDiffusionStub() { this->setName("CddDiffusion"); }
+  int numSpecies() const override { return 1; }
+  std::vector<std::string> speciesNames() const override { return {"Boron"}; }
+};
+
+void TestDiffusionPhysics() {
+  DiffusionPhysics<double> physics;
+  physics.addSpecies("Boron");
+  physics.addSpecies("Interstitial");
+  VC_TEST_ASSERT(physics.numSpecies() == 2);
+  VC_TEST_ASSERT(physics.hasSpecies("Boron"));
+
+  // Register a model
+  auto model = std::make_shared<ConstantDiffusion<double>>("Boron");
+  model->setDiffusivity(1e-13, 3.46);
+  physics.addModel(model);
+
+  // BC specification
+  physics.addNeumannBC("Boron", "surface", 0.0);  // zero flux
+  physics.addDirichletBC("Boron", "bottom", 1e18);
+
+  VC_TEST_ASSERT(physics.numModels() == 1);
+
+  // Per-species BC lookup (not flat list)
+  const auto& boronBCs = physics.boundaryConditions("Boron");
+  VC_TEST_ASSERT(boronBCs.size() == 2);
+  const auto& iBCs = physics.boundaryConditions("Interstitial");
+  VC_TEST_ASSERT(iBCs.empty());  // Interstitial has no BCs yet
+}
+
+void TestDiffusionPhysicsComposition() {
+  // Verify the composition gatekeepers: two models on the same species must
+  // not create a double time-derivative. Mirrors MOOSE PhysicsBase::
+  // shouldCreateTimeDerivative (framework/include/physics/PhysicsBase.h:237).
+  DiffusionPhysics<double> physics;
+  physics.addSpecies("Boron");
+  physics.addSpecies("Interstitial");
+
+  // Both models touch Boron; both naively want a time derivative on it.
+  // The physics must guarantee exactly ONE time derivative per species.
+  auto fermi = std::make_shared<FermiDiffusionStub<double>>("Boron");
+  auto cdd   = std::make_shared<CddDiffusionStub<double>>();  // composes PairTerm on Boron
+  physics.addModel(fermi);
+  physics.addModel(cdd);
+
+  VC_TEST_ASSERT(physics.shouldCreateTimeDerivative("Boron", *fermi));
+  // Second model on the same species must be denied the time derivative —
+  // it can still contribute stiffness/reaction terms, but not dC/dt.
+  VC_TEST_ASSERT(!physics.shouldCreateTimeDerivative("Boron", *cdd));
+  VC_TEST_ASSERT(physics.shouldCreateTimeDerivative("Interstitial", *cdd));
+
+  // species-existence gatekeeper
+  VC_TEST_ASSERT(physics.variableExists("Boron"));
+  VC_TEST_ASSERT(!physics.variableExists("Arsenic"));
+}
+
 int main() {
   TestMeshAttributes();
   TestDiffusionModelInterface();
   TestConstantDiffusion();
+  TestDiffusionPhysics();
+  TestDiffusionPhysicsComposition();
   std::cout << "All diffusion tests passed.\n";
   return 0;
 }
