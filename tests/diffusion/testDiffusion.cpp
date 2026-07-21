@@ -222,6 +222,58 @@ void TestDiffusionEngineAssembly() {
   VC_TEST_ASSERT(gfMax > 1e17);  // within ~10x of initial 1e18
 }
 
+void TestDoseConservation() {
+  // Phase 1 Task 7 capstone: dose conservation under zero-flux (Neumann) BCs.
+  //
+  // Physics: for a closed system (all Neumann zero-flux boundaries) with no
+  // reaction terms, total concentration (dose) must be conserved over time.
+  // The implicit-Euler scheme + zero-flux BCs should conserve dose to floating-
+  // point precision, so the 1% tolerance below is generous; if the test fails
+  // by more than 1% something is physically wrong.
+  //
+  // Setup per the task brief:
+  //   - 8x8 triangular mesh (MakeCartesian2D default unit square, area = 1)
+  //   - ConstantDiffusion("Boron") with D0=1e-8, Ea=0 (so D = 1e-8 at any T)
+  //   - Uniform IC = 1e18
+  //   - Integrate 0 -> 10s with dt = 1.0
+  //   - Assert |dose_final - dose_initial| / dose_initial < 0.01
+  MeshAttributes attrs;
+  attrs.setAttributeName(1, "Si");
+
+  auto mesh = std::make_unique<mfem::Mesh>(
+      mfem::Mesh::MakeCartesian2D(8, 8, mfem::Element::TRIANGLE));
+
+  DiffusionEngine<double, 2> engine;
+  engine.setMesh(std::move(mesh), attrs);
+
+  auto model = std::make_shared<ConstantDiffusion<double>>("Boron");
+  model->setDiffusivity(1e-8, 0.0);  // Ea=0 => D = D0 = 1e-8 regardless of T
+  DiffusionPhysics<double> physics;
+  physics.addSpecies("Boron");
+  physics.addModel(model);
+  physics.setTemperature(1273.15);  // irrelevant for Ea=0 but kept for realism
+  engine.setPhysics(physics);
+
+  engine.initializeSpecies("Boron", 1e18);
+
+  const double doseInitial = engine.getIntegral("Boron");
+
+  // Zero-flux (Neumann) BCs are the natural default in Phase 1; no BCs are
+  // registered, so the system is closed and dose must be conserved.
+  engine.solve(0.0, 10.0, 1.0);
+
+  const double doseFinal = engine.getIntegral("Boron");
+  const double relDiff =
+      std::abs(doseFinal - doseInitial) / std::abs(doseInitial);
+
+  std::cout << "[dose-conservation] dose_initial=" << doseInitial
+            << " dose_final=" << doseFinal << " rel_diff=" << relDiff << "\n";
+
+  // 1% tolerance — implicit Euler + zero-flux should be at FP precision.
+  // If this fails by more than 1%, dose is leaking: real bug.
+  VC_TEST_ASSERT(relDiff < 0.01);
+}
+
 int main() {
   TestMeshAttributes();
   TestDiffusionModelInterface();
@@ -230,6 +282,7 @@ int main() {
   TestDiffusionPhysicsComposition();
   TestLevelSetToMesh2D();
   TestDiffusionEngineAssembly();
+  TestDoseConservation();
   std::cout << "All diffusion tests passed.\n";
   return 0;
 }
