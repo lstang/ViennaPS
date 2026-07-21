@@ -53,15 +53,25 @@ public:
   void assembleStiffness(mfem::BilinearForm& K, const mfem::GridFunction& speciesGF,
                          const std::map<std::string, mfem::GridFunction*>& allSpecies,
                          const mfem::GridFunction* temp) const override {
-    double D = static_cast<double>(getDiffusivity());
-    mfem::ConstantCoefficient Dcoef(D);
+    // Refresh the cached coefficient so it reflects the current D (which
+    // depends on T set via setup()). The coefficient must outlive the
+    // integrator: MFEM's DiffusionIntegrator stores a Coefficient& and
+    // reads it lazily during BilinearForm::Assemble(), which the engine
+    // calls AFTER assembleStiffness returns. A stack-local here would
+    // dangle. The mutable member keeps the reference valid until the model
+    // (and thus the integrator it registered with) is destroyed.
+    stiffCoef_ = std::make_unique<mfem::ConstantCoefficient>(
+        static_cast<double>(getDiffusivity()));
     // DiffusionIntegrator adds D * grad(phi_i) . grad(phi_j)
-    K.AddDomainIntegrator(new mfem::DiffusionIntegrator(Dcoef));
+    K.AddDomainIntegrator(new mfem::DiffusionIntegrator(*stiffCoef_));
   }
 
   void assembleMass(mfem::BilinearForm& M) const override {
-    mfem::ConstantCoefficient one(1.0);
-    M.AddDomainIntegrator(new mfem::MassIntegrator(one));
+    // Same lifetime consideration as assembleStiffness: BilinearForm::
+    // Assemble() reads the coefficient after this method returns, so the
+    // coefficient must persist. Mass integrator uses constant 1.
+    massCoef_ = std::make_unique<mfem::ConstantCoefficient>(1.0);
+    M.AddDomainIntegrator(new mfem::MassIntegrator(*massCoef_));
   }
 #endif
 
@@ -70,6 +80,15 @@ private:
   NumericType D0_ = NumericType(1e-14);
   NumericType Ea_ = NumericType(3.0);
   std::vector<int> attrs_;
+#ifdef VIENNAPS_HAS_MFEM
+  // Cached coefficients owned by the model so integrators added in
+  // assembleStiffness / assembleMass have stable Coefficient& references
+  // when BilinearForm::Assemble() runs later. Mutable because the model
+  // otherwise presents a const assemble* contract (the cache is a
+  // legitimate implementation detail, not observable state).
+  mutable std::unique_ptr<mfem::ConstantCoefficient> stiffCoef_;
+  mutable std::unique_ptr<mfem::ConstantCoefficient> massCoef_;
+#endif
 };
 
 } // namespace viennaps
