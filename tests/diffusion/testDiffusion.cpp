@@ -1,6 +1,7 @@
 #include <iostream>
 #include <vcTestAsserts.hpp>
 #include <fields/MeshAttributes.hpp>
+#include <fields/DiffusionModel.hpp>
 
 #ifdef VIENNAPS_HAS_MFEM
 using namespace viennaps;
@@ -18,8 +19,22 @@ void TestMeshAttributes() {
   VC_TEST_ASSERT(attrs.hasMaterial("SiO2"));
 }
 
+void TestDiffusionModelInterface() {
+  struct TestModel : public DiffusionModel<double> {
+    int numSpecies() const override { return 1; }
+    std::vector<std::string> speciesNames() const override {
+      return {"TestSpecies"};
+    }
+    std::vector<int> applicableAttributes() const override { return {1}; }
+  };
+  TestModel m;
+  VC_TEST_ASSERT(m.numSpecies() == 1);
+  VC_TEST_ASSERT(m.speciesNames()[0] == "TestSpecies");
+}
+
 int main() {
   TestMeshAttributes();
+  TestDiffusionModelInterface();
   std::cout << "All diffusion tests passed.\n";
   return 0;
 }
