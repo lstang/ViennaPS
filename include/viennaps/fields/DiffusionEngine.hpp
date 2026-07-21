@@ -44,6 +44,27 @@
 /// Scope guardrails (Phase 1 only): no Jacobian assembly (ConstantDiffusion
 /// is linear), no AMR, no sub-cycling, single mesh, 2D working / 3D stub.
 ///
+/// \section implicit-euler-caching Implicit-Euler system-matrix caching
+///
+/// The fallback implicit-Euler path builds `(M + dt*K)` once per species
+/// and caches it in `implicitCache_[species]`. Dirichlet elimination is
+/// applied to the cached `BilinearForm` via `EliminateVDofs(essVdofs,
+/// DIAG_ONE)` — this zeros the essential rows/cols, sets their diagonal
+/// to 1, and stores the eliminated off-diagonal entries internally in
+/// `mat_e`. Each step applies the SAME elimination to the fresh RHS via
+/// `EliminateVDofsInRHS(essVdofs, currentState, b)`, which does
+/// `b -= mat_e * currentState` (the off-diagonal contribution shift) and
+/// `b[essVdofs] = prescValues[essVdofs]`. This is the canonical "matrix
+/// eliminated once, many RHS" pattern in MFEM and avoids rebuilding /
+/// re-eliminating the matrix per step.
+///
+/// Cache invalidation:
+///   - `dt` changes (last step's dt may be smaller to land exactly on tEnd)
+///   - Phase 2 nonlinear D updates K each step (Picard) — at that point
+///     `nonlinearK_` (added in Phase 2) becomes true and the cache is
+///     rebuilt per step. For Phase 1 linear ConstantDiffusion, K is
+///     constant and the cache is built once per dt value.
+///
 /// \section bc-handling Boundary-condition handling
 ///
 /// `DiffusionPhysics::addNeumannBC` / `addDirichletBC` register per-species
@@ -537,12 +558,29 @@ private:
   // Used when MFEM was built without SUNDIALS. Same per-species M+K+R
   // assembly; per-step linear solve via CG (+ HypreBoomerAMG or DSmoother).
   //
-  // Caching: the cached `cache.Amat = (M + dt K)` is reused across steps
-  // when `dt` is unchanged. Dirichlet elimination is applied per-step
-  // against a fresh BilinearForm (rebuilt from cached integrators) so the
-  // cache stays clean. For Phase 1 linear ConstantDiffusion, K is also
-  // constant across steps, so the cache is rebuilt only on dt change.
+  // Caching (per species, keyed on dt):
+  //
+  // The cached `BilinearForm A` holds (M + dt*K) with Dirichlet rows/cols
+  // eliminated via `EliminateVDofs(essVdofs, DIAG_ONE)` AND retains the
+  // internal `M_e` matrix (eliminated off-diagonal entries). `M_e` lets
+  // us apply the SAME elimination to a fresh RHS each step via
+  // `EliminateVDofsInRHS(essVdofs, currentState, b)` — no per-step matrix
+  // rebuild, no per-step Dirichlet elimination. This is the canonical
+  // "matrix eliminated once, many RHS" pattern in MFEM.
+  //
+  // Cache invalidation:
+  //   - dt changes (last step's dt may be smaller to land exactly on tEnd)
+  //     -> rebuild A
+  //   - Phase 2 nonlinear D updates K each step (Picard) -> cache disabled
+  //     (Phase 2 concern; the gate `bool nonlinearK_` is false in Phase 1)
   // --------------------------------------------------------------------
+  struct ImplicitCache {
+    std::unique_ptr<mfem::BilinearForm> A; // eliminated system matrix + M_e
+    mfem::Array<int> essVdofs;             // essential vdofs (for RHS shift)
+    NumericType dtCached = NumericType(-1);
+  };
+  std::map<std::string, ImplicitCache> implicitCache_;
+
   void solveImplicitEuler(NumericType tStart, NumericType tEnd,
                           NumericType dtMax) {
     auto systems = assembleAllSpecies();
@@ -556,9 +594,7 @@ private:
     for (const auto &name : names)
       bdrMasks.emplace(name, resolveBoundaryMasks(name));
 
-    // Pre-extract sparse M and K per species (constant across steps for
-    // Phase 1 linear ConstantDiffusion; rebuilt per-step in Phase 2 once
-    // nonlinear D makes K concentration-dependent).
+    // Pre-extract sparse M and K per species.
     std::map<std::string, const mfem::SparseMatrix *> Ms, Ks;
     for (const auto &name : names) {
       auto it = systems.find(name);
@@ -579,17 +615,32 @@ private:
         mfem::GridFunction &gf = *allSpecies_[name];
         const auto &masks = bdrMasks.at(name);
 
-        // Build per-step A = (M + dt K). MassIntegrator re-assembly is
-        // cheap (no factorization); doing it per step keeps the code
-        // simple and works correctly when Phase 2 nonlinear D updates K.
-        // The dt*K contribution is added at the SparseMatrix level after
-        // assembly.
-        mfem::BilinearForm Aform(fes_.get());
-        mfem::ConstantCoefficient oneCoef(1.0);
-        Aform.AddDomainIntegrator(new mfem::MassIntegrator(oneCoef));
-        Aform.Assemble();
-        Aform.SpMat().Add(dtd, *Ks[name]);
-        Aform.Finalize();
+        // Build or fetch cached eliminated system matrix for this (species, dt).
+        auto &cache = implicitCache_[name];
+        const bool dtChanged = !cache.A || cache.dtCached != dt;
+        if (dtChanged) {
+          cache.A = std::make_unique<mfem::BilinearForm>(fes_.get());
+          mfem::ConstantCoefficient oneCoef(1.0);
+          cache.A->AddDomainIntegrator(new mfem::MassIntegrator(oneCoef));
+          cache.A->Assemble();
+          cache.A->SpMat().Add(dtd, *Ks[name]);
+          cache.A->Finalize();
+
+          // Resolve essential vdofs as a LIST (EliminateVDofs takes a list,
+          // not a marker array).
+          cache.essVdofs.SetSize(0);
+          if (masks.dirichletCoef != nullptr) {
+            mfem::Array<int> essMarker;
+            fes_->GetEssentialTrueDofs(masks.essAttrMarker, essMarker);
+            cache.essVdofs = essMarker;
+            // Eliminate essential vdofs from A, storing the off-diagonal
+            // entries in mat_e (used by EliminateVDofsInRHS each step).
+            cache.A->EliminateVDofs(
+                cache.essVdofs, mfem::Operator::DiagonalPolicy::DIAG_ONE);
+            cache.A->Finalize();
+          }
+          cache.dtCached = dt;
+        }
 
         // RHS: b = M u + dt R, plus non-zero Neumann flux on marked bdr.
         mfem::Vector M_u(ndof);
@@ -607,21 +658,21 @@ private:
           b.Add(1.0, bndRHS);
         }
 
-        // Apply Dirichlet via the idiomatic BilinearForm API. The 4-arg
-        // overload shifts the RHS by the off-diagonal contributions of
-        // the prescribed values AND zeroes the essential rows/cols with
-        // diagonal set to 1 (DIAG_ONE).
+        // Apply Dirichlet to RHS via the cached mat_e: b -= A_e * u, then
+        // b[essVdofs] = prescValues[essVdofs]. The "current state" passed
+        // in must have prescribed values at the essential dofs. We build
+        // a copy of gf with Dirichlet values stamped on essential dofs so
+        // the original GridFunction is not mutated.
         if (masks.dirichletCoef != nullptr) {
-          mfem::Vector prescValues(ndof);
-          prescValues = masks.dirichletValue;
-          Aform.EliminateEssentialBC(masks.essAttrMarker, prescValues, b,
-                                      mfem::Operator::DiagonalPolicy::DIAG_ONE);
-          Aform.Finalize();
+          mfem::Vector uStamp = gf; // copy: ndof-sized Vector view of gf
+          for (int i = 0; i < cache.essVdofs.Size(); ++i)
+            uStamp(cache.essVdofs[i]) = masks.dirichletValue;
+          cache.A->EliminateVDofsInRHS(cache.essVdofs, uStamp, b);
         }
 
-        // Solve A u_{n+1} = b.
+        // Solve A u_{n+1} = b against the eliminated A.
         auto bundle = makeMassSolver();
-        bundle->cg->SetOperator(Aform.SpMat());
+        bundle->cg->SetOperator(cache.A->SpMat());
         mfem::Vector unext(ndof);
         unext = 0.0;
         bundle->cg->Mult(b, unext);

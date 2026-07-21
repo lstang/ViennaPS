@@ -114,3 +114,27 @@ Four issues raised after the final review, all resolved:
    `docs/superpowers/specs/diffusion-phase1-followups.md`. Lists the
    three deferred pieces (conforming cut mesh, transition layer,
    MFEMCutTransitionSubMesh integration) with triggers for revisit.
+
+### Caching rework (after user feedback)
+
+The initial caching attempt (sparse-matrix copy + per-step EliminateRow)
+crashed on `EliminateRow(DIAG_ONE)` because `SearchRow` requires the
+diagonal entry to exist in sparsity pattern - fragile. Reworked to use
+MFEM's canonical "matrix eliminated once, many RHS" pattern:
+
+- `implicitCache_[species]` stores a `BilinearForm A` (eliminated) + the
+  internal `mat_e` (off-diagonal entries) + the essential-vdofs list.
+- On dt change: `A.AddDomainIntegrator(MassIntegrator); A.Assemble();
+  A.SpMat().Add(dt, K); A.Finalize(); A.EliminateVDofs(essVdofs, DIAG_ONE)`.
+  `EliminateVDofs` stores `mat_e` internally for later RHS shifts.
+- Each step: `b = M*u + dt*R + Neumann`; `A.EliminateVDofsInRHS(essVdofs,
+  currentState, b)` shifts `b -= mat_e * currentState` and stamps the
+  prescribed values on `b[essVdofs]`; solve `A u_{n+1} = b`.
+- Phase 2 hook: when nonlinear D makes K concentration-dependent, the
+  cache rebuilds per step (gate `nonlinearK_` added then).
+
+Verification: 34/34 tests pass. Dirichlet interior_mean=7.6e17
+(unchanged from per-step-rebuild baseline - confirms numerical
+equivalence). Neumann rel_diff=0.0398 (unchanged). Dose conservation
+1.28e-16 (unchanged). Cache built once per (species, dt) instead of
+per step.
