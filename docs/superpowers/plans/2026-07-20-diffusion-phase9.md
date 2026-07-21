@@ -1,6 +1,6 @@
 # Diffusion Engine Phase 9: Flash/Laser Anneal
 
-**Goal:** Add flash and laser anneal simulation: heat transfer, melting phase field, crystallinity phase field, dopant diffusion in melt, and intensity models.
+**Goal:** Add flash and laser anneal simulation: heat transfer, melting phase field, crystallinity phase field, dopant diffusion in melt, and intensity models. Phase fields use Allen-Cahn equation (MOOSE `ADAllenCahn` + `ACInterface` pattern) for non-conserved order parameters.
 
 **Depends on:** Phase 3 (CDD)
 
@@ -8,12 +8,14 @@
 
 | File | Responsibility |
 |------|---------------|
-| `models/HeatTransfer.hpp` | Thermal FEM: rho*cp*dT/dt = div(k*grad(T)) + Q |
+| `models/AllenCahnTerm.hpp` | Allen-Cahn kernel: dη/dt = L*(κ∇²η - df/dη) (MOOSE ADAllenCahn pattern) |
+| `models/ACInterfaceTerm.hpp` | Gradient energy term: κ∇η·∇test (MOOSE ACInterface pattern) |
+| `models/HeatTransfer.hpp` | Thermal FEM: rho*cp*dT/dt = div(k*grad(T)) + Q (MOOSE ADHeatConduction pattern) |
 | `models/LaserIntensity.hpp` | Gaussian, table lookup, scanning laser intensity |
 | `models/TransferMatrix.hpp` | Optical absorption in multilayer (thin film optics) |
-| `models/MeltingPhaseField.hpp` | Liquid/solid phase field tracking |
-| `models/CrystallinityPhaseField.hpp` | Amorphous/crystalline tracking, SPER coupling |
-| `models/MeltDiffusion.hpp` | Liquid-phase dopant diffusion (very fast D) |
+| `models/MeltingPhaseField.hpp` | Liquid/solid Allen-Cahn: f(η,T) = (η²-1)²/4 - λ(T-T_m)*η |
+| `models/CrystallinityPhaseField.hpp` | Amorphous/crystalline Allen-Cahn: f(η,T) driven by SPER velocity |
+| `models/MeltDiffusion.hpp` | Liquid-phase dopant diffusion (very fast D, activated where η_melt>0.5) |
 | `models/FlashLaserAnneal.hpp` | Orchestrator: thermal + phase + diffusion |
 
 ## Tasks
@@ -33,18 +35,33 @@
 - Test: Gaussian peak at center, scanning laser moves with v*t
 - Commit: `"feat: add LaserIntensity models (Gaussian, scanning, table)"`
 
-### Task 4: MeltingPhaseField
-- `MeltingPhaseField<NumericType>` - phase field phi_m in [0,1] (0=solid, 1=liquid). Evolves via: dphi_m/dt = M * (driving_force). Driving force = T - T_melt. Latent heat release couples back to heat equation
-- Test: T > T_melt -> phi_m -> 1. T < T_melt -> phi_m -> 0. Sharp interface at T_melt
-- Commit: `"feat: add MeltingPhaseField for liquid/solid tracking"`
+### Task 3.5: AllenCahnTerm + ACInterfaceTerm (MOOSE Phase Field Pattern)
+- Create `models/AllenCahnTerm.hpp` + `models/ACInterfaceTerm.hpp`
+- **MOOSE reference:** `ADAllenCahn::computeDFDOP()` returns `_dFdEta[_qp]` (bulk driving force). `ACInterface::computeQpResidual()` = `_grad_u * kappaNablaLPsi()` (gradient energy).
+- `AllenCahnTerm`: bulk driving force -L*df/dη. `ACInterfaceTerm`: gradient energy L*κ*∇η·∇test. Combined: dη/dt = L*(κ∇²η - df/dη)
+- Test: double-well free energy f=(η²-1)²/4. Starting η=0.1 -> evolves to η=1. Starting η=-0.1 -> evolves to η=-1
+- Commit: `"feat: add AllenCahnTerm + ACInterfaceTerm (MOOSE ADAllenCahn + ACInterface pattern)"`
 
-### Task 5: CrystallinityPhaseField
-- `CrystallinityPhaseField<NumericType>` - phase field phi_c in [0,1] (0=amorphous, 1=crystalline). SPER velocity drives crystallization. Coupled with SPERKernel. During melt: phi_c resets (liquid has no crystallinity)
-- Test: amorphous layer -> anneal -> phi_c advances from crystalline seed. Melt -> phi_c = 0
-- Commit: `"feat: add CrystallinityPhaseField for SPER tracking"`
+### Task 4: MeltingPhaseField (Allen-Cahn Equation)
+- `MeltingPhaseField<NumericType>` - Allen-Cahn equation for liquid/solid order parameter η_m in [-1,1] (-1=solid, 1=liquid)
+- Free energy: f(η,T) = (η²-1)²/4 - λ(T-T_melt)*η (double-well + thermal driving force)
+- df/dη = η³ - η - λ(T-T_melt). When T>T_melt, driving force pushes η->1 (liquid)
+- Latent heat release couples back to heat equation via L*∂η/∂t term in HeatTransfer
+- Composed using AllenCahnTerm + ACInterfaceTerm + TimeDerivativeTerm
+- Test: T > T_melt -> η_m -> 1 (liquid). T < T_melt -> η_m -> -1 (solid). Sharp interface at T_melt
+- Commit: `"feat: add MeltingPhaseField using Allen-Cahn equation"`
+
+### Task 5: CrystallinityPhaseField (Allen-Cahn Equation)
+- `CrystallinityPhaseField<NumericType>` - Allen-Cahn for amorphous/crystalline η_c in [-1,1] (-1=amorphous, 1=crystalline)
+- Free energy: f(η,T) = (η²-1)²/4 - λ*v_SPER(T)*η. Driving force from SPER velocity
+- df/dη = η³ - η - λ*v_SPER(T). SPER velocity v = v0*exp(-Ea/kT)
+- During melt (η_m>0): η_c resets to 0 (liquid has no crystallinity) via coupling term
+- Coupled with existing SPERKernel for interface velocity
+- Test: amorphous layer -> anneal -> η_c advances from crystalline seed. Melt -> η_c resets
+- Commit: `"feat: add CrystallinityPhaseField using Allen-Cahn equation"`
 
 ### Task 6: MeltDiffusion
-- `MeltDiffusion<NumericType>` - liquid-phase dopant diffusion. D_liquid >> D_solid (orders of magnitude). Activated where phi_m > 0.5. Solute transport in liquid Si. Resolidification traps dopant at solidification front
+- `MeltDiffusion<NumericType>` - liquid-phase dopant diffusion. D_liquid >> D_solid (orders of magnitude). Activated where η_m > 0 (liquid phase field from Allen-Cahn). D_eff = D_solid + (D_liquid - D_solid) * (1+η_m)/2. Solute transport in liquid Si. Resolidification traps dopant at solidification front
 - Test: melt region -> dopant diffuses much faster than solid. Resolidify -> trap
 - Commit: `"feat: add MeltDiffusion for liquid-phase dopant transport"`
 

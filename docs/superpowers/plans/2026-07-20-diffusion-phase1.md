@@ -4,9 +4,9 @@
 
 **Goal:** Build the foundation FEM diffusion engine: generate MFEM mesh from level-set domain, assemble constant-diffusivity FEM system, integrate with SUNDIALS CVODE.
 
-**Architecture:** Monolithic MFEM-based `DiffusionEngine`. `LevelSetToMeshConverter` extracts material boundaries from ViennaPS level-set domains and generates an MFEM mesh with material attributes. `DiffusionModel` subclasses contribute stiffness/mass/reaction terms. SUNDIALS CVODE drives time integration.
+**Architecture:** Monolithic MFEM-based `DiffusionEngine` with physics-discretization separation (inspired by MOOSE `MultiSpeciesDiffusionPhysicsBase`). `DiffusionPhysics` defines WHAT to solve (species, D, BCs); `DiffusionEngine` implements HOW (CG FEM). Per-species `GridFunction` storage (not packed vector). `LevelSetToMeshConverter` extracts material boundaries from ViennaPS level-set domains. SUNDIALS CVODE (BDF, adaptive) for time integration from day one. HypreBoomerAMG preconditioner (MOOSE default for diffusion).
 
-**Tech Stack:** C++20, MFEM (FEM), SUNDIALS/CVODE (time integration), ViennaLS (level-set), CMake/CTest
+**Tech Stack:** C++20, MFEM (FEM + HypreBoomerAMG), SUNDIALS/CVODE (BDF time integration), ViennaLS (level-set), CMake/CTest
 
 ## Global Constraints
 
@@ -26,9 +26,10 @@
 |------|---------------|
 | `include/viennaps/fields/MeshAttributes.hpp` | Maps MFEM element attributes to material names |
 | `include/viennaps/fields/DiffusionModel.hpp` | Abstract base for FEM diffusion models |
+| `include/viennaps/fields/DiffusionPhysics.hpp` | Physics definition: species, D, BCs (separate from discretization) |
 | `include/viennaps/fields/models/ConstantDiffusion.hpp` | D = D0*exp(-Ea/kT) model |
 | `include/viennaps/fields/LevelSetToMesh.hpp` | Convert level-set domain to MFEM mesh |
-| `include/viennaps/fields/DiffusionEngine.hpp` | Main engine: FEM assembly + SUNDIALS |
+| `include/viennaps/fields/DiffusionEngine.hpp` | Main engine: FEM assembly + SUNDIALS + HypreBoomerAMG |
 | `tests/diffusion/CMakeLists.txt` | Test registration |
 | `tests/diffusion/testDiffusionEngine.cpp` | Tests |
 
@@ -154,7 +155,7 @@ private:
 
 **Files:** Create `include/viennaps/fields/DiffusionModel.hpp`
 
-**Produces:** `DiffusionModel<NumericType>` abstract base with virtual `assembleStiffness()`, `assembleReaction()`, `assembleMass()` (MFEM-gated), pure virtual `numSpecies()`, `speciesNames()`
+**Produces:** `DiffusionModel<NumericType>` abstract base with virtual `assembleStiffness()`, `assembleReaction()`, `assembleMass()` (MFEM-gated, using per-species GridFunction - not packed vector), pure virtual `numSpecies()`, `speciesNames()`. Inspired by MOOSE kernel pattern: each model operates on species via named GridFunction lookup, not manual offset arithmetic.
 
 - [ ] **Step 1: Write failing test**
 
@@ -189,6 +190,7 @@ Add `TestDiffusionModelInterface();` call in `main()`.
 
 #include <string>
 #include <vector>
+#include <map>
 
 #ifdef VIENNAPS_HAS_MFEM
 #include <mfem.hpp>
@@ -207,14 +209,23 @@ public:
   }
 
 #ifdef VIENNAPS_HAS_MFEM
-  virtual void assembleStiffness(mfem::BilinearForm& K,
-                                 const mfem::Vector& u,
-                                 int speciesOffset,
-                                 const mfem::GridFunction* temp) const {}
-  virtual void assembleReaction(mfem::Vector& R,
-                                const mfem::Vector& u,
-                                int speciesOffset,
-                                const mfem::GridFunction* temp) const {}
+  /// Contribute to stiffness matrix K for this species.
+  /// speciesGF: this species' GridFunction (for concentration-dependent D)
+  /// allSpecies: map of all species GridFunctions (for coupled models)
+  virtual void assembleStiffness(
+      mfem::BilinearForm& K,
+      const mfem::GridFunction& speciesGF,
+      const std::map<std::string, mfem::GridFunction*>& allSpecies,
+      const mfem::GridFunction* temp) const {}
+
+  /// Contribute to nonlinear reaction RHS R for this species.
+  virtual void assembleReaction(
+      mfem::LinearForm& R,
+      const mfem::GridFunction& speciesGF,
+      const std::map<std::string, mfem::GridFunction*>& allSpecies,
+      const mfem::GridFunction* temp) const {}
+
+  /// Contribute to mass matrix M.
   virtual void assembleMass(mfem::BilinearForm& M) const {}
 #endif
 
@@ -315,8 +326,8 @@ public:
   void setApplicableAttributes(std::vector<int> a) { attrs_ = std::move(a); }
 
 #ifdef VIENNAPS_HAS_MFEM
-  void assembleStiffness(mfem::BilinearForm& K, const mfem::Vector& u,
-                         int offset,
+  void assembleStiffness(mfem::BilinearForm& K, const mfem::GridFunction& speciesGF,
+                         const std::map<std::string, mfem::GridFunction*>& allSpecies,
                          const mfem::GridFunction* temp) const override {
     double D = static_cast<double>(getDiffusivity());
     mfem::ConstantCoefficient Dcoef(D);
@@ -348,6 +359,133 @@ private:
 
 ---
 
+### Task 3.5: DiffusionPhysics (Physics-Discretization Separation)
+
+**Files:** Create `include/viennaps/fields/DiffusionPhysics.hpp`
+
+**Produces:** `DiffusionPhysics<NumericType>` - defines WHAT to solve, separate from HOW (MOOSE `MultiSpeciesDiffusionPhysicsBase` pattern). Holds species names, model registrations, BC specifications, initial conditions. `DiffusionEngine` reads from this.
+
+**Rationale:** MOOSE separates physics definition (`MultiSpeciesDiffusionPhysicsBase`) from discretization (`MultiSpeciesDiffusionCG`). This allows future FV/DG discretizations without changing physics definition, and makes testing easier.
+
+- [ ] **Step 1: Write failing test**
+
+Add to test file:
+```cpp
+#include <fields/DiffusionPhysics.hpp>
+
+void TestDiffusionPhysics() {
+  DiffusionPhysics<double> physics;
+  physics.addSpecies("Boron");
+  physics.addSpecies("Interstitial");
+  VC_TEST_ASSERT(physics.numSpecies() == 2);
+  VC_TEST_ASSERT(physics.hasSpecies("Boron"));
+
+  // Register a model
+  auto model = std::make_shared<ConstantDiffusion<double>>("Boron");
+  model->setDiffusivity(1e-13, 3.46);
+  physics.addModel(model);
+
+  // BC specification
+  physics.addNeumannBC("Boron", "surface", 0.0);  // zero flux
+  physics.addDirichletBC("Boron", "bottom", 1e18);
+
+  VC_TEST_ASSERT(physics.numModels() == 1);
+}
+```
+Add call in `main()`.
+
+- [ ] **Step 2: Run to verify failure** -> FAIL
+
+- [ ] **Step 3: Implement DiffusionPhysics**
+
+`include/viennaps/fields/DiffusionPhysics.hpp`:
+```cpp
+#pragma once
+
+#include "DiffusionModel.hpp"
+
+#include <string>
+#include <vector>
+#include <map>
+#include <memory>
+
+namespace viennaps {
+
+template <class NumericType>
+class DiffusionPhysics {
+public:
+  void addSpecies(const std::string& name) {
+    if (std::find(species_.begin(), species_.end(), name)
+        == species_.end())
+      species_.push_back(name);
+  }
+
+  bool hasSpecies(const std::string& name) const {
+    return std::find(species_.begin(), species_.end(), name)
+           != species_.end();
+  }
+
+  int numSpecies() const {
+    return static_cast<int>(species_.size());
+  }
+
+  const std::vector<std::string>& speciesNames() const {
+    return species_;
+  }
+
+  void addModel(std::shared_ptr<DiffusionModel<NumericType>> m) {
+    models_.push_back(m);
+  }
+
+  int numModels() const {
+    return static_cast<int>(models_.size());
+  }
+
+  const std::vector<std::shared_ptr<DiffusionModel<NumericType>>>&
+  models() const { return models_; }
+
+  struct BCSpec {
+    std::string species;
+    std::string boundary;
+    std::string type;  // "neumann", "dirichlet", "segregation"
+    NumericType value;
+  };
+
+  void addNeumannBC(const std::string& sp, const std::string& bnd,
+                    NumericType flux) {
+    bcs_.push_back({sp, bnd, "neumann", flux});
+  }
+
+  void addDirichletBC(const std::string& sp, const std::string& bnd,
+                      NumericType val) {
+    bcs_.push_back({sp, bnd, "dirichlet", val});
+  }
+
+  const std::vector<BCSpec>& boundaryConditions() const {
+    return bcs_;
+  }
+
+  void setTemperature(NumericType T) { T_ = T; }
+  NumericType temperature() const { return T_; }
+
+private:
+  std::vector<std::string> species_;
+  std::vector<std::shared_ptr<DiffusionModel<NumericType>>> models_;
+  std::vector<BCSpec> bcs_;
+  NumericType T_ = NumericType(1273.15);
+};
+
+} // namespace viennaps
+```
+
+- [ ] **Step 4: Run to verify pass** -> PASS
+
+- [ ] **Step 5: Commit**
+
+`git add include/viennaps/fields/DiffusionPhysics.hpp tests/diffusion/testDiffusionEngine.cpp && git commit -m "feat: add DiffusionPhysics for physics-discretization separation"`
+
+---
+
 ### Task 4: LevelSetToMesh Converter (2D)
 
 **Files:** Create `include/viennaps/fields/LevelSetToMesh.hpp`
@@ -366,29 +504,71 @@ private:
 
 ---
 
-### Task 5: DiffusionEngine (FEM Assembly + Solver)
+### Task 5: DiffusionEngine (FEM Assembly + SUNDIALS + HypreBoomerAMG)
 
 **Files:** Create `include/viennaps/fields/DiffusionEngine.hpp`
 
 **Produces:** `DiffusionEngine<NumericType, D>` with:
 - `setMesh(unique_ptr<mfem::Mesh>, MeshAttributes)` - takes ownership, creates H1_FECollection(1,D) + FiniteElementSpace
 - `addModel(shared_ptr<DiffusionModel>)` - registers a model
-- `initializeSpecies(name, value)` - sets uniform initial concentration
-- `solve(tStart, tEnd, dtMax)` - assembles M+K from models, implicit Euler: `(M+dt*K)u^{n+1} = M*u^n`, BiCGSTAB solver
+- `initializeSpecies(name, value)` - sets uniform initial concentration on per-species GridFunction
+- `solve(tStart, tEnd, dtMax)` - assembles M+K from models per species, solves with SUNDIALS CVODE (BDF, adaptive) + HypreBoomerAMG preconditioner
 - `getSolution(name)` - returns GridFunction for one species
 - `getIntegral(name)` - returns total dose (GridFunction dot LinearForm of ones)
 
-**Key implementation:** Packed solution vector `u_` of size `nDofs*nSpecies`. Each model contributes `DiffusionIntegrator(D*coef)` to stiffness and `MassIntegrator(1.0)` to mass. Implicit Euler via `mfem::SparseMatrix A = M; A.Add(dt, K);` solved with `BiCGSTABSolver` + `DSmoother` preconditioner.
+**Key design decisions (MOOSE-inspired):**
+1. **Per-species GridFunction storage** (not packed vector): `std::map<std::string, unique_ptr<mfem::GridFunction>> species_`. Each species is a separate GridFunction on the same FES. Coupling terms read another species' GF via the `allSpecies` map. Eliminates manual offset arithmetic.
+2. **HypreBoomerAMG preconditioner** (MOOSE default for diffusion): `mfem::HypreBoomerAMG` instead of `DSmoother`. 10-100x fewer iterations on large 2D/3D meshes.
+3. **SUNDIALS CVODE** from day one: BDF orders 1-5, adaptive time stepping, error control. Uses existing `SundialsTimeIntegrator`. Essential for stiff systems (clustering, recombination in later phases). Falls back to implicit Euler if SUNDIALS unavailable.
+
+**Assembly pattern (per species):**
+```cpp
+for each species s:
+  BilinearForm K_s(fes);  // stiffness for species s
+  BilinearForm M_s(fes);  // mass for species s
+  LinearForm  R_s(fes);   // reaction RHS for species s
+  for each model m that affects s:
+    m->assembleStiffness(K_s, species_[s], allSpecies_, temp_);
+    m->assembleMass(M_s);
+    m->assembleReaction(R_s, species_[s], allSpecies_, temp_);
+  K_s.Assemble(); M_s.Assemble(); R_s.Assemble();
+  // System: M_s * du_s/dt = -K_s * u_s + R_s
+```
+
+**SUNDIALS integration:**
+```cpp
+// Pack all species GFs into a flat vector for SUNDIALS
+// RHS callback: unpack -> for each species, compute -M^{-1}*(K*u - R) -> repack
+#ifdef VIENNAPS_HAS_SUNDIALS
+SundialsTimeIntegrator<NumericType> integrator;
+integrator.setUseFieldState(true);
+// Register RHS callback that assembles K, M, R and computes du/dt
+integrator.evolve(tStart, tEnd, dtMax);
+#else
+// Fallback: implicit Euler with HypreBoomerAMG
+mfem::HypreBoomerAMG amg(A);
+mfem::GMRESSolver solver(mesh_->GetComm());
+solver.SetOperator(A);
+solver.SetPreconditioner(amg);
+#endif
+```
+
+**HypreBoomerAMG setup (always used for the linear solve within each SUNDIALS step):**
+```cpp
+mfem::HypreBoomerAMG* amg = new mfem::HypreBoomerAMG(A);
+amg->SetPrintLevel(0);
+// For diffusion: default AMG settings work well (no special config needed)
+```
 
 - [ ] **Step 1: Write failing test** - `TestDiffusionEngineAssembly()`: create 4x4 triangular mesh, register ConstantDiffusion("Boron"), initialize to 1e18, solve 0->1s, assert `getIntegral("Boron") > 0`.
 
 - [ ] **Step 2: Run to verify failure** -> FAIL
 
-- [ ] **Step 3: Implement DiffusionEngine** - full class with MFEM assembly, implicit Euler time stepping, packed multi-species vector.
+- [ ] **Step 3: Implement DiffusionEngine** - full class with per-species GridFunction storage, FEM assembly, SUNDIALS CVODE integration with HypreBoomerAMG preconditioner. Fallback to implicit Euler + HypreBoomerAMG when SUNDIALS unavailable.
 
 - [ ] **Step 4: Run to verify pass** -> PASS
 
-- [ ] **Step 5: Commit** - `git add include/viennaps/fields/DiffusionEngine.hpp && git commit -m "feat: add DiffusionEngine with FEM assembly and implicit Euler solver"`
+- [ ] **Step 5: Commit** - `git add include/viennaps/fields/DiffusionEngine.hpp && git commit -m "feat: add DiffusionEngine with SUNDIALS CVODE + HypreBoomerAMG preconditioner"`
 
 ---
 
@@ -400,6 +580,7 @@ private:
 ```cpp
 #include <fields/MeshAttributes.hpp>
 #include <fields/DiffusionModel.hpp>
+#include <fields/DiffusionPhysics.hpp>
 #include <fields/models/ConstantDiffusion.hpp>
 #ifdef VIENNAPS_HAS_MFEM
 #include <fields/LevelSetToMesh.hpp>
@@ -429,7 +610,8 @@ private:
 
 ## Self-Review Notes
 
-- **Spec coverage:** Phase 1 of spec Section 12 = "Mesh generation + Constant diffusion + SUNDIALS coupling". Tasks 1-3 cover models, Task 4 covers mesh, Task 5 covers engine+solver. SUNDIALS CVODE integration is deferred to Phase 2 (implicit Euler used as placeholder solver in Phase 1).
+- **Spec coverage:** Phase 1 of spec Section 12 = "Mesh generation + Constant diffusion + SUNDIALS coupling". Tasks 1-3 cover models, Task 3.5 covers physics definition, Task 4 covers mesh, Task 5 covers engine+SUNDIALS+HypreBoomerAMG. SUNDIALS CVODE integration is included from Phase 1 (not deferred).
+- **MOOSE-inspired improvements:** (1) HypreBoomerAMG preconditioner instead of DSmoother, (2) SUNDIALS CVODE from day one instead of implicit Euler, (3) Per-species GridFunction instead of packed vector, (4) DiffusionPhysics separates physics definition from discretization.
 - **No placeholders:** All steps have concrete code or specific instructions.
-- **Type consistency:** `DiffusionModel<NumericType>`, `ConstantDiffusion<NumericType>`, `DiffusionEngine<NumericType, D>`, `LevelSetToMeshConverter<NumericType, D>` - consistent template parameters throughout.
+- **Type consistency:** `DiffusionModel<NumericType>`, `ConstantDiffusion<NumericType>`, `DiffusionPhysics<NumericType>`, `DiffusionEngine<NumericType, D>`, `LevelSetToMeshConverter<NumericType, D>` - consistent template parameters throughout. Model assemble methods use `const mfem::GridFunction& speciesGF` + `const std::map<std::string, mfem::GridFunction*>& allSpecies` for coupling.
 - **Phases 2-11** will each get their own plan documents as implementation progresses.

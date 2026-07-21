@@ -1,6 +1,6 @@
 # Diffusion Engine Phase 3: CDD + React/Pair/Charged Variants + Clustering
 
-**Goal:** Add the CDD (Classical Dopant Diffusion) full-coupled model, React/ChargedReact/Pair/ChargedPair transport models, and point-defect clustering ({311}, VC, BIC, dislocation loops).
+**Goal:** Add the CDD (Classical Dopant Diffusion) full-coupled model, React/ChargedReact/Pair/ChargedPair transport models, and point-defect clustering ({311}, VC, BIC, dislocation loops). Refactors `DiffusionModel` to composable `KernelTerm` pattern (MOOSE kernel composition: each physics term is a separate tiny kernel, independently testable).
 
 **Depends on:** Phase 2 (Fermi, IntrinsicCarrier)
 
@@ -8,11 +8,13 @@
 
 | File | Responsibility |
 |------|---------------|
+| `fields/KernelTerm.hpp` | Composable kernel base (MOOSE Kernel pattern: one term per kernel) |
+| `fields/KernelTerms.hpp` | Built-in terms: DiffusionTerm, ReactionTerm, CoupledForceTerm, SourceTerm |
 | `models/ReactDiffusion.hpp` | I+V recombination: dC_I/dt -= k*C_I*C_V |
 | `models/ChargedReactDiffusion.hpp` | React + charge-state-dependent rates |
 | `models/PairDiffusion.hpp` | D = D_pair * (C_I/C_I_eq), TED-like |
 | `models/ChargedPairDiffusion.hpp` | Pair + Fermi-level coupling |
-| `models/CddDiffusion.hpp` | Full coupled: dopant+I+V with all terms |
+| `models/CddDiffusion.hpp` | Full coupled: composes DiffusionTerm + CoupledForceTerm + ReactionTerm |
 | `models/NeutralReactDiffusion.hpp` | Neutral defect reactions |
 | `models/Cluster311.hpp` | {311} interstitial cluster growth/dissociation |
 | `models/VacancyCluster.hpp` | Vacancy cluster (VC) model |
@@ -21,6 +23,55 @@
 | `PointDefectEquilibrium.hpp` | C_I^eq, C_V^eq calculators |
 
 ## Tasks
+
+### Task 0: KernelTerm Composable Base (MOOSE Kernel Pattern)
+
+**Files:** Create `include/viennaps/fields/KernelTerm.hpp`, `include/viennaps/fields/KernelTerms.hpp`
+
+**Produces:** `KernelTerm` abstract base + built-in terms. Each term handles ONE physics contribution (like MOOSE kernels: `MatDiffusion`, `Reaction`, `CoupledForce`, `BodyForce`). `DiffusionModel` becomes a container of `KernelTerm` objects.
+
+**MOOSE reference:** `MatDiffusion` (30 lines), `Reaction` (50 lines), `CoupledForce` (68 lines) - each tiny, focused, independently testable.
+
+- [ ] **Step 1: Write failing test** - `TestKernelTerm()`: create `DiffusionTerm` with constant D, `ReactionTerm` with rate k, `CoupledForceTerm` coupling species A to B. Verify each produces correct residual contribution.
+
+- [ ] **Step 2: Run to verify failure** -> FAIL
+
+- [ ] **Step 3: Implement KernelTerm base + built-in terms:**
+```cpp
+// Base: one physics term per KernelTerm (MOOSE Kernel pattern)
+class KernelTerm {
+public:
+  virtual ~KernelTerm() = default;
+#ifdef VIENNAPS_HAS_MFEM
+  virtual void assembleResidual(mfem::LinearForm& R,
+      const std::map<std::string, mfem::GridFunction*>& species,
+      const mfem::GridFunction* temp) const {}
+  virtual void assembleStiffness(mfem::BilinearForm& K,
+      const std::map<std::string, mfem::GridFunction*>& species,
+      const mfem::GridFunction* temp) const {}
+  virtual void assembleMass(mfem::BilinearForm& M) const {}
+#endif
+  virtual std::string targetSpecies() const = 0;
+};
+
+// DiffusionTerm: ∇·(D∇C) — MOOSE MatDiffusion equivalent
+class DiffusionTerm : public KernelTerm { ... };
+
+// ReactionTerm: λC — MOOSE Reaction equivalent
+class ReactionTerm : public KernelTerm { ... };
+
+// CoupledForceTerm: -σ*v — MOOSE CoupledForce equivalent (coupling)
+class CoupledForceTerm : public KernelTerm { ... };
+
+// SourceTerm: f(x,t) — MOOSE BodyForce equivalent
+class SourceTerm : public KernelTerm { ... };
+```
+
+- [ ] **Step 4: Run to verify pass** -> PASS
+
+- [ ] **Step 5: Commit** - `"feat: add KernelTerm composable base with MOOSE kernel pattern"`
+
+---
 
 ### Task 1: PointDefectEquilibrium Calculator
 - Create `PointDefectEquilibrium<NumericType>` with `C_I_eq(T, material)`, `C_V_eq(T, material)` using Arrhenius from parameter DB
@@ -67,10 +118,44 @@
 - Test: sustained I supersaturation -> loop grows
 - Commit: `"feat: add dislocation loop growth model"`
 
-### Task 10: CDD (Classical Dopant Diffusion) Model
-- `CddDiffusion<NumericType>` - composes Pair + React + clustering into one model. Registers dopant, I, V, 311, VC, BIC, loop species. Full coupled system
-- Test: implant B -> anneal -> verify TED (transient enhancement), 311 formation, dose retention
-- Commit: `"feat: add CDD full-coupled diffusion model"`
+### Task 10: CDD (Classical Dopant Diffusion) Model - Composable
+
+**Files:** Create `include/viennaps/fields/models/CddDiffusion.hpp`
+
+**Produces:** `CddDiffusion<NumericType>` - composes `KernelTerm` objects into full coupled system. Each physics term is a separate tiny kernel (MOOSE pattern). This is the "kitchen sink" model.
+
+- [ ] **Step 1: Write failing test** - implant B -> anneal -> verify TED (transient enhancement), 311 formation, dose retention
+
+- [ ] **Step 2: Run to verify failure** -> FAIL
+
+- [ ] **Step 3: Implement CDD as composition of KernelTerms:**
+```cpp
+CddDiffusion() {
+  // Dopant diffusion with pair enhancement
+  addTerm(std::make_shared<PairDiffusionTerm>("Boron", D_pair, "Interstitial"));
+  // Interstitial diffusion
+  addTerm(std::make_shared<DiffusionTerm>("Interstitial", D_I));
+  // Vacancy diffusion
+  addTerm(std::make_shared<DiffusionTerm>("Vacancy", D_V));
+  // I+V recombination (CoupledForceTerm pattern)
+  addTerm(std::make_shared<CoupledForceTerm>("Interstitial", "Vacancy", -k_recomb));
+  addTerm(std::make_shared<CoupledForceTerm>("Vacancy", "Interstitial", -k_recomb));
+  // {311} cluster formation (ReactionTerm + CoupledForce)
+  addTerm(std::make_shared<Cluster311FormationTerm>("311", "Interstitial"));
+  // BIC formation
+  addTerm(std::make_shared<BicFormationTerm>("BIC", "Boron", "Interstitial"));
+  // Time derivative for each species
+  addTerm(std::make_shared<TimeDerivativeTerm>("Boron"));
+  addTerm(std::make_shared<TimeDerivativeTerm>("Interstitial"));
+  addTerm(std::make_shared<TimeDerivativeTerm>("Vacancy"));
+  addTerm(std::make_shared<TimeDerivativeTerm>("311"));
+  addTerm(std::make_shared<TimeDerivativeTerm>("BIC"));
+}
+```
+
+- [ ] **Step 4: Run to verify pass** -> PASS
+
+- [ ] **Step 5: Commit** - `"feat: add CDD as composable KernelTerm composition"`
 
 ### Task 11: NeutralReactDiffusion Model
 - Neutral defect reactions without charge coupling

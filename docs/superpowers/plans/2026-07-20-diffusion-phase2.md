@@ -4,7 +4,7 @@
 
 **Goal:** Add Fermi and ChargedFermi transport models (charge-state-dependent diffusivity), segregation boundary conditions at material interfaces, and solid solubility deactivation.
 
-**Architecture:** Extends Phase 1 `DiffusionModel` base. Fermi model computes D_eff from local electron/hole concentration (n,p) and intrinsic carrier concentration n_i. Segregation implemented as MFEM boundary integrator on interface elements. Solid solubility caps active concentration, pushing excess into cluster species.
+**Architecture:** Extends Phase 1 `DiffusionModel` base. Fermi model computes D_eff from local electron/hole concentration (n,p) and intrinsic carrier concentration n_i. Uses MOOSE `MatDiffusionBase` pattern: `DiffusivityMaterial` computes D(C,T) at quadrature points via `GridFunctionCoefficient`, Jacobian gets dD/dC automatically. Segregation implemented as `SegregationBC` using MOOSE `BinaryRecombinationBC` pattern (dynamic rate K_seg*C_1 - K_deseg*C_2, equilibrium gives m(T) = K_seg/K_deseg). Solid solubility caps active concentration, pushing excess into cluster species.
 
 **Tech Stack:** C++20, MFEM, SUNDIALS, existing Phase 1 DiffusionEngine
 
@@ -17,11 +17,12 @@ Same as Phase 1. All MFEM-gated. Namespace `viennaps`. LLVM style.
 
 | File | Responsibility |
 |------|---------------|
+| `include/viennaps/fields/IntrinsicCarrier.hpp` | n_i(T, material) calculator |
+| `include/viennaps/fields/DiffusivityMaterial.hpp` | MOOSE MatDiffusion pattern: computes D(C,T) at quadrature points |
 | `include/viennaps/fields/models/FermiDiffusion.hpp` | Fermi model: D = D_i*(1+alpha*n/ni) + D_v*(1+beta*p/ni) |
 | `include/viennaps/fields/models/ChargedFermiDiffusion.hpp` | Full charge-state decomposition |
 | `include/viennaps/fields/models/SolidSolubility.hpp` | Caps active C, excess -> cluster |
-| `include/viennaps/fields/models/Segregation.hpp` | Interface BC: C_2 = m(T)*C_1 |
-| `include/viennaps/fields/IntrinsicCarrier.hpp` | n_i(T, material) calculator |
+| `include/viennaps/fields/models/Segregation.hpp` | Interface BC: dynamic rate K_seg*C1 - K_deseg*C2 (BinaryRecombinationBC pattern) |
 | `tests/diffusion/testDiffusionEngine.cpp` | Extended with Phase 2 tests |
 
 ---
@@ -44,34 +45,50 @@ Same as Phase 1. All MFEM-gated. Namespace `viennaps`. LLVM style.
 
 ---
 
-### Task 2: FermiDiffusion Model
+### Task 2: DiffusivityMaterial + FermiDiffusion Model
 
-**Files:** Create `include/viennaps/fields/models/FermiDiffusion.hpp`
+**Files:** Create `include/viennaps/fields/DiffusivityMaterial.hpp`, `include/viennaps/fields/models/FermiDiffusion.hpp`
 
-**Produces:** `FermiDiffusion<NumericType>` extending `DiffusionModel`. Computes per-element D_eff using `IntrinsicCarrier`. Uses `mfem::GridFunctionCoefficient` to evaluate local concentration -> n,p -> D_eff.
+**Produces:** `DiffusivityMaterial<NumericType>` (MOOSE `MatDiffusionBase` pattern) + `FermiDiffusion<NumericType>` extending `DiffusionModel`. DiffusivityMaterial computes D(C,T) at quadrature points via `GridFunctionCoefficient`. FermiDiffusion uses it for concentration-dependent D.
+
+**MOOSE reference:** `MatDiffusionBase::precomputeQpResidual()` = `_diffusivity[_qp] * _grad_v[_qp]`. Material property evaluated at quadrature points. Jacobian: `precomputeQpJacobian()` adds `dD/dC * phi * grad_v`.
 
 - [ ] **Step 1: Write failing test** - `TestFermiDiffusion()`: create model with D_i=1e-13, alpha=1.0. At high dopant (1e20, extrinsic), assert `getDiffusivity(C=1e20, T=1273)` > `getDiffusivity(C=1e15, T=1273)` (extrinsic enhancement).
 
 - [ ] **Step 2: Run to verify failure** -> FAIL
 
-- [ ] **Step 3: Implement** - `D_eff = D_i * (1 + alpha * n/ni)`. Override `assembleStiffness` to use `mfem::GridFunctionCoefficient` wrapping the concentration-dependent D. The coefficient evaluates D at each quadrature point from local u value.
-
-Key assembly code pattern:
+- [ ] **Step 3: Implement DiffusivityMaterial** - wraps D(C,T) computation as MFEM coefficient:
 ```cpp
-void assembleStiffness(mfem::BilinearForm& K, const mfem::Vector& u,
-                       int offset, const mfem::GridFunction* temp) const override {
-  // Create a GridFunction view of this species' block in u
-  mfem::GridFunction conc(fes_, const_cast<double*>(u.GetData() + offset));
-  // Custom coefficient: D(conc) = D_i * (1 + alpha * n(conc) / ni(T))
+// DiffusivityMaterial: evaluates D at quadrature points from local C
+// Like MOOSE MatDiffusionBase: _diffusivity[_qp] * _grad_v[_qp]
+class FermiDCoef : public mfem::Coefficient {
+  const mfem::GridFunction* conc_;
+  NumericType D_i_, alpha_, T_, ni_;
+public:
+  void SetConcentrationField(const mfem::GridFunction* c) { conc_ = c; }
+  double Eval(mfem::ElementTransformation& T, const mfem::IntegrationPoint& ip) override {
+    double C = conc_->GetValue(T, ip);
+    double n = std::max(C, (double)ni_);  // n-type approximation
+    return D_i_ * (1.0 + alpha_ * n / ni_);
+  }
+};
+```
+
+- [ ] **Step 4: Implement FermiDiffusion** - uses DiffusivityMaterial in `assembleStiffness`:
+```cpp
+void assembleStiffness(mfem::BilinearForm& K,
+                       const mfem::GridFunction& speciesGF,
+                       const std::map<std::string, mfem::GridFunction*>& allSpecies,
+                       const mfem::GridFunction* temp) const override {
   FermiDCoef coef(D_i_, alpha_, ni_, T_);
-  coef.SetConcentrationField(&conc);
+  coef.SetConcentrationField(&speciesGF);
   K.AddDomainIntegrator(new mfem::DiffusionIntegrator(coef));
 }
 ```
 
-- [ ] **Step 4: Run to verify pass** -> PASS
+- [ ] **Step 5: Run to verify pass** -> PASS
 
-- [ ] **Step 5: Commit** - `"feat: add FermiDiffusion model with charge-state-dependent diffusivity"`
+- [ ] **Step 6: Commit** - `"feat: add DiffusivityMaterial + FermiDiffusion with MOOSE MatDiffusion pattern"`
 
 ---
 
@@ -111,21 +128,41 @@ void assembleStiffness(mfem::BilinearForm& K, const mfem::Vector& u,
 
 ---
 
-### Task 5: Segregation Boundary Condition
+### Task 5: Segregation Boundary Condition (BinaryRecombinationBC Pattern)
 
 **Files:** Create `include/viennaps/fields/models/Segregation.hpp`
 
-**Produces:** `Segregation<NumericType>` - MFEM boundary integrator on interface elements between two material attributes. Enforces `C_2 = m(T) * C_1` via penalty method.
+**Produces:** `Segregation<NumericType>` - interface BC using MOOSE `BinaryRecombinationBC` dynamic rate pattern. Instead of static penalty `penalty*(C_2 - m*C_1)`, uses dynamic rate: `K_seg*C_1 - K_deseg*C_2`. At equilibrium: `C_2/C_1 = K_seg/K_deseg = m(T)`.
 
-- [ ] **Step 1: Write failing test** - `TestSegregation()`: 2-material mesh (Si + SiO2). Initialize Boron=1e18 in Si. After diffusion with segregation coefficient m=0.1, assert C_SiO2 ~ 0.1 * C_Si at interface.
+**MOOSE reference:** `BinaryRecombinationBC::computeQpResidual()` = `_test * Kr * u * v`. Dynamic rate formulation is more physical than penalty - handles transient segregation correctly.
+
+- [ ] **Step 1: Write failing test** - `TestSegregation()`: 2-material mesh (Si + SiO2). Initialize Boron=1e18 in Si. After diffusion with m=0.1, assert C_SiO2 ~ 0.1 * C_Si at interface.
 
 - [ ] **Step 2: Run to verify failure** -> FAIL
 
-- [ ] **Step 3: Implement** - Uses `mfem::BoundaryIntegrator` with penalty formulation. The segregation BC adds a penalty term: `penalty * (C_2 - m*C_1)` on interface boundary elements. The penalty coefficient is large (1e6) to enforce the constraint. `m(T)` from `ParameterDatabase`.
+- [ ] **Step 3: Implement SegregationBC** - MFEM boundary integrator using dynamic rate:
+```cpp
+// Like MOOSE BinaryRecombinationBC: _test * Kr * u * v
+// Segregation: rate = K_seg * C_1 - K_deseg * C_2
+// K_seg = m(T) * k0, K_deseg = k0
+// Equilibrium: C_2/C_1 = K_seg/K_deseg = m(T) (segregation coefficient)
+class SegregationBC : public mfem::BoundaryIntegrator {
+  NumericType K_seg_, K_deseg_;  // rate constants
+  const mfem::GridFunction* C1_;  // species in material 1
+  const mfem::GridFunction* C2_;  // species in material 2
+public:
+  void setSegregationCoefficient(NumericType m, NumericType k0) {
+    K_seg_ = m * k0;
+    K_deseg_ = k0;
+  }
+  // Residual on material 1 side: +K_seg*C1 - K_deseg*C2 (loss from mat 1)
+  // Residual on material 2 side: -K_seg*C1 + K_deseg*C2 (gain in mat 2)
+};
+```
 
 - [ ] **Step 4: Run to verify pass** -> PASS
 
-- [ ] **Step 5: Commit** - `"feat: add Segregation boundary condition for material interfaces"`
+- [ ] **Step 5: Commit** - `"feat: add Segregation BC with BinaryRecombination dynamic rate pattern"`
 
 ---
 
