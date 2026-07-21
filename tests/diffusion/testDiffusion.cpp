@@ -1,11 +1,15 @@
 #include <cmath>
 #include <iostream>
 #include <memory>
+#include <set>
 #include <vcTestAsserts.hpp>
 #include <fields/MeshAttributes.hpp>
 #include <fields/DiffusionModel.hpp>
 #include <fields/models/ConstantDiffusion.hpp>
 #include <fields/DiffusionPhysics.hpp>
+#include <fields/LevelSetToMesh.hpp>
+#include <geometries/psMakePlane.hpp>
+#include <psDomain.hpp>
 
 #ifdef VIENNAPS_HAS_MFEM
 using namespace viennaps;
@@ -127,12 +131,49 @@ void TestDiffusionPhysicsComposition() {
   VC_TEST_ASSERT(!physics.variableExists("Arsenic"));
 }
 
+void TestLevelSetToMesh2D() {
+  // Build a 2D level-set domain with one material via MakePlane.
+  // MakePlane produces a substrate extending in the +y direction centered on
+  // the origin; it is the lightest geometry generator available and yields a
+  // domain whose first level set's grid provides the bounds + gridDelta the
+  // converter reads.
+  auto domain = viennaps::Domain<double, 2>::New();
+  viennaps::MakePlane<double, 2>(domain, /*gridDelta*/ 0.5, /*xExtent*/ 8.0,
+                                 /*yExtent*/ 0.0, /*baseHeight*/ 0.0,
+                                 /*periodic*/ false,
+                                 /*material*/ viennaps::Material::Si)
+      .apply();
+  VC_TEST_ASSERT(domain->getLevelSets().size() == 1);
+  VC_TEST_ASSERT(domain->getMaterialMap());
+
+  viennaps::LevelSetToMeshConverter<double, 2> converter;
+  auto [mesh, attrs] = converter.convert(*domain);
+
+  VC_TEST_ASSERT(mesh != nullptr);
+  VC_TEST_ASSERT(mesh->GetNV() > 0);
+  VC_TEST_ASSERT(mesh->GetNE() > 0);
+
+  // Element attributes must form a non-empty set (materials were tagged).
+  std::set<int> attributes;
+  for (int i = 0; i < mesh->GetNE(); ++i) {
+    attributes.insert(mesh->GetAttribute(i));
+  }
+  VC_TEST_ASSERT(!attributes.empty());
+  VC_TEST_ASSERT(attrs.numMaterials() >= 1);
+
+  std::cout << "[level-set-to-mesh-check] nv=" << mesh->GetNV()
+            << " ne=" << mesh->GetNE()
+            << " attributes=" << attributes.size()
+            << " materials=" << attrs.numMaterials() << "\n";
+}
+
 int main() {
   TestMeshAttributes();
   TestDiffusionModelInterface();
   TestConstantDiffusion();
   TestDiffusionPhysics();
   TestDiffusionPhysicsComposition();
+  TestLevelSetToMesh2D();
   std::cout << "All diffusion tests passed.\n";
   return 0;
 }
