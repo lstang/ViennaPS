@@ -1,7 +1,9 @@
+#include <cmath>
 #include <iostream>
 #include <vcTestAsserts.hpp>
 #include <fields/MeshAttributes.hpp>
 #include <fields/DiffusionModel.hpp>
+#include <fields/models/ConstantDiffusion.hpp>
 
 #ifdef VIENNAPS_HAS_MFEM
 using namespace viennaps;
@@ -32,9 +34,23 @@ void TestDiffusionModelInterface() {
   VC_TEST_ASSERT(m.speciesNames()[0] == "TestSpecies");
 }
 
+void TestConstantDiffusion() {
+  ConstantDiffusion<double> model("Boron");
+  model.setDiffusivity(1e-13, 3.46);
+  MeshAttributes attrs;
+  attrs.setAttributeName(1, "Si");
+  model.setup(attrs, 1273.15);
+  VC_TEST_ASSERT(model.numSpecies() == 1);
+  VC_TEST_ASSERT(model.speciesNames()[0] == "Boron");
+  double kB = 8.617333262145e-5;
+  double expectedD = 1e-13 * std::exp(-3.46 / (kB * 1273.15));
+  VC_TEST_ASSERT(std::abs(model.getDiffusivity() - expectedD) / expectedD < 1e-6);
+}
+
 int main() {
   TestMeshAttributes();
   TestDiffusionModelInterface();
+  TestConstantDiffusion();
   std::cout << "All diffusion tests passed.\n";
   return 0;
 }
