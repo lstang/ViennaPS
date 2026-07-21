@@ -61,13 +61,13 @@
 | `include/viennaps/fields/LevelSetToMesh.hpp` | Convert level-set domain to MFEM mesh |
 | `include/viennaps/fields/DiffusionEngine.hpp` | Main engine: FEM assembly + SUNDIALS + HypreBoomerAMG |
 | `tests/diffusion/CMakeLists.txt` | Test registration |
-| `tests/diffusion/testDiffusionEngine.cpp` | Tests |
+| `tests/diffusion/testDiffusion.cpp` | Tests |
 
 ---
 
 ### Task 1: MeshAttributes Helper
 
-**Files:** Create `include/viennaps/fields/MeshAttributes.hpp`, `tests/diffusion/CMakeLists.txt`, `tests/diffusion/testDiffusionEngine.cpp`
+**Files:** Create `include/viennaps/fields/MeshAttributes.hpp`, `tests/diffusion/CMakeLists.txt`, `tests/diffusion/testDiffusion.cpp`
 
 **Produces:** `MeshAttributes` with `setAttributeName(int, string)`, `materialName(int)`, `isMaterial(int, string)`, `numMaterials()`, `attributeOf(string)`, `hasMaterial(string)`.
 
@@ -85,7 +85,7 @@ add_test(NAME ${PROJECT_NAME} COMMAND $<TARGET_FILE:${PROJECT_NAME}>)
 
 - [ ] **Step 2: Write failing test**
 
-`tests/diffusion/testDiffusionEngine.cpp`:
+`tests/diffusion/testDiffusion.cpp`:
 ```cpp
 #include <iostream>
 #include <fields/MeshAttributes.hpp>
@@ -191,7 +191,7 @@ private:
 
 - [ ] **Step 1: Write failing test**
 
-Add to `tests/diffusion/testDiffusionEngine.cpp` before `main()`:
+Add to `tests/diffusion/testDiffusion.cpp` before `main()`:
 ```cpp
 #include <fields/DiffusionModel.hpp>
 
@@ -281,7 +281,7 @@ protected:
 
 - [ ] **Step 5: Commit**
 
-`git add include/viennaps/fields/DiffusionModel.hpp tests/diffusion/testDiffusionEngine.cpp && git commit -m "feat: add DiffusionModel abstract base class"`
+`git add include/viennaps/fields/DiffusionModel.hpp tests/diffusion/testDiffusion.cpp && git commit -m "feat: add DiffusionModel abstract base class"`
 
 ---
 
@@ -387,7 +387,7 @@ private:
 
 - [ ] **Step 5: Commit**
 
-`git add include/viennaps/fields/models/ConstantDiffusion.hpp tests/diffusion/testDiffusionEngine.cpp && git commit -m "feat: add ConstantDiffusion model with Arrhenius diffusivity"`
+`git add include/viennaps/fields/models/ConstantDiffusion.hpp tests/diffusion/testDiffusion.cpp && git commit -m "feat: add ConstantDiffusion model with Arrhenius diffusivity"`
 
 ---
 
@@ -589,7 +589,7 @@ private:
 
 - [ ] **Step 5: Commit**
 
-`git add include/viennaps/fields/DiffusionPhysics.hpp tests/diffusion/testDiffusionEngine.cpp && git commit -m "feat: add DiffusionPhysics with MOOSE PhysicsBase composition gatekeepers and per-species BC map"`
+`git add include/viennaps/fields/DiffusionPhysics.hpp tests/diffusion/testDiffusion.cpp && git commit -m "feat: add DiffusionPhysics with MOOSE PhysicsBase composition gatekeepers and per-species BC map"`
 
 **Notes for downstream phases:**
 - **Phase 3 Task 10 (CDD composition):** `CddDiffusion` MUST call `physics.shouldCreateTimeDerivative(species, *this)` for each species it composes terms on, and skip the `TimeDerivativeTerm` when denied. This is the mechanism that prevents the double-`dC/dt` bug when CDD is composed with FermiDiffusion.
@@ -737,13 +737,13 @@ amg->SetPrintLevel(0);
 
 ### Task 7: Dose Conservation Validation Test
 
-**Files:** Modify `tests/diffusion/testDiffusionEngine.cpp`
+**Files:** Modify `tests/diffusion/testDiffusion.cpp`
 
 - [ ] **Step 1: Write dose conservation test** - `TestDoseConservation()`: create 8x8 mesh, ConstantDiffusion with D=1e-8, initialize uniform 1e18, solve 0->10s with dt=1.0. Assert `|dose_final - dose_initial| / dose_initial < 0.01` (1% dose conservation). The implicit Euler scheme with Neumann (zero-flux) BCs should conserve total dose.
 
 - [ ] **Step 2: Run test** -> PASS (dose conserved under zero-flux BCs)
 
-- [ ] **Step 3: Commit** - `git add tests/diffusion/testDiffusionEngine.cpp && git commit -m "test: add dose conservation validation for DiffusionEngine"`
+- [ ] **Step 3: Commit** - `git add tests/diffusion/testDiffusion.cpp && git commit -m "test: add dose conservation validation for DiffusionEngine"`
 
 ---
 
