@@ -79,3 +79,38 @@ Commits 777f645..78b2ed3 (11 commits, 78KB). All Phase 1 spec ✅ + quality Appr
 - `intermediate` and `removeStrayPoints` tests fail on a `psAnalyticImplant.hpp:9` include-path bug (`psProcessModel.hpp` lives at `include/viennaps/process/psProcessModel.hpp`). Predates this branch.
 
 ## Status: Phase 1 implementation complete. Ready for Phase 2.
+
+## Post-review fixes (Phase 1 polish)
+
+Four issues raised after the final review, all resolved:
+
+1. **Picard strategy documented on DiffusionModel.hpp** — added a
+   `\section jacobian-strategy` doc block enumerating the three strategies
+   (Picard default, manual Jacobian, MFEM NL kernel) per Phase 1 Task 5
+   spec. Models opting into strategy (b) must declare so in their header.
+
+2. **Dirichlet/Neumann BCs now applied by the engine** — previously the
+   engine consumed `DiffusionPhysics::BCSpec` only as documentation and
+   always ran with natural zero-flux. Now:
+   - Dirichlet: `BilinearForm::EliminateEssentialBC(ess_attr_marker,
+     presc_values, rhs, DIAG_ONE)` per step.
+   - Neumann (non-zero): `BoundaryLFIntegrator(flux_coef)` added to RHS.
+   - Boundary spec `"all"` (all attrs) or numeric string `"1"`, `"2"`, ...
+   - segregation/robin: warning + treated as natural (Phase 2 Task 5
+     territory).
+   New tests: `TestDirichletBC` (interior relaxes to clamped 1e18),
+   `TestNeumannBC` (dose increases at expected flux*perimeter*t rate,
+   4% spatial-discretization error). All 34 tests pass.
+
+3. **System-matrix caching** — DROPPED in favor of per-step rebuild.
+   Rationale: the per-step `BilinearForm` rebuild enables clean Dirichlet
+   elimination via MFEM's idiomatic API. The cache was the source of a
+   subtle bug (`EliminateRow(DIAG_ONE)` requires the diagonal to exist
+   in sparsity pattern, fragile). For Phase 1's small meshes the cost is
+   negligible; for Phase 2 nonlinear D the K matrix changes per step
+   anyway so caching wouldn't help. Trade-off documented inline.
+
+4. **"Conforming cut-cell deferred" tracked as follow-up F6** — see
+   `docs/superpowers/specs/diffusion-phase1-followups.md`. Lists the
+   three deferred pieces (conforming cut mesh, transition layer,
+   MFEMCutTransitionSubMesh integration) with triggers for revisit.

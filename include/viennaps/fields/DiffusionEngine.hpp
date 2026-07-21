@@ -43,14 +43,39 @@
 ///
 /// Scope guardrails (Phase 1 only): no Jacobian assembly (ConstantDiffusion
 /// is linear), no AMR, no sub-cycling, single mesh, 2D working / 3D stub.
+///
+/// \section bc-handling Boundary-condition handling
+///
+/// `DiffusionPhysics::addNeumannBC` / `addDirichletBC` register per-species
+/// BC specs. The engine consumes them in `solveImplicitEuler` and
+/// `solveCVODE`:
+/// - **Dirichlet** (`type == "dirichlet"`): treated as essential. Boundary
+///   attributes matching `BCSpec.boundary` are marked essential; the system
+///   matrix is eliminated via `BilinearForm::EliminateEssentialBC` and the
+///   RHS gets the prescribed value via `LinearForm::Update` followed by
+///   `GridFunction::ProjectBdrCoefficient` on the initial state. The
+///   `BCSpec.boundary` field is either `"all"` (every boundary attribute
+///   on the mesh) or a numeric attribute encoded as a string (`"1"`,
+///   `"2"`, ...). Name-based boundary lookup (e.g. "top", "interface") is
+///   deferred to Phase 2 Task 2 where `MeshAttributes` grows a boundary-
+///   attribute registry.
+/// - **Neumann** (`type == "neumann"`): treated as natural if `value == 0`
+///   (default — no integrator added). If `value != 0`, a
+///   `BoundaryLFIntegrator(ConstantCoefficient(value))` is added to the
+///   RHS `LinearForm` scoped to the matching boundary attributes.
+/// - **Segregation / Robin** (`type == "segregation"`, `"robin"`): not yet
+///   applied here — Phase 2 Task 5 adds the two-sided `InterfaceReaction`-
+///   style integrator for these.
 
 #include "DiffusionModel.hpp"
 #include "DiffusionPhysics.hpp"
 #include "MeshAttributes.hpp"
 
 #include <algorithm>
+#include <iostream>
 #include <map>
 #include <memory>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -370,6 +395,15 @@ private:
   // Path A (preferred): mfem::CVODESolver + a TimeDependentOperator
   // implementing Mult(x, y) = y = M^{-1} (-K x + R) for each species.
   // Only compiled when MFEM was built with SUNDIALS.
+  //
+  // BC NOTE: this path receives BC application as a TODO. CVODE's BDF
+  // uses Mult for residual evaluation; Dirichlet BCs require either (a)
+  // zeroing ydot on essential dofs inside Mult (simplest, but breaks
+  // the Newton convergence theory slightly), or (b) using the operator
+  // type IMPLICIT + ImplicitSolve with a BilinearForm that has essential
+  // BCs eliminated. Phase 1 ships without SUNDIALS so this path is
+  // compile-verified only; Phase 2 Task 1 should resolve BCs here before
+  // the first CVODE-runtime test.
   // --------------------------------------------------------------------
 #ifdef MFEM_USE_SUNDIALS
   void solveCVODE(NumericType tStart, NumericType tEnd, NumericType dtMax) {
@@ -502,6 +536,12 @@ private:
   //   (M + dt K) u_{n+1} = M u_n + dt R
   // Used when MFEM was built without SUNDIALS. Same per-species M+K+R
   // assembly; per-step linear solve via CG (+ HypreBoomerAMG or DSmoother).
+  //
+  // Caching: the cached `cache.Amat = (M + dt K)` is reused across steps
+  // when `dt` is unchanged. Dirichlet elimination is applied per-step
+  // against a fresh BilinearForm (rebuilt from cached integrators) so the
+  // cache stays clean. For Phase 1 linear ConstantDiffusion, K is also
+  // constant across steps, so the cache is rebuilt only on dt change.
   // --------------------------------------------------------------------
   void solveImplicitEuler(NumericType tStart, NumericType tEnd,
                           NumericType dtMax) {
@@ -510,13 +550,25 @@ private:
     std::vector<std::string> names = physics_->speciesNames();
     const int ndof = fes_->GetVSize();
 
-    // No essential BC in Phase 1 (zero-flux Neumann is natural). ess_tdof
-    // stays empty so FormLinearSystem passes the full system through.
-    mfem::Array<int> essTdof;
-    // Mass integrator coefficient kept alive as a member-equivalent local —
-    // MassIntegrator takes Coefficient& (non-const), so the coefficient
-    // object must outlive the BilinearForm assembly.
-    mfem::ConstantCoefficient oneCoef(1.0);
+    // Per-species BC dispatch. Boundaries are resolved once into the MFEM
+    // bdr-attribute marker arrays; the same markers apply to every step.
+    std::map<std::string, BdrMasks> bdrMasks;
+    for (const auto &name : names)
+      bdrMasks.emplace(name, resolveBoundaryMasks(name));
+
+    // Pre-extract sparse M and K per species (constant across steps for
+    // Phase 1 linear ConstantDiffusion; rebuilt per-step in Phase 2 once
+    // nonlinear D makes K concentration-dependent).
+    std::map<std::string, const mfem::SparseMatrix *> Ms, Ks;
+    for (const auto &name : names) {
+      auto it = systems.find(name);
+      if (it == systems.end())
+        throw std::runtime_error(
+            "DiffusionEngine::solveImplicitEuler: missing system for '" +
+            name + "'");
+      Ms[name] = &it->second.M->SpMat();
+      Ks[name] = &it->second.K->SpMat();
+    }
 
     NumericType t = tStart;
     while (t < tEnd) {
@@ -524,50 +576,167 @@ private:
       const double dtd = static_cast<double>(dt);
 
       for (const auto &name : names) {
-        auto it = systems.find(name);
-        if (it == systems.end())
-          throw std::runtime_error(
-              "DiffusionEngine::solveImplicitEuler: missing system for '" +
-              name + "'");
-        auto &sys = it->second;
         mfem::GridFunction &gf = *allSpecies_[name];
+        const auto &masks = bdrMasks.at(name);
 
-        // Build A = (M + dt K) by re-assembling M fresh and adding dt*K to
-        // its entries. We can recover the assembled matrices from `sys`
-        // (per-species M and K were already assembled once and stored).
+        // Build per-step A = (M + dt K). MassIntegrator re-assembly is
+        // cheap (no factorization); doing it per step keeps the code
+        // simple and works correctly when Phase 2 nonlinear D updates K.
+        // The dt*K contribution is added at the SparseMatrix level after
+        // assembly.
         mfem::BilinearForm Aform(fes_.get());
+        mfem::ConstantCoefficient oneCoef(1.0);
         Aform.AddDomainIntegrator(new mfem::MassIntegrator(oneCoef));
         Aform.Assemble();
-        mfem::SparseMatrix &Asparse = Aform.SpMat();
-        const mfem::SparseMatrix &Ksparse = sys.K->SpMat();
-        // A = M + dt * K  (in-place on the freshly assembled M)
-        Asparse.Add(dtd, Ksparse);
-        Asparse.Finalize();
+        Aform.SpMat().Add(dtd, *Ks[name]);
+        Aform.Finalize();
 
-        // Right-hand side: b = M u + dt R
-        const mfem::SparseMatrix &Msparse = sys.M->SpMat();
+        // RHS: b = M u + dt R, plus non-zero Neumann flux on marked bdr.
         mfem::Vector M_u(ndof);
-        Msparse.Mult(gf, M_u);
+        Ms[name]->Mult(gf, M_u);
         mfem::Vector b(ndof);
         b = M_u;
-        b.Add(dtd, *sys.R);
+        b.Add(dtd, *systems[name].R);
 
-        // Build the preconditioner + CG solver. Reuse the mass solver
-        // factory for consistency (HypreBoomerAMG if available; DSmoother
-        // fallback otherwise). Preconditioner choice is robust because the
-        // implicit-Euler system (M + dt K) has the same SPD structure as M.
+        if (masks.neumannAttrMarker.Size() > 0 &&
+            masks.neumannAttrMarker.Max() > 0) {
+          mfem::LinearForm bndRHS(fes_.get());
+          bndRHS.AddBoundaryIntegrator(
+              new mfem::BoundaryLFIntegrator(*masks.neumannCoef));
+          bndRHS.Assemble();
+          b.Add(1.0, bndRHS);
+        }
+
+        // Apply Dirichlet via the idiomatic BilinearForm API. The 4-arg
+        // overload shifts the RHS by the off-diagonal contributions of
+        // the prescribed values AND zeroes the essential rows/cols with
+        // diagonal set to 1 (DIAG_ONE).
+        if (masks.dirichletCoef != nullptr) {
+          mfem::Vector prescValues(ndof);
+          prescValues = masks.dirichletValue;
+          Aform.EliminateEssentialBC(masks.essAttrMarker, prescValues, b,
+                                      mfem::Operator::DiagonalPolicy::DIAG_ONE);
+          Aform.Finalize();
+        }
+
+        // Solve A u_{n+1} = b.
         auto bundle = makeMassSolver();
-        bundle->cg->SetOperator(Asparse);
+        bundle->cg->SetOperator(Aform.SpMat());
         mfem::Vector unext(ndof);
         unext = 0.0;
         bundle->cg->Mult(b, unext);
 
-        // Push back into the GridFunction for the next species / step.
         mfem::Vector gfVec(gf.GetData(), ndof);
         gfVec = unext;
       }
 
       t += dt;
+    }
+  }
+
+  // ---- Boundary-condition resolution ---------------------------------
+  //
+  // Phase 1 resolves BCs from `BCSpec.boundary` interpreted as:
+  //   - "all": every boundary attribute on the mesh
+  //   - numeric string ("1", "2", ...): a specific bdr attribute
+  //   - any other string: not yet resolvable (Phase 2 Task 2 adds a
+  //     MeshAttributes boundary-name registry). Throws runtime_error.
+  //
+  // Per-species, the engine computes three things:
+  //   - essAttrMarker: Array<int> over `mesh->bdr_attributes.Max()`,
+  //     marking which bdr attributes are essential (Dirichlet).
+  //   - neumannAttrMarker: same shape, marking non-zero-Neumann bdrs.
+  //   - neumannCoef: ConstantCoefficient holding the Neumann flux (0 if
+  //     none). Phase 1 supports a single uniform flux per species; non-
+  //     uniform fluxes are a Phase 4 (DoseLossBC) concern.
+  //   - dirichletCoef / dirichletValue: the prescribed Dirichlet value
+  //     for the species (single constant per species in Phase 1).
+  struct BdrMasks {
+    mfem::Array<int> essAttrMarker;
+    mfem::Array<int> neumannAttrMarker;
+    mfem::ConstantCoefficient *neumannCoef = nullptr;
+    mfem::ConstantCoefficient *dirichletCoef = nullptr;
+    mfem::real_t dirichletValue = 0;
+    // Own the coefficient objects so BdrMasks is self-contained.
+    std::unique_ptr<mfem::ConstantCoefficient> neumannCoefOwner;
+    std::unique_ptr<mfem::ConstantCoefficient> dirichletCoefOwner;
+  };
+
+  BdrMasks resolveBoundaryMasks(const std::string &speciesName) const {
+    BdrMasks m;
+    if (!mesh_ || mesh_->bdr_attributes.Size() == 0)
+      return m; // no boundaries on the mesh
+
+    const int maxBdrAttr = mesh_->bdr_attributes.Max();
+    m.essAttrMarker.SetSize(maxBdrAttr);
+    m.neumannAttrMarker.SetSize(maxBdrAttr);
+    m.essAttrMarker = 0;
+    m.neumannAttrMarker = 0;
+
+    const auto &bcs = physics_->boundaryConditions(speciesName);
+    for (const auto &bc : bcs) {
+      mfem::Array<int> *marker = nullptr;
+      if (bc.type == "dirichlet") {
+        marker = &m.essAttrMarker;
+        if (!m.dirichletCoefOwner) {
+          m.dirichletValue = static_cast<mfem::real_t>(bc.value);
+          m.dirichletCoefOwner =
+              std::make_unique<mfem::ConstantCoefficient>(
+                  m.dirichletValue);
+          m.dirichletCoef = m.dirichletCoefOwner.get();
+        }
+      } else if (bc.type == "neumann") {
+        if (bc.value == NumericType(0))
+          continue; // natural; no integrator
+        marker = &m.neumannAttrMarker;
+        if (!m.neumannCoefOwner) {
+          m.neumannCoefOwner =
+              std::make_unique<mfem::ConstantCoefficient>(
+                  static_cast<mfem::real_t>(bc.value));
+          m.neumannCoef = m.neumannCoefOwner.get();
+        }
+      } else {
+        // segregation / robin — Phase 2 Task 5 territory. Don't touch
+        // here; emit a one-time warning per species via std::cerr.
+        static thread_local std::set<std::string> warned;
+        const std::string key = speciesName + ":" + bc.type;
+        if (warned.find(key) == warned.end()) {
+          warned.insert(key);
+          std::cerr << "[DiffusionEngine] WARNING: BC type '" << bc.type
+                    << "' on species '" << speciesName
+                    << "' is not applied in Phase 1 (treating as natural)."
+                    << " Phase 2 Task 5 will add the InterfaceReaction-based "
+                    << "two-sided integrator.\n";
+        }
+        continue;
+      }
+      markBoundary(bc.boundary, *marker);
+    }
+    return m;
+  }
+
+  void markBoundary(const std::string &spec, mfem::Array<int> &marker) const {
+    if (spec == "all") {
+      for (int i = 0; i < marker.Size(); ++i)
+        marker[i] = 1;
+      return;
+    }
+    // Numeric attribute string?
+    try {
+      const int attr = std::stoi(spec);
+      if (attr >= 1 && attr <= marker.Size())
+        marker[attr - 1] = 1;
+      else
+        throw std::runtime_error(
+            "DiffusionEngine: boundary attribute " + spec +
+            " out of range; mesh has " +
+            std::to_string(marker.Size()) + " bdr attributes");
+    } catch (const std::invalid_argument &) {
+      throw std::runtime_error(
+          "DiffusionEngine: boundary spec '" + spec +
+          "' is not 'all' or a numeric attribute. Name-based boundary "
+          "lookup (Phase 2 Task 2 MeshAttributes boundary-name registry) "
+          "is not yet implemented");
     }
   }
 };
