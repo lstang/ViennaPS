@@ -76,9 +76,20 @@
 - Commit: `"feat: add FDTD for sub-wavelength laser absorption"`
 
 ### Task 9: Saving Thermal Profile
-- Save T(x,t) profile for use in subsequent diffusion steps. Load saved profile for non-thermal-coupled diffusion
-- Test: save -> load -> verify identical
-- Commit: `"feat: add thermal profile save/load"`
+
+- Save the full thermal-and-phase state for use in subsequent diffusion steps; load for non-thermal-coupled diffusion.
+
+**Scope (must be specified — the original task was too thin):**
+1. **What is saved:** T(x), the phase fields η_m (melt) and η_c (crystallinity) from Tasks 4-5, AND any latent-heat accumulators / internal state the time integrator carries. Saving only T silently corrupts the restart if a subsequent step resumes from a partially-molten state.
+2. **Format:** binary `dataStore` stream per MOOSE convention (verified `framework/include/restart/Backup.h` lines 25-33 — two stringstreams for header+data, plus `vector<pair<string,string>> mesh_files` sidecar). Use VTK/ParaView output only for inspection, not restart.
+3. **Mesh-topology survival:** Phase 11 AMR changes mesh topology between save and load. The `mesh_files` sidecar exists precisely for this — save the mesh alongside the fields. A restart across an AMR cycle without mesh sidecar silently misinterprets DoF indices.
+
+**MOOSE idiom (verified):** `framework/include/restart/Restartable.h::declareRestartableData<T>(name, args...)` (lines 126-127) — *individual fields* opt into restart by name; the engine's `save()`/`load()` walks the declared set. This avoids the "did I remember to serialize μ_accumulator?" bug class. Adopt this pattern: every model member that should survive a save/load declares itself with a name on construction.
+
+**Action:** make every Phase 9 model (`MeltingPhaseField`, `CrystallinityPhaseField`, `MeltDiffusion`, latent-heat accumulator inside `HeatTransfer`) declare its persistent state via a `declareRestartable<T>("name")` API on the engine. `save()`/`load()` serialize the declared set + the mesh sidecar.
+
+- Test: (a) save → load → verify all fields identical bit-for-bit; (b) save → AMR cycle (Phase 11) → load → verify fields identical after topology change (uses mesh sidecar); (c) save → engine destroyed → new engine → load → verify identical (no in-memory leakage).
+- Commit: `"feat: add full thermal+phase state save/load via declareRestartableData pattern + mesh sidecar (MOOSE Restartable + Backup pattern)"`
 
 ### Task 10: Integration Test - Flash Anneal
 - Implant B -> flash anneal (melt) -> verify: (1) T reaches T_melt, (2) dopant redistributes in melt, (3) resolidification traps dopant, (4) final profile is shallower/broader than solid-state anneal

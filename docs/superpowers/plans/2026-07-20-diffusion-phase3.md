@@ -32,7 +32,13 @@
 
 **MOOSE reference:** `MatDiffusion` (30 lines), `Reaction` (50 lines), `CoupledForce` (68 lines) - each tiny, focused, independently testable.
 
-- [ ] **Step 1: Write failing test** - `TestKernelTerm()`: create `DiffusionTerm` with constant D, `ReactionTerm` with rate k, `CoupledForceTerm` coupling species A to B. Verify each produces correct residual contribution.
+**Primary/equilibrium species split (MOOSE `chemical_reactions` pattern — verified):** The canonical MOOSE multi-species coupling example lives at `modules/chemical_reactions/include/kernels/`. Kernels come in pairs:
+- `PrimaryDiffusion` / `PrimaryConvection` / `PrimaryTimeDerivative` — operate on **primary** species (the N species being solved as unknowns).
+- `CoupledDiffusionReactionSub` / `CoupledConvectionReactionSub` / `CoupledBEEquilibriumSub` — operate on **equilibrium (secondary)** species, derived as AuxVariables from primary species via stoichiometry + log_k. `CoupledDiffusionReactionSub` carries `_weight`, `_log_k`, `_sto_u`, `std::vector<Real> _sto_v` (stoichiometric coefs), plus `_gamma_u`, `_gamma_v[]`, `_gamma_eq` activity coefficients.
+
+**Why this matters for the diffusion plan:** `ChargedFermiDiffusion` (Phase 2 Task 3) decomposes a dopant into charge states B⁰, B⁺, B⁻. Solving all three as primary species is redundant — they are in instantaneous equilibrium via the Fermi level. Instead, solve 1 primary (total B) and compute 3 equilibrium AuxVariables (the charge-state fractions) the way `CoupledBEEquilibriumSub` does. **Add to this task:** an `EquilibriumSpeciesAuxKernel` concept that the engine evaluates *after* each Newton step to update AuxVariables from primary species + equilibrium constants. This avoids redundant solves and is the only correct formulation when charge-state equilibrium is fast compared to diffusion.
+
+- [ ] **Step 1: Write failing test** - `TestKernelTerm()`: create `DiffusionTerm` with constant D, `ReactionTerm` with rate k, `CoupledForceTerm` coupling species A to B. Verify each produces correct residual contribution. **Add:** `TestEquilibriumSpeciesAuxKernel()` — define a primary species "B_total" and an equilibrium species "B_active = K_eq(T) * B_total"; after evaluating the aux kernel, verify B_active = K_eq * B_total within tolerance.
 
 - [ ] **Step 2: Run to verify failure** -> FAIL
 
@@ -89,9 +95,18 @@ class SourceTerm : public KernelTerm { ... };
 - Commit: `"feat: add ChargedReactDiffusion model"`
 
 ### Task 4: PairDiffusion Model
-- `PairDiffusion<NumericType>` - dopant+I pair. D_eff = D_pair * (C_I / C_I_eq). Consumes I, enhances dopant mobility (TED)
-- Test: inject excess I, verify dopant diffusion enhanced vs constant-D baseline
-- Commit: `"feat: add PairDiffusion model for TED"`
+
+- `PairDiffusion<NumericType>` - dopant+I pair. D_eff = D_pair * (C_I / C_I_eq). Consumes I, enhances dopant mobility (TED).
+
+**Stabilization (REQUIRED — pair diffusion is convection-dominated):** `D_eff = D_pair * C_I/C_I_eq` is mathematically a *concentration-dependent diffusion* that, when linearized around a sharp C_I front (the typical TED initial condition), behaves like advection along the C_I gradient. Plain Galerkin will oscillate. MOOSE ships ready-made SUPG (Streamline Upwind Petrov-Galerkin) at `modules/level_set/include/kernels/LevelSetAdvectionSUPG.{h,C}` (verified):
+- `LevelSetAdvectionSUPG` is `ADKernelGrad`; `precomputeQpResidual()` returns `tau * v * (v · ∇u)` with the classic Hughes-Brooks parameter **`tau = hmin / (2 * ||v||)`**.
+- `LevelSetTimeDerivativeSUPG` provides the corresponding SUPG-stabilized time derivative `tau * v * u_dot`.
+- `LevelSetForcingFunctionSUPG` covers the source term.
+
+**Action:** port these to MFEM as `SupgAdvectionTerm` / `SupgTimeDerivativeTerm` `KernelTerm` subclasses (Phase 3 Task 0). The velocity field `v` is the effective drift = `D_pair * grad(C_I) / C_I_eq` — a coupled-species-derived coefficient, exactly the case `LevelSetAdvectionSUPG` handles (velocity is a `ADVectorVariableValue`). The same SUPG terms are needed by Phase 4 `OedSource` and Phase 9 `MeltDiffusion`.
+
+- Test: inject excess I (step profile), verify dopant diffusion enhanced vs constant-D baseline AND verify no spurious oscillations in the dopant profile (SUPG on vs off comparison; SUPG-off should show >5% overshoot, SUPG-on <0.1%).
+- Commit: `"feat: add PairDiffusion model for TED with SUPG stabilization (MOOSE LevelSetAdvectionSUPG pattern)"`
 
 ### Task 5: ChargedPairDiffusion Model
 - Pair + Fermi coupling: D_pair depends on charge state
@@ -124,7 +139,13 @@ class SourceTerm : public KernelTerm { ... };
 
 **Produces:** `CddDiffusion<NumericType>` - composes `KernelTerm` objects into full coupled system. Each physics term is a separate tiny kernel (MOOSE pattern). This is the "kitchen sink" model.
 
-- [ ] **Step 1: Write failing test** - implant B -> anneal -> verify TED (transient enhancement), 311 formation, dose retention
+**MOOSE alignment reference (verified):** `modules/chemical_reactions/include/physics/ReactionNetworkPhysicsBase.{h,C}` is the actual MOOSE physics base for coupled reaction networks. It holds `std::vector<VariableName> _solver_species` (primary) separate from `std::vector<AuxVariableName> _aux_species` (equilibrium), parses a `reactions` string into `ReactionNetworkUtils::Reaction` objects, and supports per-equation `equation_scaling`. Aligning the CDD API with this pattern (rather than hand-composing KernelTerms) makes the model declaratively reaction-string-driven — closer to how TCAD engineers specify these networks.
+
+**Action:** make `CddDiffusion` accept a small reaction-specification format (list of `(reactants, products, rate_constant, equilibrium_constant)` tuples) and translate each into the appropriate `KernelTerm` composition internally. Keep the explicit `addTerm(...)` API from below for power users.
+
+**Also:** per Phase 1 Task 3.5, `CddDiffusion` MUST call `physics.shouldCreateTimeDerivative(species, *this)` for each species it composes terms on, and skip the `TimeDerivativeTerm` when denied. This is the mechanism that prevents a double-`dC/dt` bug when CDD is composed with FermiDiffusion on the same species.
+
+- [ ] **Step 1: Write failing test** - implant B -> anneal -> verify TED (transient enhancement), 311 formation, dose retention. **Add:** verify that composing CDD alongside FermiDiffusion on Boron does NOT produce a double dC/dt (use the Phase 1 Task 3.5 `shouldCreateTimeDerivative` gate).
 
 - [ ] **Step 2: Run to verify failure** -> FAIL
 

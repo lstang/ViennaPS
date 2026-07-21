@@ -31,17 +31,19 @@ Same as Phase 1. All MFEM-gated. Namespace `viennaps`. LLVM style.
 
 **Files:** Create `include/viennaps/fields/IntrinsicCarrier.hpp`
 
-**Produces:** `IntrinsicCarrier<NumericType>` with `ni(T, material)`, `electronConcentration(C_dopant, T, material)`, `holeConcentration(C_dopant, T, material)`
+**Produces:** `IntrinsicCarrier<NumericType>` with `ni(T, material)`, `electronConcentration(C_dopant, T, material)`, `holeConcentration(C_dopant, T, material)`, and a hook for non-ideal activity coefficients.
 
-- [ ] **Step 1: Write failing test** - `TestIntrinsicCarrier()`: assert `ni(300, "Si")` ~ 1e10 cm^-3, `ni(1273, "Si")` > 1e10 (increases with T). Verify `electronConcentration(1e17, 300, "Si")` ~ 1e17 (n-type).
+**MOOSE reference for activity coefficients (verified):** `modules/chemical_reactions/include/kernels/CoupledDiffusionReactionSub.h` carries `_gamma_u`, `_gamma_v[]`, `_gamma_eq` (activity coefficients) — the canonical MOOSE idiom for non-ideal thermodynamics. At degenerate doping (C >> N_c), Boltzmann statistics break down and n ≠ C; the Fermi-Dirac activity coefficient γ_n(C,T) must be applied. Expose this hook now so Phase 2 Task 3 (`ChargedFermiDiffusion`) and Phase 4 Task 4 (`ChargedEquilibriumDiffusion`) can use it without re-architecting.
+
+- [ ] **Step 1: Write failing test** - `TestIntrinsicCarrier()`: assert `ni(300, "Si")` ~ 1e10 cm^-3, `ni(1273, "Si")` > 1e10 (increases with T). Verify `electronConcentration(1e17, 300, "Si")` ~ 1e17 (n-type, Boltzmann regime). **Add:** at C=1e21 (degenerate), `electronConcentration` with `useFermiDirac=true` returns a value *less than* the Boltzmann-statistics value (activity γ < 1).
 
 - [ ] **Step 2: Run to verify failure** -> FAIL
 
-- [ ] **Step 3: Implement** - `ni(T) = sqrt(Nc*Nv) * exp(-Eg/(2*kB*T))`. Nc, Nv, Eg from `MaterialPropertySystem`. `electronConcentration` = max(C_dopant, ni) for n-type. `holeConcentration` = ni^2 / electronConcentration.
+- [ ] **Step 3: Implement** - `ni(T) = sqrt(Nc*Nv) * exp(-Eg/(2*kB*T))`. Nc, Nv, Eg from `MaterialPropertySystem`. `electronConcentration` = max(C_dopant, ni) for n-type (Boltzmann). `holeConcentration` = ni^2 / electronConcentration. **Add** `activity(C, T, material, statistics)` returning γ ∈ (0,1] for Fermi-Dirac (default γ=1 for Boltzmann). Provide `electronConcentration(C, T, material, useFermiDirac)` overload that divides C by γ.
 
 - [ ] **Step 4: Run to verify pass** -> PASS
 
-- [ ] **Step 5: Commit** - `"feat: add IntrinsicCarrier calculator for Fermi-level-dependent diffusion"`
+- [ ] **Step 5: Commit** - `"feat: add IntrinsicCarrier calculator with Fermi-Dirac activity hook"`
 
 ---
 
@@ -51,16 +53,24 @@ Same as Phase 1. All MFEM-gated. Namespace `viennaps`. LLVM style.
 
 **Produces:** `DiffusivityMaterial<NumericType>` (MOOSE `MatDiffusionBase` pattern) + `FermiDiffusion<NumericType>` extending `DiffusionModel`. DiffusivityMaterial computes D(C,T) at quadrature points via `GridFunctionCoefficient`. FermiDiffusion uses it for concentration-dependent D.
 
-**MOOSE reference:** `MatDiffusionBase::precomputeQpResidual()` = `_diffusivity[_qp] * _grad_v[_qp]`. Material property evaluated at quadrature points. Jacobian: `precomputeQpJacobian()` adds `dD/dC * phi * grad_v`.
+**MOOSE reference:** `MatDiffusionBase::precomputeQpResidual()` = `_diffusivity[_qp] * _grad_v[_qp]`. Material property evaluated at quadrature points. Jacobian: `precomputeQpJacobian()` adds `dD/dC * phi * grad_v`. **Critically**, MOOSE supplies `dD/dC` automatically via `DerivativeMaterialInterface<Kernel>` (verified `framework/include/materials/DerivativeMaterialInterface.h`); MFEM does not.
 
-- [ ] **Step 1: Write failing test** - `TestFermiDiffusion()`: create model with D_i=1e-13, alpha=1.0. At high dopant (1e20, extrinsic), assert `getDiffusivity(C=1e20, T=1273)` > `getDiffusivity(C=1e15, T=1273)` (extrinsic enhancement).
+**Jacobian strategy (DECISION — affects every nonlinear model in Phases 2-9):** Per the Phase 1 Task 5 default, the engine uses Picard iteration for nonlinear models unless the model explicitly opts in to providing `dD/dC`. For FermiDiffusion at extrinsic doping the Picard lag is significant, so this task MUST supply a `dD/dC` path. Pick one and note it in the commit:
+- **(b1) QuadratureFunction Jacobian** — model exposes `evalDdC(trans, ip)` returning `dD/dC` evaluated at quadrature points; engine assembles the chain-rule term via `mfem::MixedGradGradIntegrator` with a `QuadratureFunctionCoefficient` updated each Newton step.
+- **(b2) Picard with frequent reassembly** — re-evaluate `FermiDCoef` from current C at each Newton iteration; converge slowly (factor 2-4 more iterations than (b1)) but trivially correct.
+
+**Phase 2 default: (b1)** — extrinsic diffusion is the regime where Picard hurts most.
+
+- [ ] **Step 1: Write failing test** - `TestFermiDiffusion()`: create model with D_i=1e-13, alpha=1.0. At high dopant (1e20, extrinsic), assert `getDiffusivity(C=1e20, T=1273)` > `getDiffusivity(C=1e15, T=1273)` (extrinsic enhancement). **Add:** `evalDdC(C=1e20, T=1273)` returns positive value consistent with analytic `d/dC [D_i*(1+alpha*n/ni)]`.
 
 - [ ] **Step 2: Run to verify failure** -> FAIL
 
-- [ ] **Step 3: Implement DiffusivityMaterial** - wraps D(C,T) computation as MFEM coefficient:
+- [ ] **Step 3: Implement DiffusivityMaterial** - wraps D(C,T) computation as MFEM coefficient AND exposes `dD/dC` for Jacobian path (b1):
 ```cpp
-// DiffusivityMaterial: evaluates D at quadrature points from local C
-// Like MOOSE MatDiffusionBase: _diffusivity[_qp] * _grad_v[_qp]
+// DiffusivityMaterial: evaluates D and dD/dC at quadrature points from local C.
+// Mirrors MOOSE MatDiffusionBase + DerivativeMaterialInterface<Kernel>:
+//   precomputeQpResidual()  = _diffusivity[_qp] * _grad_v[_qp]
+//   precomputeQpJacobian() += dD/dC[_qp] * phi * grad_v
 class FermiDCoef : public mfem::Coefficient {
   const mfem::GridFunction* conc_;
   NumericType D_i_, alpha_, T_, ni_;
@@ -72,9 +82,24 @@ public:
     return D_i_ * (1.0 + alpha_ * n / ni_);
   }
 };
+
+// Companion coefficient for the Jacobian chain-rule term (dD/dC * phi * grad_v).
+// Engine uses this with mfem::MixedGradGradIntegrator when assembling Jacobian.
+class FermiDdCCoef : public mfem::Coefficient {
+  const mfem::GridFunction* conc_;
+  NumericType D_i_, alpha_, ni_;
+public:
+  double Eval(mfem::ElementTransformation& T, const mfem::IntegrationPoint& ip) override {
+    double C = conc_->GetValue(T, ip);
+    double n = std::max(C, (double)ni_);
+    // d/dC [D_i*(1 + alpha*n/ni)] = D_i*alpha/ni * dn/dC
+    // dn/dC = 1 when C > ni (extrinsic), 0 otherwise.
+    return (C > ni_) ? D_i_ * alpha_ / ni_ : 0.0;
+  }
+};
 ```
 
-- [ ] **Step 4: Implement FermiDiffusion** - uses DiffusivityMaterial in `assembleStiffness`:
+- [ ] **Step 4: Implement FermiDiffusion** - uses DiffusivityMaterial in `assembleStiffness`. **Also override `assembleStiffnessJacobian`** (new virtual on `DiffusionModel` from Phase 1) supplying the `FermiDdCCoef` term:
 ```cpp
 void assembleStiffness(mfem::BilinearForm& K,
                        const mfem::GridFunction& speciesGF,
@@ -84,11 +109,21 @@ void assembleStiffness(mfem::BilinearForm& K,
   coef.SetConcentrationField(&speciesGF);
   K.AddDomainIntegrator(new mfem::DiffusionIntegrator(coef));
 }
+
+// New: Jacobian chain-rule term. Engine calls this when assembling Newton J
+// instead of (or in addition to) the Picard-lagged K above.
+void assembleStiffnessJacobian(mfem::MixedBilinearForm& dKdC,
+                               const mfem::GridFunction& speciesGF) const override {
+  FermiDdCCoef dcoef(D_i_, alpha_, ni_);
+  dcoef.SetConcentrationField(&speciesGF);
+  // dK/dC contributes: integral of (dD/dC * phi_j) * grad(phi_i) . grad(test)
+  dKdC.AddDomainIntegrator(new mfem::MixedGradGradIntegrator(dcoef));
+}
 ```
 
 - [ ] **Step 5: Run to verify pass** -> PASS
 
-- [ ] **Step 6: Commit** - `"feat: add DiffusivityMaterial + FermiDiffusion with MOOSE MatDiffusion pattern"`
+- [ ] **Step 6: Commit** - `"feat: add DiffusivityMaterial + FermiDiffusion with analytic dD/dC Jacobian (MOOSE MatDiffusion + DerivativeMaterialInterface pattern)"`
 
 ---
 
@@ -128,41 +163,90 @@ void assembleStiffness(mfem::BilinearForm& K,
 
 ---
 
-### Task 5: Segregation Boundary Condition (BinaryRecombinationBC Pattern)
+### Task 5: Segregation Interface Condition (InterfaceReaction Pattern)
 
 **Files:** Create `include/viennaps/fields/models/Segregation.hpp`
 
-**Produces:** `Segregation<NumericType>` - interface BC using MOOSE `BinaryRecombinationBC` dynamic rate pattern. Instead of static penalty `penalty*(C_2 - m*C_1)`, uses dynamic rate: `K_seg*C_1 - K_deseg*C_2`. At equilibrium: `C_2/C_1 = K_seg/K_deseg = m(T)`.
+**Produces:** `Segregation<NumericType>` - **two-sided interface condition** between material 1 (e.g. Si) and material 2 (e.g. SiO2), using the MOOSE `InterfaceReaction` pattern. The rate is `kf*C_1 - kb*C_2`; at equilibrium `C_2/C_1 = kf/kb = m(T)` (the segregation coefficient). This is more physical than a static penalty `penalty*(C_2 - m*C_1)` because the dynamic-rate form handles transients correctly.
 
-**MOOSE reference:** `BinaryRecombinationBC::computeQpResidual()` = `_test * Kr * u * v`. Dynamic rate formulation is more physical than penalty - handles transient segregation correctly.
+**MOOSE reference (PRIMARY):** `framework/include/interfacekernels/InterfaceReaction.{h,C}` — verified. The residual is two-sided with opposite sign on each side of the interface, and crucially the **full 4-block Jacobian** is assembled explicitly:
+```cpp
+// InterfaceReaction.C lines 30-72 (verified):
+// Residual:
+//   Element  side: r =  _test         * (kf*u - kb*v)
+//   Neighbor side: r = -_test_neighbor * (kf*u - kb*v)   // sign flip
+// Jacobian (4 blocks):
+//   ElementElement:    _test         *  kf * _phi
+//   NeighborNeighbor: -_test_neighbor * -kb * _phi_neighbor
+//   NeighborElement:  -_test_neighbor *  kf * _phi
+//   ElementNeighbor:   _test         * -kb * _phi_neighbor
+```
+Mapping: `u` = concentration on material 1 side, `v` = concentration on material 2 side, `kf` = `K_seg`, `kb` = `K_deseg`.
 
-- [ ] **Step 1: Write failing test** - `TestSegregation()`: 2-material mesh (Si + SiO2). Initialize Boron=1e18 in Si. After diffusion with m=0.1, assert C_SiO2 ~ 0.1 * C_Si at interface.
+**MOOSE reference (SECONDARY, surface loss only):** `modules/scalar_transport/include/bcs/BinaryRecombinationBC.h` models `A + B -> C` *at a boundary*, not at an interior interface. It is the right pattern for **surface** dose-loss where one species is consumed by another at the gas surface (Phase 4), but it is the **wrong** reference for Si/SiO2 segregation because it is one-sided. Use `InterfaceReaction` for segregation.
+
+**Why two-sided matters in MFEM:** A plain `mfem::BoundaryIntegrator` is one-sided — it only contributes the Element residual and the Element-Element / Element-Neighbor Jacobian blocks. The other two blocks (Neighbor residual, Neighbor-Neighbor / Neighbor-Element Jacobian) must be assembled by a second integrator on the neighboring submesh, OR by using MFEM's `InterfaceIntegrator` machinery (`mfem::InterfaceSubmesh`, `mfem::L2 restricted to interface`). Skipping the neighbor side breaks mass conservation across the interface — the most common segregation bug.
+
+- [ ] **Step 1: Write failing test** - `TestSegregation()`: 2-material mesh (Si + SiO2). Initialize Boron=1e18 in Si, 0 in SiO2. Solve 0->1s with m=0.1, kf=1e-3, kb=1e-2. Assert (a) C_SiO2/C_Si at interface ~ 0.1 within 5%, (b) **total dose across both materials conserved** within 1% (`|dose_final - dose_initial|/dose_initial < 0.01`). The dose-conservation assertion is what catches the one-sided-integrator bug.
 
 - [ ] **Step 2: Run to verify failure** -> FAIL
 
-- [ ] **Step 3: Implement SegregationBC** - MFEM boundary integrator using dynamic rate:
+- [ ] **Step 3: Implement SegregationCondition** - two-sided MFEM interface integrator. Implement BOTH sides in one class; do not ship a one-sided version:
+
 ```cpp
-// Like MOOSE BinaryRecombinationBC: _test * Kr * u * v
-// Segregation: rate = K_seg * C_1 - K_deseg * C_2
-// K_seg = m(T) * k0, K_deseg = k0
-// Equilibrium: C_2/C_1 = K_seg/K_deseg = m(T) (segregation coefficient)
-class SegregationBC : public mfem::BoundaryIntegrator {
-  NumericType K_seg_, K_deseg_;  // rate constants
-  const mfem::GridFunction* C1_;  // species in material 1
-  const mfem::GridFunction* C2_;  // species in material 2
+// Segregation interface condition — mirrors MOOSE InterfaceReaction exactly.
+// rate = kf * C_1 - kb * C_2;  equilibrium C_2/C_1 = kf/kb = m(T)
+//   kf = m(T) * k0      (forward: mat1 -> mat2)
+//   kb = k0             (backward: mat2 -> mat1)
+//
+// Two-sided: must be applied to BOTH submeshes meeting at the interface,
+// OR use mfem::InterfaceSubmesh + mfem::InterfaceIntegrator to handle
+// both sides in one assembly. The 4 Jacobian blocks below must all be
+// present or dose is not conserved across the interface.
+class SegregationCondition {
 public:
   void setSegregationCoefficient(NumericType m, NumericType k0) {
-    K_seg_ = m * k0;
-    K_deseg_ = k0;
+    kf_ = m * k0;   // forward rate (mat1 -> mat2)
+    kb_ = k0;       // backward rate (mat2 -> mat1)
   }
-  // Residual on material 1 side: +K_seg*C1 - K_deseg*C2 (loss from mat 1)
-  // Residual on material 2 side: -K_seg*C1 + K_deseg*C2 (gain in mat 2)
+
+  // Element-side (material 1) residual contribution at quadrature point:
+  //   R_elem += test * (kf * C1 - kb * C2)
+  // Element-side Jacobian:
+  //   dR_elem/dC1      += test * kf * phi           (ElementElement)
+  //   dR_elem/dC2      += test * (-kb) * phi_nbr    (ElementNeighbor)
+  void assembleElementSide(mfem::LinearForm& R_elem,
+                           mfem::DenseMatrix& K_elem_elem,
+                           mfem::DenseMatrix& K_elem_nbr,
+                           const mfem::GridFunction& C1,
+                           const mfem::GridFunction& C2,
+                           const mfem::FiniteElement& fe_elem,
+                           const mfem::FiniteElement& fe_nbr,
+                           const mfem::IntegrationRule& ir,
+                           mfem::ElementTransformation& trans_elem,
+                           mfem::ElementTransformation& trans_nbr);
+
+  // Neighbor-side (material 2) residual contribution — SIGN FLIP:
+  //   R_nbr += -test_nbr * (kf * C1 - kb * C2)
+  // Neighbor-side Jacobian:
+  //   dR_nbr/dC2       += -test_nbr * (-kb) * phi_nbr  (NeighborNeighbor)
+  //   dR_nbr/dC1       += -test_nbr * kf * phi          (NeighborElement)
+  void assembleNeighborSide(/* mirrors above with sign flip */);
+
+private:
+  NumericType kf_, kb_;
 };
 ```
 
-- [ ] **Step 4: Run to verify pass** -> PASS
+**Implementation options (pick one and note it in commit message):**
+1. **Two integrators** — register `SegregationElementIntegrator` on the material-1 submesh boundary faces and `SegregationNeighborIntegrator` on the material-2 submesh boundary faces. Simpler, but requires keeping C1/C2 grid functions accessible across submeshes.
+2. **mfem::InterfaceIntegrator** — uses `mfem::InterfaceSubmesh` to expose the interior interface as a first-class object with element + neighbor DoF on both sides. Cleaner long-term; this is what the Phase 4 multi-material coupling should standardize on.
 
-- [ ] **Step 5: Commit** - `"feat: add Segregation BC with BinaryRecombination dynamic rate pattern"`
+Either way, the dose-conservation test in Step 1 will fail if any of the four Jacobian blocks is missing — that's the safety net.
+
+- [ ] **Step 4: Run to verify pass** -> PASS (interface ratio within 5%, dose conserved within 1%)
+
+- [ ] **Step 5: Commit** - `"feat: add Segregation two-sided interface condition (MOOSE InterfaceReaction pattern)"`
 
 ---
 

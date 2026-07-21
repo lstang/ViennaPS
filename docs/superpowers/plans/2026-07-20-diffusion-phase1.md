@@ -2,6 +2,36 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+## Task 0: Architectural Decision — Standalone MFEM Engine vs. MOOSE MFEM Subsystem
+
+**Required before implementing any other Phase 1 task.** This decision affects every phase downstream.
+
+**Discovery:** MOOSE ships a complete MFEM subsystem (verified) at `3rdparty/moose/framework/include/mfem/` (28 subdirectories, gated by `MOOSE_MFEM_ENABLED`). It implements — with parallel support — essentially everything this plan designs from scratch:
+
+| ViennaPS plan class (this phase) | MOOSE MFEM class already exists (verified path) |
+|---|---|
+| `DiffusionEngine` (Task 5) | `framework/include/mfem/problem/MFEMProblem.h` + `framework/include/mfem/problem_operators/TimeDependentEquationSystemProblemOperator.h` |
+| `ConstantDiffusion::assembleStiffness` (Task 3) | `framework/include/mfem/kernels/MFEMDiffusionKernel.h` (linear), `MFEMNLDiffusionKernel.h` (nonlinear, for concentration-dependent D) |
+| `DiffusionModel::assembleMass` (Task 2) | `framework/include/mfem/kernels/MFEMMassKernel.h`, `MFEMTimeDerivativeMassKernel.h` |
+| `mfem::HypreBoomerAMG` direct use (Task 5) | `framework/include/mfem/solvers/MFEMHypreBoomerAMG.h` (wraps with `SetupLOR()` low-order-refinement acceleration) |
+| `LevelSetToMeshConverter` (Task 4) | `framework/include/mfem/mesh/MFEMMesh.h` (holds `shared_ptr<mfem::ParMesh>`, `displace()`, `uniformRefinement`, reports `nSubdomains`) + `framework/include/mfem/submeshes/MFEMCutTransitionSubMesh.h` |
+| `AdaptiveMeshRefiner` (Phase 11 Task 7) | `framework/include/mfem/markers/MFEMRefinementMarker.h` (`_error_threshold`, `_max_h_level`, `_max_p_level`, `_rebalance`, `hRefine()`/`pRefine()`) |
+| Phase 11 heuristic criteria | `framework/include/mfem/indicators/MFEML2ZienkiewiczZhuIndicator.h` (real residual-based error estimator) |
+| Phase 4 moving oxidation interface | `MFEMMesh::displace()` + `MFEMProblem::displaceMesh/updateFESpaces/updateGridFunctions` |
+| (missing in plan) | `MFEMSubMesh`, `MFEMBoundarySubMesh`, `MFEMDomainSubMesh` for subdomain-restricted assembly |
+
+**Two viable architectures:**
+
+- **(A) Standalone ViennaPS MFEM engine** *(current plan)* — full control of API, no MOOSE runtime dependency, matches the header-only style of `include/viennaps/`. Cost: reimplements `MFEMProblem`, `MFEMRefinementMarker`, `MFEMCutTransitionSubMesh`, etc. Best if ViennaPS wants to stay lightweight and avoid pulling MOOSE as a build dep.
+- **(B) Reuse MOOSE's MFEM subsystem via `ExternalProblem`** — proven, parallel, AMR + cut-cell + solvers already integrated. Cost: MOOSE becomes a runtime dep; constrains the public API to MOOSE idioms (input-file-driven execution, Reporter/VPP/Postprocessor instead of free C++ functions).
+
+**Recommendation:** Default to **(A)** — keep ViennaPS lightweight and header-only — but in every task below, cite the corresponding verified MOOSE MFEM class as the design reference. When (A) and (B) would diverge in API, the task calls it out. This gives ViennaPS the architectural simplicity of a standalone engine while inheriting MOOSE's battle-tested design choices.
+
+- [ ] **Step 1: Document decision** — append a one-paragraph "Architecture Decision Record" to `docs/superpowers/` recording the choice between (A) and (B) with rationale. Cite this table.
+- [ ] **Step 2: No code change** in Phase 1 Task 0. The decision propagates through every subsequent task via the "MOOSE reference" callouts.
+
+---
+
 **Goal:** Build the foundation FEM diffusion engine: generate MFEM mesh from level-set domain, assemble constant-diffusivity FEM system, integrate with SUNDIALS CVODE.
 
 **Architecture:** Monolithic MFEM-based `DiffusionEngine` with physics-discretization separation (inspired by MOOSE `MultiSpeciesDiffusionPhysicsBase`). `DiffusionPhysics` defines WHAT to solve (species, D, BCs); `DiffusionEngine` implements HOW (CG FEM). Per-species `GridFunction` storage (not packed vector). `LevelSetToMeshConverter` extracts material boundaries from ViennaPS level-set domains. SUNDIALS CVODE (BDF, adaptive) for time integration from day one. HypreBoomerAMG preconditioner (MOOSE default for diffusion).
@@ -39,7 +69,9 @@
 
 **Files:** Create `include/viennaps/fields/MeshAttributes.hpp`, `tests/diffusion/CMakeLists.txt`, `tests/diffusion/testDiffusionEngine.cpp`
 
-**Produces:** `MeshAttributes` with `setAttributeName(int, string)`, `materialName(int)`, `isMaterial(int, string)`, `numMaterials()`, `attributeOf(string)`, `hasMaterial(string)`
+**Produces:** `MeshAttributes` with `setAttributeName(int, string)`, `materialName(int)`, `isMaterial(int, string)`, `numMaterials()`, `attributeOf(string)`, `hasMaterial(string)`.
+
+**Scope note (intentional):** `MeshAttributes` is deliberately a thin attribute↔name lookup. It is *not* a coefficient/material-property registry. MOOSE has two idioms for material-varying coefficients — `framework/include/functormaterials/PiecewiseByBlockFunctorMaterial.h` (libMesh, defines a discontinuous functor per block) and `framework/include/mfem/functormaterials/MFEMGenericFunctorMaterial.h` (MFEM, declares coefficients from `MFEMScalarCoefficientName`s via a `CoefficientManager`). The ViennaPS equivalent — an attribute→`mfem::Coefficient&` registry — is deferred to Phase 2 Task 2 (`DiffusivityMaterial`) where it is first needed for concentration-dependent D. Keep `MeshAttributes` thin here so it can be composed, not subclassed.
 
 - [ ] **Step 1: Create test dir + CMakeLists.txt**
 
@@ -363,11 +395,19 @@ private:
 
 **Files:** Create `include/viennaps/fields/DiffusionPhysics.hpp`
 
-**Produces:** `DiffusionPhysics<NumericType>` - defines WHAT to solve, separate from HOW (MOOSE `MultiSpeciesDiffusionPhysicsBase` pattern). Holds species names, model registrations, BC specifications, initial conditions. `DiffusionEngine` reads from this.
+**Produces:** `DiffusionPhysics<NumericType>` - defines WHAT to solve, separate from HOW (MOOSE `MultiSpeciesDiffusionPhysicsBase` pattern). Holds species names, model registrations, per-species BC lists, initial conditions. `DiffusionEngine` reads from this.
 
 **Rationale:** MOOSE separates physics definition (`MultiSpeciesDiffusionPhysicsBase`) from discretization (`MultiSpeciesDiffusionCG`). This allows future FV/DG discretizations without changing physics definition, and makes testing easier.
 
-- [ ] **Step 1: Write failing test**
+**MOOSE composition idiom (verified):** `framework/include/physics/PhysicsBase.h` exposes four gatekeepers that prevent two composed physics from crashing when they share a species. Without these, composing e.g. `FermiDiffusion` + `CddDiffusion` on the same species creates duplicate time-derivative terms or "variable already exists" errors:
+- `saveSolverVariableName(var)` (line 144) — register that a physics has claimed a species.
+- `variableExists(var, error_if_aux)` (line 152) — query whether a species is already claimed.
+- `shouldCreateVariable(var, ...)` (line 205) — gatekeeper for "may I add this species?"
+- `shouldCreateTimeDerivative(var, ...)` (line 237) — gatekeeper for "may I add ∂C/∂t?" This is the one that prevents the double-time-derivative bug when composing models on the same species.
+
+The equivalent MOOSE per-species BC storage (verified) is `std::vector<std::vector<BoundaryName>> _neumann_boundaries` / `_dirichlet_boundaries` in `MultiSpeciesDiffusionPhysicsBase` — outer index = species, inner = boundaries. This scales far better than a flat `(species, boundary, type, value)` list when different species have very different BC sets.
+
+- [ ] **Step 1: Write failing tests**
 
 Add to test file:
 ```cpp
@@ -390,11 +430,43 @@ void TestDiffusionPhysics() {
   physics.addDirichletBC("Boron", "bottom", 1e18);
 
   VC_TEST_ASSERT(physics.numModels() == 1);
+
+  // Per-species BC lookup (not flat list)
+  const auto& boronBCs = physics.boundaryConditions("Boron");
+  VC_TEST_ASSERT(boronBCs.size() == 2);
+  const auto& iBCs = physics.boundaryConditions("Interstitial");
+  VC_TEST_ASSERT(iBCs.empty());  // Interstitial has no BCs yet
+}
+
+void TestDiffusionPhysicsComposition() {
+  // Verify the composition gatekeepers: two models on the same species must
+  // not create a double time-derivative. Mirrors MOOSE PhysicsBase::
+  // shouldCreateTimeDerivative (framework/include/physics/PhysicsBase.h:237).
+  DiffusionPhysics<double> physics;
+  physics.addSpecies("Boron");
+  physics.addSpecies("Interstitial");
+
+  // Both models touch Boron; both naively want a time derivative on it.
+  // The physics must guarantee exactly ONE time derivative per species.
+  auto fermi = std::make_shared<FermiDiffusion<double>>("Boron");
+  auto cdd   = std::make_shared<CddDiffusion<double>>();  // composes PairTerm on Boron
+  physics.addModel(fermi);
+  physics.addModel(cdd);
+
+  VC_TEST_ASSERT(physics.shouldCreateTimeDerivative("Boron", *fermi));
+  // Second model on the same species must be denied the time derivative —
+  // it can still contribute stiffness/reaction terms, but not dC/dt.
+  VC_TEST_ASSERT(!physics.shouldCreateTimeDerivative("Boron", *cdd));
+  VC_TEST_ASSERT(physics.shouldCreateTimeDerivative("Interstitial", *cdd));
+
+  // species-existence gatekeeper
+  VC_TEST_ASSERT(physics.variableExists("Boron"));
+  VC_TEST_ASSERT(!physics.variableExists("Arsenic"));
 }
 ```
-Add call in `main()`.
+Add `TestDiffusionPhysics();` and `TestDiffusionPhysicsComposition();` calls in `main()`.
 
-- [ ] **Step 2: Run to verify failure** -> FAIL
+- [ ] **Step 2: Run to verify failure** -> FAIL (`FermiDiffusion`/`CddDiffusion` not yet present in Phase 1; either stub them as minimal `DiffusionModel` subclasses in the test, or defer `TestDiffusionPhysicsComposition` to Phase 3 Task 10 once CDD exists. Note the choice in commit message.)
 
 - [ ] **Step 3: Implement DiffusionPhysics**
 
@@ -407,6 +479,7 @@ Add call in `main()`.
 #include <string>
 #include <vector>
 #include <map>
+#include <set>
 #include <memory>
 
 namespace viennaps {
@@ -414,10 +487,12 @@ namespace viennaps {
 template <class NumericType>
 class DiffusionPhysics {
 public:
+  // ---- Species registration (MOOSE PhysicsBase::saveSolverVariableName) ----
   void addSpecies(const std::string& name) {
-    if (std::find(species_.begin(), species_.end(), name)
-        == species_.end())
+    if (!hasSpecies(name)) {
       species_.push_back(name);
+      solverVariables_.insert(name);
+    }
   }
 
   bool hasSpecies(const std::string& name) const {
@@ -425,44 +500,74 @@ public:
            != species_.end();
   }
 
-  int numSpecies() const {
-    return static_cast<int>(species_.size());
+  /// MOOSE PhysicsBase::variableExists analog (verified PhysicsBase.h:152).
+  bool variableExists(const std::string& name) const {
+    return solverVariables_.find(name) != solverVariables_.end();
   }
 
-  const std::vector<std::string>& speciesNames() const {
-    return species_;
-  }
+  int numSpecies() const { return static_cast<int>(species_.size()); }
+  const std::vector<std::string>& speciesNames() const { return species_; }
 
+  // ---- Model registration ----
   void addModel(std::shared_ptr<DiffusionModel<NumericType>> m) {
     models_.push_back(m);
   }
-
-  int numModels() const {
-    return static_cast<int>(models_.size());
-  }
-
+  int numModels() const { return static_cast<int>(models_.size()); }
   const std::vector<std::shared_ptr<DiffusionModel<NumericType>>>&
   models() const { return models_; }
 
+  // ---- Composition gatekeeper (MOOSE PhysicsBase::shouldCreateTimeDerivative,
+  //      verified PhysicsBase.h:237). Returns true only the first time a
+  //      species' time derivative is requested, so composing FermiDiffusion +
+  //      CddDiffusion on the same species does not produce a double dC/dt.
+  bool shouldCreateTimeDerivative(const std::string& species,
+                                  const DiffusionModel<NumericType>& model) {
+    (void)model;  // identity not used in this minimal form; MOOSE tracks by physics ptr
+    if (timeDerivativeClaimed_.find(species) != timeDerivativeClaimed_.end())
+      return false;
+    timeDerivativeClaimed_.insert(species);
+    return true;
+  }
+
+  // ---- Per-species BC list (MOOSE MultiSpeciesDiffusionPhysicsBase pattern,
+  //      verified: std::vector<std::vector<BoundaryName>> _neumann_boundaries).
+  //      Outer key = species, inner = that species' BCs. Replaces the previous
+  //      flat std::vector<BCSpec> which scales badly when species have
+  //      divergent BC sets.
   struct BCSpec {
-    std::string species;
     std::string boundary;
-    std::string type;  // "neumann", "dirichlet", "segregation"
+    std::string type;  // "neumann", "dirichlet", "segregation", "robin"
     NumericType value;
   };
 
   void addNeumannBC(const std::string& sp, const std::string& bnd,
                     NumericType flux) {
-    bcs_.push_back({sp, bnd, "neumann", flux});
+    bcs_[sp].push_back({bnd, "neumann", flux});
   }
 
   void addDirichletBC(const std::string& sp, const std::string& bnd,
                       NumericType val) {
-    bcs_.push_back({sp, bnd, "dirichlet", val});
+    bcs_[sp].push_back({bnd, "dirichlet", val});
   }
 
-  const std::vector<BCSpec>& boundaryConditions() const {
-    return bcs_;
+  /// Per-species BC list. Empty vector if species has no BCs registered.
+  const std::vector<BCSpec>& boundaryConditions(const std::string& sp) const {
+    static const std::vector<BCSpec> empty;
+    auto it = bcs_.find(sp);
+    return it == bcs_.end() ? empty : it->second;
+  }
+
+  /// All BCs across all species (flat view, for backward compatibility with
+  /// engines that loop species-outer). Each entry is tagged with its species.
+  struct TaggedBCSpec {
+    std::string species;
+    BCSpec bc;
+  };
+  std::vector<TaggedBCSpec> allBoundaryConditions() const {
+    std::vector<TaggedBCSpec> out;
+    for (const auto& [sp, list] : bcs_)
+      for (const auto& bc : list) out.push_back({sp, bc});
+    return out;
   }
 
   void setTemperature(NumericType T) { T_ = T; }
@@ -470,8 +575,10 @@ public:
 
 private:
   std::vector<std::string> species_;
+  std::set<std::string> solverVariables_;        // PhysicsBase::saveSolverVariableName
+  std::set<std::string> timeDerivativeClaimed_;  // PhysicsBase::shouldCreateTimeDerivative
   std::vector<std::shared_ptr<DiffusionModel<NumericType>>> models_;
-  std::vector<BCSpec> bcs_;
+  std::map<std::string, std::vector<BCSpec>> bcs_;  // per-species BC list
   NumericType T_ = NumericType(1273.15);
 };
 
@@ -482,7 +589,12 @@ private:
 
 - [ ] **Step 5: Commit**
 
-`git add include/viennaps/fields/DiffusionPhysics.hpp tests/diffusion/testDiffusionEngine.cpp && git commit -m "feat: add DiffusionPhysics for physics-discretization separation"`
+`git add include/viennaps/fields/DiffusionPhysics.hpp tests/diffusion/testDiffusionEngine.cpp && git commit -m "feat: add DiffusionPhysics with MOOSE PhysicsBase composition gatekeepers and per-species BC map"`
+
+**Notes for downstream phases:**
+- **Phase 3 Task 10 (CDD composition):** `CddDiffusion` MUST call `physics.shouldCreateTimeDerivative(species, *this)` for each species it composes terms on, and skip the `TimeDerivativeTerm` when denied. This is the mechanism that prevents the double-`dC/dt` bug when CDD is composed with FermiDiffusion.
+- **Phase 4 Task 2 (TedInitializer):** add a similar `shouldCreateIC` gate if multiple physics can set ICs on the same species.
+- **Phase 10 Task 2 (PdeBC):** the per-species `std::map<species, std::vector<BCSpec>>` is the storage the declarative PDE API should target; each `PdeEquation(species)` builder populates one entry.
 
 ---
 
@@ -492,15 +604,23 @@ private:
 
 **Produces:** `LevelSetToMeshConverter<NumericType, D>` with `convert(domain)` returning `std::unique_ptr<mfem::Mesh>` + `MeshAttributes`. Creates a Cartesian triangular mesh covering the level-set domain bounds, scaled to match domain coordinates. Element attributes set from level-set material map.
 
-- [ ] **Step 1: Write failing test** - add `TestLevelSetToMesh2D()` that creates a `Domain<double,2>`, calls `converter.convert(domain)`, asserts mesh non-null with `GetNV()>0`, `GetNE()>0`.
+**MOOSE references (verified):**
+- `framework/include/mfem/mesh/MFEMMesh.h` — MOOSE's MFEM mesh type. Holds `shared_ptr<mfem::ParMesh>`, exposes `shouldDisplace()`, `displace(GridFunction const&)`, `uniformRefinement(mesh, nref)`, reports `nSubdomains = parmesh.attributes.Size()`. The ViennaPS `LevelSetToMeshConverter` produces the same `mfem::Mesh` MOOSE would wrap; design the API to be wrap-able by `MFEMMesh` later if architecture (B) is chosen.
+- `framework/include/meshgenerators/CutMeshByLevelSetGenerator.h` + `CutMeshByLevelSetGeneratorBase.h` — MOOSE's conforming cut-cell mesh from an analytic level set. Methods: `pointLevelSetRelation`, `pointPairLevelSetInterception`, `tet4ElemCutter`. Supports `_generate_transition_layer` (the standard technique to avoid sliver elements at material interfaces). **This generator takes a FunctionParser string for the level set;** ViennaPS level sets are discrete grids, so direct reuse is not possible without a level-set evaluator adapter. **Future work (out of Phase 1 scope):** expose a ViennaPS-side `pointLevelSetRelation` adapter so MOOSE's tet cutter can be reused for 3D conforming meshes.
+- `framework/include/mfem/submeshes/MFEMCutTransitionSubMesh.h` — MFEM-native transition-region labeling for elements adjacent to an interior surface. **This is the right answer for Phase 11 Task 9 (AMR during moving boundary) and Phase 2 Task 5 (segregation at Si/SiO2)** — call it out there.
+- `framework/include/meshgenerators/CartesianMeshGenerator.h` — MOOSE's non-uniform Cartesian generator (per-axis `_dx`/`_ix`, `_subdomain_id` per region). Closer to what ViennaPS needs than `MakeCartesian2D` when material regions have different resolutions.
+
+**Phase 1 scope (intentional simplification):** ship the Cartesian + attribute-tagging version only. Defer conforming cut-cell meshes (`CutMeshByLevelSetGenerator` analog) and transition layers to a later phase — they are needed only when segregation accuracy at sliver elements becomes the bottleneck. Document this deferral in the commit message.
+
+- [ ] **Step 1: Write failing test** - add `TestLevelSetToMesh2D()` that creates a `Domain<double,2>`, calls `converter.convert(domain)`, asserts mesh non-null with `GetNV()>0`, `GetNE()>0`. Also assert that element attributes form a non-empty set (i.e. materials were tagged).
 
 - [ ] **Step 2: Run to verify failure** -> FAIL
 
-- [ ] **Step 3: Implement LevelSetToMesh** - `LevelSetToMeshConverter` template class. `convert()` extracts bounds from `domain.getLevelSets()[0]->getGrid()`, computes `nx`/`ny` from grid delta, creates `mfem::Mesh::MakeCartesian2D(nx, ny, mfem::Element::TRIANGLE)`, scales vertices to domain bounds, sets element attributes from material map. Store `MeshAttributes` with material name mapping.
+- [ ] **Step 3: Implement LevelSetToMesh** - `LevelSetToMeshConverter` template class. `convert()` extracts bounds from `domain.getLevelSets()[0]->getGrid()`, computes `nx`/`ny` from grid delta, creates `mfem::Mesh::MakeCartesian2D(nx, ny, mfem::Element::TRIANGLE)`, scales vertices to domain bounds, sets element attributes from material map. Store `MeshAttributes` with material name mapping. **Do not** attempt conforming cut cells in Phase 1 — see scope note above.
 
 - [ ] **Step 4: Run to verify pass** -> PASS
 
-- [ ] **Step 5: Commit** - `git add include/viennaps/fields/LevelSetToMesh.hpp && git commit -m "feat: add LevelSetToMesh converter for 2D FEM mesh generation"`
+- [ ] **Step 5: Commit** - `git add include/viennaps/fields/LevelSetToMesh.hpp && git commit -m "feat: add LevelSetToMesh converter for 2D FEM mesh generation (Cartesian + attribute tagging; conforming cut-cell deferred)"`
 
 ---
 
@@ -518,22 +638,41 @@ private:
 
 **Key design decisions (MOOSE-inspired):**
 1. **Per-species GridFunction storage** (not packed vector): `std::map<std::string, unique_ptr<mfem::GridFunction>> species_`. Each species is a separate GridFunction on the same FES. Coupling terms read another species' GF via the `allSpecies` map. Eliminates manual offset arithmetic.
-2. **HypreBoomerAMG preconditioner** (MOOSE default for diffusion): `mfem::HypreBoomerAMG` instead of `DSmoother`. 10-100x fewer iterations on large 2D/3D meshes.
+2. **HypreBoomerAMG preconditioner** (MOOSE default for diffusion — verified `DiffusionPhysicsBase::addPreconditioning()` lines 84-96 and `MultiSpeciesDiffusionPhysicsBase` lines 109-121): `mfem::HypreBoomerAMG` instead of `DSmoother`. 10-100x fewer iterations on large 2D/3D meshes. MOOSE already wraps this as `framework/include/mfem/solvers/MFEMHypreBoomerAMG.h` with `SetupLOR(ParBilinearForm&, ess_bdr_markers)` low-order-refinement acceleration — cite as the proven integration pattern.
 3. **SUNDIALS CVODE** from day one: BDF orders 1-5, adaptive time stepping, error control. Uses existing `SundialsTimeIntegrator`. Essential for stiff systems (clustering, recombination in later phases). Falls back to implicit Euler if SUNDIALS unavailable.
+4. **Species-outer, terms-inner assembly loop** (MOOSE `MultiSpeciesDiffusionCG::addFEKernels()` pattern — verified). The previous draft had this backwards. MOOSE iterates species in the outer loop and, per species, picks the *most specialized* kernel/term from a fallback chain. This makes per-species BC selection and model specializaion (Phase 2+) clean.
 
-**Assembly pattern (per species):**
+**Assembly pattern (species-outer, terms-inner — mirrors MOOSE `MultiSpeciesDiffusionCG::addFEKernels`):**
 ```cpp
-for each species s:
+// OUTER loop: species. Matches MOOSE MultiSpeciesDiffusionCG::addFEKernels()
+// which does: for (const auto s : index_range(_species_names)) { ... }
+for each species s in physics_.speciesNames():
   BilinearForm K_s(fes);  // stiffness for species s
   BilinearForm M_s(fes);  // mass for species s
   LinearForm  R_s(fes);   // reaction RHS for species s
-  for each model m that affects s:
-    m->assembleStiffness(K_s, species_[s], allSpecies_, temp_);
-    m->assembleMass(M_s);
-    m->assembleReaction(R_s, species_[s], allSpecies_, temp_);
+  // INNER loop: terms/models that contribute to THIS species.
+  // Per Task 3.5, gate the time derivative via shouldCreateTimeDerivative()
+  // so composing Fermi + CDD on the same species does not double-add dC/dt.
+  bool needTimeDeriv = true;
+  for each model m in physics_.models():
+    if (m->numSpecies() targets s) {
+      m->assembleStiffness(K_s, species_[s], allSpecies_, temp_);
+      if (needTimeDeriv && physics_.shouldCreateTimeDerivative(s, *m)) {
+        m->assembleMass(M_s);
+        needTimeDeriv = false;  // only first model claims dC/dt for s
+      }
+      m->assembleReaction(R_s, species_[s], allSpecies_, temp_);
+    }
   K_s.Assemble(); M_s.Assemble(); R_s.Assemble();
   // System: M_s * du_s/dt = -K_s * u_s + R_s
 ```
+
+**Jacobian strategy (must be chosen now — affects every nonlinear phase 2, 3, 4, 6, 9):** MOOSE computes Jacobians automatically via forward-mode AD (`DerivativeMaterialInterface<Kernel>` — verified `framework/include/materials/DerivativeMaterialInterface.h`). MFEM does not have an equivalent automatic mechanism, so for concentration-dependent D (Fermi, ChargedFermi, clustering) the engine must pick one of:
+- **(a) Picard iteration** — lag D from the previous Newton step; reassemble K each iteration; converge slowly but trivially. **Default choice for Phase 1** since ConstantDiffusion is linear anyway.
+- **(b) Manual Jacobian** — model supplies `dD/dC` via a `mfem::QuadratureFunction` coefficient updated each Newton step; use `mfem::MixedGradGradIntegrator` for the chain-rule term. Required for strongly concentration-dependent D in Phase 2 Fermi.
+- **(c) MFEM nonlinear kernel** — use the pattern from `framework/include/mfem/kernels/MFEMNLDiffusionKernel.h` (MOOSE's verified wrapper for nonlinear MFEM diffusion). Cleanest if ViennaPS chose architecture (B) in Task 0.
+
+**Phase 1 default: (a) Picard.** Document this in `DiffusionModel.hpp` so Phase 2 Task 3 (`FermiDCoef`) knows it must supply a `dD/dC` path (strategy b) or accept Picard convergence.
 
 **SUNDIALS integration:**
 ```cpp
