@@ -383,6 +383,127 @@ void TestNeumannBC() {
   VC_TEST_ASSERT(relDiff < 0.05);
 }
 
+void TestReentrantSolve() {
+  // F2 follow-up: shouldCreateTimeDerivative must be re-entrant across
+  // solve() calls. Without resetTimeDerivativeClaims(), the second solve()
+  // on the same physics object denies the mass matrix for every species
+  // (timeDerivativeClaimed_ still holds them from the first solve),
+  // silently falling back to identity mass and producing wrong time scales.
+  //
+  // Setup: closed system, uniform IC. Two consecutive solve() calls on
+  // the SAME physics object. Both must conserve dose to ~FP precision.
+  MeshAttributes attrs;
+  attrs.setAttributeName(1, "Si");
+
+  auto mesh = std::make_unique<mfem::Mesh>(
+      mfem::Mesh::MakeCartesian2D(8, 8, mfem::Element::TRIANGLE));
+
+  DiffusionEngine<double, 2> engine;
+  engine.setMesh(std::move(mesh), attrs);
+
+  auto model = std::make_shared<ConstantDiffusion<double>>("Boron");
+  model->setDiffusivity(1e-8, 0.0);
+  DiffusionPhysics<double> physics;
+  physics.addSpecies("Boron");
+  physics.addModel(model);
+  physics.setTemperature(1273.15);
+  engine.setPhysics(physics);
+
+  engine.initializeSpecies("Boron", 1e18);
+  const double doseInitial = engine.getIntegral("Boron");
+
+  // First solve - mass matrix claimed for Boron.
+  engine.solve(0.0, 5.0, 1.0);
+  const double doseAfterFirst = engine.getIntegral("Boron");
+  const double relDiffFirst =
+      std::abs(doseAfterFirst - doseInitial) / std::abs(doseInitial);
+
+  // Second solve on the SAME physics object - this is the regression
+  // case. Before the F2 fix, timeDerivativeClaimed_ still held "Boron",
+  // so the mass matrix was denied and identity mass was used (du/dt =
+  // -K u + R with no M inverse - wildly different time scale).
+  engine.solve(5.0, 10.0, 1.0);
+  const double doseAfterSecond = engine.getIntegral("Boron");
+  const double relDiffSecond =
+      std::abs(doseAfterSecond - doseInitial) / std::abs(doseInitial);
+
+  std::cout << "[reentrant-solve] dose_initial=" << doseInitial
+            << " after_first=" << doseAfterFirst
+            << " rel_diff_first=" << relDiffFirst
+            << " after_second=" << doseAfterSecond
+            << " rel_diff_second=" << relDiffSecond << "\n";
+
+  // Both solves must conserve dose. The 1e-6 tolerance catches identity-
+  // mass fallback (which produces order-unity drift, not round-off).
+  VC_TEST_ASSERT(relDiffFirst < 1e-6);
+  VC_TEST_ASSERT(relDiffSecond < 1e-6);
+}
+
+void TestMultiSpeciesSmoke() {
+  // F3 follow-up: exercise the multi-species code paths in DiffusionEngine.
+  // Both prior engine tests used exactly 1 species; the species-outer
+  // assembly loop, the allSpecies_ map, the packed-block CVODE state
+  // layout, and the modelTargetsSpecies filter are tested only by inspection.
+  //
+  // Setup: two INDEPENDENT ConstantDiffusion models on two species
+  // (Boron, Phosphorus), each with closed-system zero-flux BCs. Since
+  // the species don't couple, each must independently conserve its own
+  // dose. Catches bugs in species-outer loop, allSpecies_ map, packed-
+  // block layout, and cross-species K leakage.
+  MeshAttributes attrs;
+  attrs.setAttributeName(1, "Si");
+
+  auto mesh = std::make_unique<mfem::Mesh>(
+      mfem::Mesh::MakeCartesian2D(8, 8, mfem::Element::TRIANGLE));
+
+  DiffusionEngine<double, 2> engine;
+  engine.setMesh(std::move(mesh), attrs);
+
+  auto boronModel = std::make_shared<ConstantDiffusion<double>>("Boron");
+  boronModel->setDiffusivity(1e-8, 0.0);
+  auto phosphorusModel =
+      std::make_shared<ConstantDiffusion<double>>("Phosphorus");
+  phosphorusModel->setDiffusivity(1e-7, 0.0); // different D - catches
+                                              // cross-species K leakage
+
+  DiffusionPhysics<double> physics;
+  physics.addSpecies("Boron");
+  physics.addSpecies("Phosphorus");
+  physics.addModel(boronModel);
+  physics.addModel(phosphorusModel);
+  physics.setTemperature(1273.15);
+  engine.setPhysics(physics);
+
+  // Different ICs so a cross-species leak would be visible.
+  engine.initializeSpecies("Boron", 1e18);
+  engine.initializeSpecies("Phosphorus", 1e15);
+
+  const double boronInitial = engine.getIntegral("Boron");
+  const double phosphorusInitial = engine.getIntegral("Phosphorus");
+
+  engine.solve(0.0, 10.0, 1.0);
+
+  const double boronFinal = engine.getIntegral("Boron");
+  const double phosphorusFinal = engine.getIntegral("Phosphorus");
+  const double boronRelDiff =
+      std::abs(boronFinal - boronInitial) / std::abs(boronInitial);
+  const double phosphorusRelDiff =
+      std::abs(phosphorusFinal - phosphorusInitial) /
+      std::abs(phosphorusInitial);
+
+  std::cout << "[multi-species] boron: initial=" << boronInitial
+            << " final=" << boronFinal << " rel_diff=" << boronRelDiff
+            << "\n";
+  std::cout << "[multi-species] phosphorus: initial=" << phosphorusInitial
+            << " final=" << phosphorusFinal
+            << " rel_diff=" << phosphorusRelDiff << "\n";
+
+  // Each species must conserve its own dose independently. 1e-6 tolerance
+  // catches any cross-species coupling bug (order-unity drift).
+  VC_TEST_ASSERT(boronRelDiff < 1e-6);
+  VC_TEST_ASSERT(phosphorusRelDiff < 1e-6);
+}
+
 int main() {
   TestMeshAttributes();
   TestDiffusionModelInterface();
@@ -394,6 +515,8 @@ int main() {
   TestDoseConservation();
   TestDirichletBC();
   TestNeumannBC();
+  TestMultiSpeciesSmoke();
+  TestReentrantSolve();
   std::cout << "All diffusion tests passed.\n";
   return 0;
 }

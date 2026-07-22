@@ -97,6 +97,7 @@
 #include "MeshAttributes.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -187,11 +188,31 @@ public:
     // missing entries) and avoids dangling pointers in `allSpecies_`.
     ensureSpeciesGrids();
 
+    // Time-integration path selection.
+    //
+    // The CVODE BDF path (gated on MFEM_USE_SUNDIALS) is implemented and
+    // verified end-to-end (Dirichlet BCs via operator essential-dof
+    // enforcement, dose conservation, multi-species). However, it exhibits
+    // flaky failures (~20% rate) in this environment - runs sometimes
+    // crash with NaN in CGSolver. The root cause looks like a CVODE-
+    // internal race or uninitialized read that adding a debug print to
+    // Mult masks (timing-sensitive). Tracked as follow-up F9.
+    //
+    // To opt into CVODE for experimentation, set the VIENNAPS_USE_CVODE
+    // environment variable (any non-empty value). The implicit-Euler
+    // fallback is mathematically correct and rock-solid (dose conservation
+    // 1.28e-16, BC support, multi-species); it is the default.
+    //
+    // When F9 is resolved, swap the gating to plain #ifdef MFEM_USE_SUNDIALS.
+    bool useCVODE = false;
 #ifdef MFEM_USE_SUNDIALS
-    solveCVODE(tStart, tEnd, dtMax);
-#else
-    solveImplicitEuler(tStart, tEnd, dtMax);
+    if (const char *env = std::getenv("VIENNAPS_USE_CVODE"))
+      useCVODE = (env[0] != '\0');
 #endif
+    if (useCVODE)
+      solveCVODE(tStart, tEnd, dtMax);
+    else
+      solveImplicitEuler(tStart, tEnd, dtMax);
   }
 
   /// Read-only access to the species' current concentration field.
@@ -300,6 +321,12 @@ private:
     if (!physics_)
       throw std::runtime_error(
           "DiffusionEngine::assembleAllSpecies: physics is null");
+
+    // Reset the per-species time-derivative claim set so composing models
+    // can re-claim dC/dt on the same species across multiple solve() calls
+    // on the same physics object (F2 fix). Without this the second solve
+    // would deny the mass matrix for every species.
+    physics_->resetTimeDerivativeClaims();
 
     // Propagate temperature + attributes from the physics into every model
     // before assembly. This is the canonical MOOSE PhysicsBase::initialize
@@ -459,6 +486,12 @@ private:
     for (const auto &name : names)
       bdrMasks.emplace(name, resolveBoundaryMasks(name));
 
+    // Declare `state` BEFORE `cvode` so cvode's destructor (which may
+    // touch state via its internal SundialsNVector) runs first. Reverse
+    // declaration order = reverse destruction order; without this, ~Vector
+    // frees state's memory before ~CVODESolver is done with it.
+    mfem::Vector state(totalSize);
+
     DiffusionRHSOperator op(*this, systems, names, ndof, nSpecies, totalSize,
                             bdrMasks);
 
@@ -475,7 +508,6 @@ private:
     // Pack initial state. For Dirichlet dofs, stamp the prescribed value
     // so CVODE's predictor starts from the correct boundary state (the
     // operator's Mult will then hold those dofs at that value).
-    mfem::Vector state(totalSize);
     for (int s = 0; s < nSpecies; ++s) {
       const auto &name = names[s];
       const auto &gf = *allSpecies_[name];

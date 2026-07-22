@@ -114,11 +114,10 @@ falls back to implicit-Euler + DSmoother-preconditioned CG.
 ("Falls back to implicit Euler if SUNDIALS unavailable" — Phase 1 Task 5
 brief). Dose conservation validated.
 
-**Phase 2+ fix:** rebuild MFEM with
-`MFEM_USE_MPI=ON MFEM_USE_SUNDIALS=ON MFEM_USE_HYPRE=ON` (HYPRE + SUNDIALS
-libs are already in vcpkg). After rebuild, the CVODE + HypreBoomerAMG
-paths activate automatically (no engine code changes needed) and Phase 2
-tests should verify the production solver path works.
+**Status (2026-07-22): RESOLVED.** MFEM rebuilt with `MFEM_USE_MPI=ON`,
+`MFEM_USE_SUNDIALS=ON`, `MFEM_USE_HYPRE=ON` (HYPRE 2.23.0). ViennaPS
+configures and builds cleanly against the new MFEM. See F8 and F9 for
+follow-ups that emerged from the rebuild.
 
 ## Documentation / scope
 
@@ -151,3 +150,81 @@ The plan body referred to `tests/diffusion/testDiffusionEngine.cpp` while
 the CMakeLists uses `project(testDiffusion)` + `${PROJECT_NAME}.cpp`,
 which makes the actual file `testDiffusion.cpp`. Commit `9003343` fixed
 the plan; tracked here so future plan edits don't regress it.
+
+## Post-MFEM-rebuild follow-ups (2026-07-22)
+
+After MFEM was rebuilt with `MFEM_USE_MPI`/`MFEM_USE_SUNDIALS`/`MFEM_USE_HYPRE`,
+two new issues surfaced during verification.
+
+### F8. Convert DiffusionEngine to parallel MFEM objects (HypreBoomerAMG)
+
+**Where:** `include/viennaps/fields/DiffusionEngine.hpp` —
+`makeMassSolver()` uses `DSmoother` unconditionally.
+
+**Why it's needed:** `mfem::HypreBoomerAMG::SetOperator` (hypre.cpp:5384)
+asserts `new Operator must be a HypreParMatrix` — it requires a parallel
+distributed matrix as input. Our engine builds serial `SparseMatrix`
+operators on a serial `FiniteElementSpace` (FES from `setMesh` is
+`FiniteElementSpace`, not `ParFiniteElementSpace`). `MFEM_USE_MPI` being
+defined is necessary but not sufficient: the engine itself must construct
+`ParFiniteElementSpace` + `ParBilinearForm` + `ParGridFunction` and run
+under `MPI_COMM_WORLD` (rank 1 is fine for serial testing).
+
+For Phase 1's 4x4 and 8x8 test meshes (25-81 DOFs) DSmoother-preconditioned
+CG converges in <10 iterations, so the parallel path offers no benefit.
+Phase 2+'s larger meshes (>1000 DOFs) will benefit substantially.
+
+**Fix:** convert `DiffusionEngine` to use parallel MFEM objects:
+- `mesh_` becomes `std::unique_ptr<mfem::ParMesh>` (construct from a serial
+  `mfem::Mesh` via `ParMesh(MPI_COMM_WORLD, mesh)`).
+- `fes_` becomes `std::unique_ptr<mfem::ParFiniteElementSpace>`.
+- `species_` stores `std::unique_ptr<mfem::ParGridFunction>` per species.
+- `assembleAllSpecies` builds `ParBilinearForm` per species.
+- `makeMassSolver` switches on `MFEM_USE_MPI`: returns `HypreBoomerAMG`-
+  preconditioned `CGSolver` for `ParBilinearForm`; keeps `DSmoother` for
+  serial fallback.
+- The CVODE `DiffusionRHSOperator` works against `HypreParMatrix` (CVODE
+  itself is rank-0 only in `SundialsNVector`, but the linear solve via
+  `HypreBoomerAMG` is parallel).
+- `getIntegral` reduces across MPI ranks (use `ParGridFunction::ComputeL2Norm`
+  or similar; the L1 integral requires `MPI_Allreduce`).
+
+**Test:** introduce a 32x32 or 64x64 mesh test where DSmoother-preconditioned
+CG takes >100 iterations; verify HypreBoomerAMG converges in <20. Run
+single-rank first; multi-rank testing is a separate concern.
+
+### F9. CVODE BDF path is flaky (~20% failure rate)
+
+**Where:** `include/viennaps/fields/DiffusionEngine.hpp` — `solveCVODE()`
+via `DiffusionRHSOperator` (implements `Mult`, `SUNImplicitSetup`,
+`SUNImplicitSolve`).
+
+**Symptom:** when the engine runs CVODE (env var `VIENNAPS_USE_CVODE=1`
+set), the test suite fails ~20% of the time with `Verification failed:
+(IsFinite(nom)) is false: nom = -nan` in `CGSolver::Mult`. The crash
+happens inside CVODE's Newton iteration; adding `std::cerr` debug prints
+to `Mult` masks the issue (suggests timing-sensitive uninitialized read).
+
+**Verified working:** when CVODE does complete (most runs), results are
+correct and BETTER than the implicit-Euler fallback:
+- Dose conservation: 1.28e-16 (same as implicit-Euler)
+- Dirichlet BC: interior reaches 8.35e17 of clamped 1e18 (vs 7.6e17 with
+  implicit-Euler — CVODE's smaller adaptive steps give better accuracy)
+- Neumann BC: rel_diff 0.4% (vs 4% with implicit-Euler — 10x better)
+
+**Likely cause:** either (a) a SUNDIALS internal SUNContext race, (b)
+uninitialized memory in CVODE's predictor, or (c) the operator's
+`implicitSolvers_` map being read during a step where setup hasn't yet
+run. The SUNImplicitSolve code returns -1 if setup hasn't run, which
+should be safe; the issue is more likely inside SUNDIALS itself or in
+the operator↔CVODE bridge.
+
+**Workaround (current):** `solve()` selects the integrator at runtime via
+the `VIENNAPS_USE_CVODE` env var. Default is implicit-Euler (rock-solid:
+8/8 runs pass). CVODE can be opted into per-run for experimentation.
+
+**Fix candidate:** rebuild SUNDIALS from source against the same MSVC
+toolchain + flags as MFEM, then run under AddressSanitizer to localize
+the uninitialized read. May also be a SUNDIALS 7.x SUNContext thread-
+safety issue (we're single-threaded, but SUNContext is sometimes shared
+across N_Vectors).

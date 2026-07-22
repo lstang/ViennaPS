@@ -138,3 +138,69 @@ Verification: 34/34 tests pass. Dirichlet interior_mean=7.6e17
 equivalence). Neumann rel_diff=0.0398 (unchanged). Dose conservation
 1.28e-16 (unchanged). Cache built once per (species, dt) instead of
 per step.
+
+## Phase 1 follow-ups execution (2026-07-22)
+
+Plan: docs/superpowers/plans/2026-07-21-diffusion-phase1-followups.md
+Build dir: build_followups/
+
+Resolved: F2, F3, F5. Two new follow-ups (F8, F9) emerged.
+
+### F5 (MFEM rebuild) - RESOLVED, plus complications
+- User rebuilt MFEM at f:/dev/mfem with MFEM_USE_MPI, MFEM_USE_SUNDIALS,
+  MFEM_USE_HYPRE 2.23.0. Final lib at f:/dev/mfem/mfem.lib (475MB,
+  Release CRT).
+- Path fixes needed in install tree (not in ViennaPS repo):
+  - MFEMConfig.cmake: replaced build_full -> build (build_full no longer
+    exists; user renamed the build dir)
+  - MFEMTargets.cmake: same path fix + added openblas.lib and lapack.lib
+    to INTERFACE_LINK_LIBRARIES (HYPRE depends on LAPACK symbols
+    dsygv_, dgels_, dgetrs_, dpotrs_; vcpkg's openblas+lapack provide
+    them)
+  - mfem.hpp and mfem-performance.hpp: fixed MFEM_CONFIG_FILE macro
+    pointing to build_full/config/_config.hpp
+
+### F2 (shouldCreateTimeDerivative re-entrance) - RESOLVED
+- DiffusionPhysics::resetTimeDerivativeClaims() added; called at the top
+  of DiffusionEngine::assembleAllSpecies() so the gatekeeper stays
+  per-solve-call (mirrors MOOSE PhysicsBase semantics).
+- TestReentrantSolve confirms: two consecutive solve() calls on the same
+  physics object both conserve dose to 0 (perfect, vs order-unity drift
+  before the fix from silent identity-mass fallback).
+
+### F3 (multi-species test) - RESOLVED
+- TestMultiSpeciesSmoke runs two independent ConstantDiffusion models on
+  Boron (1e18) + Phosphorus (1e15), each with closed-system zero-flux
+  BCs. Both doses conserved to 0 independently - confirms species-outer
+  loop, allSpecies_ map, and packed-block state layout are correct
+  (no cross-species K leakage despite different D values).
+
+### F8 (NEW) - parallel-engine conversion for HypreBoomerAMG
+- HypreBoomerAMG requires a HypreParMatrix; our engine uses serial
+  SparseMatrix on serial FiniteElementSpace. MFEM_USE_MPI being defined
+  is necessary but not sufficient. Phase 1's small meshes don't benefit
+  from the parallel path; DSmoother is sufficient.
+- makeMassSolver() switched to DSmoother unconditionally. Parallel-
+  engine conversion tracked as F8.
+
+### F9 (NEW) - CVODE BDF path flaky (~20% failure rate)
+- Implemented SUNImplicitSetup + SUNImplicitSolve on DiffusionRHSOperator.
+  Operator type IMPLICIT. Initial-state packing stamps Dirichlet values
+  on essential dofs; Mult zeros du/dt at essential dofs; SUNImplicitSetup
+  eliminates essential rows (DIAG_ONE); SUNImplicitSolve zeros essential
+  RHS dofs so Newton's dk is zero there (BC value from predictor).
+- When CVODE completes, results are correct and BETTER than implicit-
+  Euler (Dirichlet 8.35e17 vs 7.6e17, Neumann 0.4% vs 4%).
+- ~20% of runs crash with NaN in CGSolver. std::cerr print in Mult
+  masks it (timing-sensitive). Root cause likely SUNDIALS-internal race.
+- Workaround: solve() selects integrator via VIENNAPS_USE_CVODE env var.
+  Default is implicit-Euler (rock-solid: 8/8 runs pass in stability
+  test). CVODE can be opted into per-run.
+
+### Verification (2026-07-22)
+- Build dir build_followups/ against new MFEM, full solution builds clean.
+- ctest (excluding pre-existing intermediate/removeStrayPoints failures):
+  34/34 PASS.
+- testDiffusion has 12 tests (was 10): added TestReentrantSolve (F2) and
+  TestMultiSpeciesSmoke (F3).
+- 8/8 testDiffusion reruns stable with implicit-Euler default.

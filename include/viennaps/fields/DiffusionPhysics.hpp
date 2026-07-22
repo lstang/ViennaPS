@@ -45,8 +45,9 @@ public:
 
   // ---- Composition gatekeeper (MOOSE PhysicsBase::shouldCreateTimeDerivative,
   //      verified PhysicsBase.h:237). Returns true only the first time a
-  //      species' time derivative is requested, so composing FermiDiffusion +
-  //      CddDiffusion on the same species does not produce a double dC/dt.
+  //      species' time derivative is requested within the current solve,
+  //      so composing FermiDiffusion + CddDiffusion on the same species
+  //      does not produce a double dC/dt.
   bool shouldCreateTimeDerivative(const std::string& species,
                                   const DiffusionModel<NumericType>& model) {
     (void)model;  // identity not used in this minimal form; MOOSE tracks by physics ptr
@@ -55,6 +56,16 @@ public:
     timeDerivativeClaimed_.insert(species);
     return true;
   }
+
+  /// Clear the per-species time-derivative claim set. Called by the engine
+  /// at the start of each solve() so composing models can re-claim dC/dt
+  /// on the same species across multiple solves on the same physics object.
+  /// Mirrors MOOSE PhysicsBase semantics where the gatekeeper is
+  /// per-add-kernel (in our case, per-solve), not per-physics-lifetime.
+  /// Without this, a second solve() on the same physics would deny the
+  /// mass matrix for every species (timeDerivativeClaimed_ still holds
+  /// them from the first solve) and silently fall back to identity mass.
+  void resetTimeDerivativeClaims() { timeDerivativeClaimed_.clear(); }
 
   // ---- Per-species BC list (MOOSE MultiSpeciesDiffusionPhysicsBase pattern,
   //      verified: std::vector<std::vector<BoundaryName>> _neumann_boundaries).
