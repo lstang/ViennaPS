@@ -21,16 +21,20 @@
 ///     terms-inner assembly loop. The engine mirrors this structure:
 ///     `for s in species { for m in models if m.targets(s) {...} }`.
 ///   - MOOSE DiffusionPhysicsBase::addPreconditioning() — HypreBoomerAMG is
-///     the default preconditioner for diffusion. The engine uses
-///     `mfem::HypreBoomerAMG` + CG when MFEM was built with MPI+hypre
-///     (MFEM gates HypreBoomerAMG behind `MFEM_USE_MPI`); otherwise it falls
-///     back to `DSmoother`-preconditioned CG so Phase 1 still runs on a
-///     serial-MFEM build.
+///     the MOOSE default preconditioner for diffusion. The ViennaPS engine
+///     uses `DSmoother`-preconditioned CG in Phase 1 instead, because
+///     `HypreBoomerAMG::SetOperator` requires a `HypreParMatrix` (parallel
+///     distributed matrix, asserted at hypre.cpp:5384) while our engine
+///     builds serial `SparseMatrix` operators on a serial
+///     `FiniteElementSpace`. Activating HypreBoomerAMG requires converting
+///     the engine to `ParFiniteElementSpace` + `ParBilinearForm` +
+///     `ParGridFunction` (tracked as follow-up F8 in
+///     `docs/superpowers/specs/diffusion-phase1-followups.md`). For Phase 1's
+///     small test meshes (4x4, 8x8) DSmoother is sufficient (<10 CG iters).
 ///   - MOOSE MFEMHypreBoomerAMG.h
 ///     (3rdparty/moose/framework/include/mfem/solvers/MFEMHypreBoomerAMG.h)
 ///     wraps `mfem::HypreBoomerAMG` and adds an optional `SetupLOR()` low-
-///     order-refinement acceleration path. Phase 1 does not require LOR
-///     (meshes are small); a Phase 2+ task may add it.
+///     order-refinement acceleration path. Relevant only after F8 lands.
 ///
 /// Time integration: `mfem::CVODESolver` (BDF, adaptive) when MFEM was built
 /// with SUNDIALS (`MFEM_USE_SUNDIALS`). Otherwise the engine uses an implicit
@@ -345,6 +349,12 @@ private:
       sys.K->Assemble();
       sys.M->Assemble();
       sys.R->Assemble();
+      // Finalize the bilinear forms so their SpMat() is usable by iterative
+      // solvers/preconditioners (DSmoother/HypreBoomerAMG require finalized
+      // CSR form, not LIL). HasSpMat() is true after Assemble(); Finalize()
+      // converts the internal LIL to CSR.
+      sys.K->Finalize();
+      sys.M->Finalize();
 
       // If no model contributed a mass term (e.g. a pure reaction species),
       // default to the identity mass so du/dt = -K u + R still has a well-
@@ -354,6 +364,7 @@ private:
         mfem::ConstantCoefficient one(1.0);
         sys.M->AddDomainIntegrator(new mfem::MassIntegrator(one));
         sys.M->Assemble();
+        sys.M->Finalize();
       }
 
       systems.emplace(speciesName, std::move(sys));
@@ -374,23 +385,32 @@ private:
 
   // ---- Linear solver factory for the per-species mass matrix ----------
   //
-  // MFEM gates HypreBoomerAMG behind MFEM_USE_MPI (hypre.hpp:17). When
-  // available, use it as the preconditioner for CG (the mass matrix M is
-  // symmetric positive definite). When not available (serial MFEM build,
-  // the current Phase 1 configuration), fall back to DSmoother-preconditioned
-  // CG — same O(n) cost per iteration, slightly more iterations on large
-  // meshes but correct for the small 2D tests in Phase 1.
+  // Phase 1 uses `DSmoother`-preconditioned `CGSolver` unconditionally.
+  //
+  // Rationale: `mfem::HypreBoomerAMG` requires a `HypreParMatrix` (parallel
+  // distributed matrix) as input — see `HypreBoomerAMG::SetOperator` at
+  // hypre.cpp:5384 which asserts `new Operator must be a HypreParMatrix`.
+  // Our engine builds *serial* `BilinearForm`s on a serial `FiniteElementSpace`
+  // (the FES from `setMesh` is `FiniteElementSpace`, not `ParFiniteElementSpace`),
+  // so feeding `SparseMatrix` to `HypreBoomerAMG` triggers that assertion at
+  // runtime. `MFEM_USE_MPI` being defined is necessary but not sufficient:
+  // you also need the engine itself to construct `ParFiniteElementSpace` +
+  // `ParBilinearForm` + `ParGridFunction` and run under MPI.
+  //
+  // Phase 1's test meshes (4x4, 8x8 — 25-81 DOFs) converge in <10 CG
+  // iterations with DSmoother, so the parallel path offers no benefit here.
+  //
+  // Follow-up tracked in `docs/superpowers/specs/diffusion-phase1-followups.md`
+  // (F8): convert `DiffusionEngine` to use `ParFiniteElementSpace` etc. so
+  // `HypreBoomerAMG` activates. Phase 2+ will need this when mesh sizes grow
+  // past ~1000 DOFs.
   //
   // IterativeSolver does NOT own its preconditioner, so the bundle returned
   // here keeps both alive (caller must hold the MassSolverBundle until the
   // solve completes).
   struct MassSolverBundle {
     std::unique_ptr<mfem::Solver> cg;
-#ifdef MFEM_USE_MPI
-    std::unique_ptr<mfem::HypreBoomerAMG> prec;
-#else
     std::unique_ptr<mfem::DSmoother> prec;
-#endif
   };
 
   std::unique_ptr<MassSolverBundle>
@@ -400,14 +420,8 @@ private:
     cg->SetRelTol(relTol);
     cg->SetMaxIter(maxIters);
     cg->SetPrintLevel(0);
-#ifdef MFEM_USE_MPI
-    bundle->prec = std::make_unique<mfem::HypreBoomerAMG>();
-    bundle->prec->SetPrintLevel(0);
-    cg->SetPreconditioner(*bundle->prec);
-#else
     bundle->prec = std::make_unique<mfem::DSmoother>(1, 1, 1);
     cg->SetPreconditioner(*bundle->prec);
-#endif
     bundle->cg = std::move(cg);
     return bundle;
   }
@@ -439,21 +453,41 @@ private:
     const int nSpecies = static_cast<int>(names.size());
     const int totalSize = ndof * nSpecies;
 
-    DiffusionRHSOperator op(*this, systems, names, ndof, nSpecies, totalSize);
+    // Per-species BC resolution - same as the implicit-Euler path. Each
+    // species gets its Dirichlet/Neumann/Robin mask set.
+    std::map<std::string, BdrMasks> bdrMasks;
+    for (const auto &name : names)
+      bdrMasks.emplace(name, resolveBoundaryMasks(name));
 
-    mfem::CVODESolver cvode(mfem::CV_BDF);
+    DiffusionRHSOperator op(*this, systems, names, ndof, nSpecies, totalSize,
+                            bdrMasks);
+
+    mfem::CVODESolver cvode(CV_BDF);
     cvode.Init(op);
-    cvode.SetSStolerances(/*reltol*/ 1e-4, /*abstol*/ 1e-9 *
-                                                       static_cast<double>(1e18));
+    // CVODE tolerances: reltol=1e-6 is tight enough for diffusion; abstol
+    // should be small relative to the smallest expected |y|. Dopant concs
+    // span 1e10-1e20, so abstol=1e5 catches the noise floor without
+    // dominating at low concentrations.
+    cvode.SetSStolerances(/*reltol*/ 1e-6, /*abstol*/ 1e5);
     cvode.SetMaxStep(static_cast<double>(dtMax));
     cvode.UseMFEMLinearSolver();
 
-    // Pack initial state.
+    // Pack initial state. For Dirichlet dofs, stamp the prescribed value
+    // so CVODE's predictor starts from the correct boundary state (the
+    // operator's Mult will then hold those dofs at that value).
     mfem::Vector state(totalSize);
     for (int s = 0; s < nSpecies; ++s) {
-      const auto &gf = *allSpecies_[names[s]];
+      const auto &name = names[s];
+      const auto &gf = *allSpecies_[name];
       mfem::Vector block(state.GetData() + s * ndof, ndof);
       block = gf;
+      const auto &masks = bdrMasks.at(name);
+      if (masks.dirichletCoef != nullptr) {
+        mfem::Array<int> essVdofs;
+        fes_->GetEssentialTrueDofs(masks.essAttrMarker, essVdofs);
+        for (int i = 0; i < essVdofs.Size(); ++i)
+          block(essVdofs[i]) = masks.dirichletValue;
+      }
     }
 
     double t = static_cast<double>(tStart);
@@ -480,20 +514,30 @@ private:
   /// TimeDependentOperator: y = M^{-1} (-K u + R) for each species block.
   /// Holds non-owning references to the assembled systems; the engine keeps
   /// the systems alive for the duration of solve().
+  ///
+  /// Dirichlet BCs: the operator receives the per-species `BdrMasks` so it
+  /// can (a) zero `du/dt` at essential dofs in Mult (state stays put), (b)
+  /// eliminate essential rows/cols in SUNImplicitSetup (identity rows so
+  /// Newton returns the prescribed value), (c) stamp the prescribed value
+  /// in SUNImplicitSolve. Without this, CVODE would treat the system as
+  /// un-constrained and never apply the BC.
+  struct BdrMasks; // forward declaration - defined later in DiffusionEngine
   class DiffusionRHSOperator : public mfem::TimeDependentOperator {
   public:
     DiffusionRHSOperator(
         DiffusionEngine &engine,
         std::map<std::string, SpeciesSystem> &systems,
         const std::vector<std::string> &names, int ndof, int nSpecies,
-        int totalSize)
-        : mfem::TimeDependentOperator(totalSize, 0.0, /*type*/ EXPLICIT),
+        int totalSize,
+        const std::map<std::string, BdrMasks> &bdrMasks)
+        : mfem::TimeDependentOperator(totalSize, 0.0,
+                                      /*type*/ IMPLICIT),
           engine_(engine), systems_(systems), names_(names), ndof_(ndof),
-          nSpecies_(nSpecies) {
-      // Cache a solver + sparse-matrix pointer per species so each Mult
-      // call doesn't reallocate. The SparseMatrix pointers come from
-      // BilinearForm::SpMat() and remain valid as long as `systems`
-      // is alive (i.e. until solve() returns).
+          nSpecies_(nSpecies), bdrMasks_(bdrMasks) {
+      // Cache the explicit-RHS solver + sparse-matrix pointer per species
+      // so each Mult call doesn't reallocate. The SparseMatrix pointers
+      // come from BilinearForm::SpMat() and remain valid as long as
+      // `systems` is alive (i.e. until solve() returns).
       for (const auto &name : names) {
         auto it = systems.find(name);
         if (it == systems.end())
@@ -506,15 +550,26 @@ private:
         sp.R = sys.R.get();
         sp.bundle = engine.makeMassSolver();
         sp.bundle->cg->SetOperator(*sp.M);
+
+        // Resolve essential vdofs (as a list) for Dirichlet enforcement.
+        // Stored per species; empty list if no Dirichlet BC.
+        const auto &masks = bdrMasks.at(name);
+        if (masks.dirichletCoef != nullptr) {
+          mfem::Array<int> essVdofs;
+          engine.fes_->GetEssentialTrueDofs(masks.essAttrMarker, essVdofs);
+          sp.essVdofs = essVdofs;
+          sp.dirichletValue = masks.dirichletValue;
+        }
+
         solvers_[name] = std::move(sp);
       }
     }
 
     void Mult(const mfem::Vector &u, mfem::Vector &y) const override {
-      // For each species block, compute Ku, subtract from -R, then apply
-      // M^{-1}. `tmp` is hoisted out of the species loop so we don't
-      // reallocate it nSpecies times per Mult call (CVODE calls Mult
-      // many times per step).
+      // Explicit RHS evaluation: y = du/dt = M^{-1} (-K u + R) per species.
+      // Used by CVODE for predictor / error estimation. `tmp` is hoisted
+      // out of the species loop so we don't reallocate it nSpecies times
+      // per Mult call (CVODE calls Mult many times per step).
       if (tmp_.Size() != ndof_)
         tmp_.SetSize(ndof_);
       for (int s = 0; s < nSpecies_; ++s) {
@@ -531,7 +586,84 @@ private:
         // y = M^{-1} (-K u + R)
         sp.bundle->cg->Mult(yblock, tmp_);
         yblock = tmp_;
+        // Dirichlet BC enforcement: essential dofs must not move, so
+        // du/dt = 0 there. Without this CVODE would drift the boundary
+        // values away from the prescribed concentration.
+        for (int i = 0; i < sp.essVdofs.Size(); ++i)
+          yblock(sp.essVdofs[i]) = 0.0;
       }
+    }
+
+    /// SUNDIALS implicit-setup callback. CVODE BDF's Newton iteration
+    /// solves `(I - gamma·J)·dx = r` per corrector step, where J is the
+    /// Jacobian of the explicit RHS `du/dt = M^{-1}(-K u + R)` (so
+    /// `J = -M^{-1} K`). For our linear ConstantDiffusion the system
+    /// `(I - gamma·J)·dx = r` is equivalent to `(M + gamma·K)·dx = M·r`,
+    /// so we build and cache `(M + gamma·K)` per species here and solve
+    /// against it in SUNImplicitSolve. Essential (Dirichlet) rows are
+    /// eliminated so the Newton update for those dofs is zero (BC value
+    /// is preserved across corrector iterations).
+    int SUNImplicitSetup(const mfem::Vector &y, const mfem::Vector &fy,
+                         int jok, int *jcur, mfem::real_t gamma) override {
+      for (int s = 0; s < nSpecies_; ++s) {
+        const auto &name = names_[s];
+        const auto &sp = solvers_.at(name);
+        // Build J_sys = (M + gamma·K) as a fresh SparseMatrix (deep copy
+        // of M, then add gamma·K). Cache it + a CG solver on the species
+        // slot. Reuse the engine's makeMassSolver factory for consistency.
+        auto J = std::make_unique<mfem::SparseMatrix>(*sp.M);
+        J->Add(gamma, *sp.K);
+        J->Finalize();
+        // Eliminate Dirichlet rows/cols: zero the row and set diagonal=1
+        // so J·dk for essential dk returns dk (prescribed value stamped
+        // in SUNImplicitSolve).
+        for (int i = 0; i < sp.essVdofs.Size(); ++i)
+          J->EliminateRow(sp.essVdofs[i],
+                          mfem::Operator::DiagonalPolicy::DIAG_ONE);
+        auto bundle = engine_.makeMassSolver();
+        bundle->cg->SetOperator(*J);
+        auto &slot = implicitSolvers_[name];
+        slot.J = std::move(J);
+        slot.bundle = std::move(bundle);
+      }
+      *jcur = true;
+      return 0; // CV_SUCCESS
+    }
+
+    /// SUNDIALS implicit-solve callback. Solve `J·dx = r` per species
+    /// against the (M + gamma·K) cached by the most recent setup.
+    int SUNImplicitSolve(const mfem::Vector &r, mfem::Vector &dk,
+                         mfem::real_t tol) override {
+      // CVODE Newton solves `(I - gamma·J_f)·dk = r` where J_f is the
+      // Jacobian of the explicit RHS `du/dt = M⁻¹(-K u + R)`, so
+      // `J_f = -M⁻¹·K`. Our cached matrix is `A = (M + gamma·K)` which
+      // equals `M·(I - gamma·J_f)` — i.e. CVODE's LHS pre-multiplied by
+      // the mass matrix. To preserve the equation we must pre-multiply
+      // the RHS by M too: `(M + gamma·K)·dk = M·r`.
+      // For essential dofs (Dirichlet), the J row is e_i (set in setup),
+      // so we stamp r[i] = 0 to make dk[i] = 0 (no Newton update - the
+      // BC value is preserved from the predictor).
+      // tol is currently ignored (CG uses the engine's relTol).
+      for (int s = 0; s < nSpecies_; ++s) {
+        const auto &name = names_[s];
+        auto it = implicitSolvers_.find(name);
+        if (it == implicitSolvers_.end())
+          return -1; // setup not called
+        const auto &slot = it->second;
+        const auto &sp = solvers_.at(name);
+        mfem::Vector rblock(const_cast<mfem::Vector &>(r).GetData() + s * ndof_,
+                            ndof_);
+        mfem::Vector Mrblock(ndof_);
+        sp.M->Mult(rblock, Mrblock); // pre-multiply RHS by M
+        // Essential dofs: zero the RHS so the identity rows in J produce
+        // dk = 0 there (BC value comes from the predictor, not Newton).
+        for (int i = 0; i < sp.essVdofs.Size(); ++i)
+          Mrblock(sp.essVdofs[i]) = 0.0;
+        mfem::Vector dkblock(dk.GetData() + s * ndof_, ndof_);
+        dkblock = 0.0;
+        slot.bundle->cg->Mult(Mrblock, dkblock);
+      }
+      return 0; // CV_SUCCESS
     }
 
   private:
@@ -540,6 +672,12 @@ private:
       const mfem::SparseMatrix *K = nullptr;
       const mfem::Vector *R = nullptr;
       std::unique_ptr<typename DiffusionEngine::MassSolverBundle> bundle;
+      mfem::Array<int> essVdofs;          // Dirichlet dofs (empty if none)
+      mfem::real_t dirichletValue = 0.0;  // prescribed BC value
+    };
+    struct ImplicitSolverSlot {
+      std::unique_ptr<mfem::SparseMatrix> J; // (M + gamma·K), Dirichlet-eliminated
+      std::unique_ptr<typename DiffusionEngine::MassSolverBundle> bundle;
     };
 
     DiffusionEngine &engine_;
@@ -547,7 +685,9 @@ private:
     std::vector<std::string> names_;
     int ndof_ = 0;
     int nSpecies_ = 0;
+    const std::map<std::string, BdrMasks> &bdrMasks_;
     mutable std::map<std::string, SpeciesSolvers> solvers_;
+    mutable std::map<std::string, ImplicitSolverSlot> implicitSolvers_;
     mutable mfem::Vector tmp_;
   };
 #endif // MFEM_USE_SUNDIALS
