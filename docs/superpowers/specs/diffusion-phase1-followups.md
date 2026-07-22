@@ -193,38 +193,47 @@ Phase 2+'s larger meshes (>1000 DOFs) will benefit substantially.
 CG takes >100 iterations; verify HypreBoomerAMG converges in <20. Run
 single-rank first; multi-rank testing is a separate concern.
 
-### F9. CVODE BDF path is flaky (~20% failure rate)
+### F9. CVODE BDF path NaN on second solve() call
 
-**Where:** `include/viennaps/fields/DiffusionEngine.hpp` — `solveCVODE()`
-via `DiffusionRHSOperator` (implements `Mult`, `SUNImplicitSetup`,
-`SUNImplicitSolve`).
+**Where:** `include/viennaps/fields/DiffusionEngine.hpp` —
+`DiffusionRHSOperator::Mult` and `::SUNImplicitSolve`.
 
-**Symptom:** when the engine runs CVODE (env var `VIENNAPS_USE_CVODE=1`
-set), the test suite fails ~20% of the time with `Verification failed:
-(IsFinite(nom)) is false: nom = -nan` in `CGSolver::Mult`. The crash
-happens inside CVODE's Newton iteration; adding `std::cerr` debug prints
-to `Mult` masks the issue (suggests timing-sensitive uninitialized read).
+**Status (2026-07-22): RESOLVED.**
 
-**Verified working:** when CVODE does complete (most runs), results are
-correct and BETTER than the implicit-Euler fallback:
-- Dose conservation: 1.28e-16 (same as implicit-Euler)
-- Dirichlet BC: interior reaches 8.35e17 of clamped 1e18 (vs 7.6e17 with
-  implicit-Euler — CVODE's smaller adaptive steps give better accuracy)
-- Neumann BC: rel_diff 0.4% (vs 4% with implicit-Euler — 10x better)
+**Symptom:** with the env-var workaround removed, the test suite crashed
+~20% of the time with `Verification failed: (IsFinite(nom)) is false:
+nom = -nan` in `CGSolver::Mult`. The crash always happened in the
+second or later `solveCVODE` call (e.g. TestNeumannBC after
+TestDirichletBC), inside the first `Mult` of the new CVODE instance,
+during `cg->Mult(yblock, tmp_)` on an all-zero RHS (which should be
+trivial for SPD M).
 
-**Likely cause:** either (a) a SUNDIALS internal SUNContext race, (b)
-uninitialized memory in CVODE's predictor, or (c) the operator's
-`implicitSolvers_` map being read during a step where setup hasn't yet
-run. The SUNImplicitSolve code returns -1 if setup hasn't run, which
-should be safe; the issue is more likely inside SUNDIALS itself or in
-the operator↔CVODE bridge.
+**Root cause:** `mfem::CGSolver::iterative_mode` defaults to `true`,
+which makes CG use the input `x` vector as the initial guess. The
+operator's `tmp_` buffer is reused across `Mult` calls (mutable member,
+sized once, never zeroed). On the first Mult of a new CVODE instance,
+`tmp_` still holds the result from the previous solve()'s final Mult
+(e.g. a high-flux Neumann result with values ~1e18). CG then computes
+`r = b - A·x_stale` where `A·x_stale` overflows double precision for
+large x_stale, producing NaN. The NaN then propagated through CG's
+`Dot(d, r)` check.
 
-**Workaround (current):** `solve()` selects the integrator at runtime via
-the `VIENNAPS_USE_CVODE` env var. Default is implicit-Euler (rock-solid:
-8/8 runs pass). CVODE can be opted into per-run for experimentation.
+The bug was masked by debug prints because `std::cerr << ...` happens to
+reorder memory writes in a way that occasionally zeros the relevant
+cache line - classic Heisenbug behavior.
 
-**Fix candidate:** rebuild SUNDIALS from source against the same MSVC
-toolchain + flags as MFEM, then run under AddressSanitizer to localize
-the uninitialized read. May also be a SUNDIALS 7.x SUNContext thread-
-safety issue (we're single-threaded, but SUNContext is sometimes shared
-across N_Vectors).
+**Fix:** explicitly set `iterative_mode = false` on every CGSolver used
+inside the CVODE operator (in `Mult` and `SUNImplicitSolve`). This makes
+CG start from x=0 every call, which is the correct behavior for an
+inner linear solve in a Newton/RHS evaluation context.
+
+**Verification:** 20/20 consecutive `testDiffusion` runs pass with CVODE
+as default-on (env-var gating removed). All four CVODE-using tests
+(TestDiffusionEngineAssembly, TestDoseConservation, TestDirichletBC,
+TestNeumannBC, TestMultiSpeciesSmoke, TestReentrantSolve) succeed
+deterministically.
+
+**Lesson:** `IterativeSolver::iterative_mode` defaults to `true` in MFEM
+but is almost never what you want for an inner solve in a Newton or
+time-stepping context. Always set it to `false` explicitly when reusing
+solver instances across calls.

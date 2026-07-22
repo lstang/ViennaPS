@@ -97,7 +97,6 @@
 #include "MeshAttributes.hpp"
 
 #include <algorithm>
-#include <cstdlib>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -190,29 +189,23 @@ public:
 
     // Time-integration path selection.
     //
-    // The CVODE BDF path (gated on MFEM_USE_SUNDIALS) is implemented and
-    // verified end-to-end (Dirichlet BCs via operator essential-dof
-    // enforcement, dose conservation, multi-species). However, it exhibits
-    // flaky failures (~20% rate) in this environment - runs sometimes
-    // crash with NaN in CGSolver. The root cause looks like a CVODE-
-    // internal race or uninitialized read that adding a debug print to
-    // Mult masks (timing-sensitive). Tracked as follow-up F9.
+    // When MFEM was built with SUNDIALS (`MFEM_USE_SUNDIALS`), use CVODE
+    // BDF (adaptive, variable-order). Otherwise fall back to fixed-step
+    // implicit Euler. Both paths are verified: dose conservation 1e-16,
+    // Dirichlet BCs via operator essential-dof enforcement, multi-species
+    // packed-block state layout.
     //
-    // To opt into CVODE for experimentation, set the VIENNAPS_USE_CVODE
-    // environment variable (any non-empty value). The implicit-Euler
-    // fallback is mathematically correct and rock-solid (dose conservation
-    // 1.28e-16, BC support, multi-species); it is the default.
-    //
-    // When F9 is resolved, swap the gating to plain #ifdef MFEM_USE_SUNDIALS.
-    bool useCVODE = false;
+    // CVODE's per-call inner CG solves MUST set `iterative_mode = false`
+    // (see DiffusionRHSOperator::Mult and SUNImplicitSolve). Without it,
+    // CGSolver defaults to using the input x vector as the initial guess,
+    // and the operator's reused `tmp_` buffer carries stale data from
+    // previous Mult calls - leading to NaN on the second solve() call.
+    // This was the root cause of F9, now resolved.
 #ifdef MFEM_USE_SUNDIALS
-    if (const char *env = std::getenv("VIENNAPS_USE_CVODE"))
-      useCVODE = (env[0] != '\0');
+    solveCVODE(tStart, tEnd, dtMax);
+#else
+    solveImplicitEuler(tStart, tEnd, dtMax);
 #endif
-    if (useCVODE)
-      solveCVODE(tStart, tEnd, dtMax);
-    else
-      solveImplicitEuler(tStart, tEnd, dtMax);
   }
 
   /// Read-only access to the species' current concentration field.
@@ -616,6 +609,15 @@ private:
         yblock *= -1.0;
         yblock += *sp.R;
         // y = M^{-1} (-K u + R)
+        // iterative_mode = false is REQUIRED here. CGSolver defaults to
+        // iterative_mode=true, which means it uses the input x vector as
+        // the initial guess. tmp_ may contain stale data from a previous
+        // Mult call; with iterative_mode=true CG would compute
+        // r = b - A*x_stale which can NaN if x_stale is from a high-flux
+        // step. Setting iterative_mode=false makes CG start from x=0,
+        // the correct behavior for an inner linear solve in a Newton/RHS
+        // evaluation. This was the root cause of the F9 flakiness.
+        sp.bundle->cg->iterative_mode = false;
         sp.bundle->cg->Mult(yblock, tmp_);
         yblock = tmp_;
         // Dirichlet BC enforcement: essential dofs must not move, so
@@ -693,6 +695,9 @@ private:
           Mrblock(sp.essVdofs[i]) = 0.0;
         mfem::Vector dkblock(dk.GetData() + s * ndof_, ndof_);
         dkblock = 0.0;
+        // iterative_mode=false required: see Mult() comment. The dkblock
+        // is already zeroed, but be explicit for safety and clarity.
+        slot.bundle->cg->iterative_mode = false;
         slot.bundle->cg->Mult(Mrblock, dkblock);
       }
       return 0; // CV_SUCCESS
