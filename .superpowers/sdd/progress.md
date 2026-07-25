@@ -361,3 +361,42 @@ projectIntegralPreserving.
 
 Still not full production for every plan stretch item (FDTD, adjoint, live
 hp-AMR during CVODE multi-species, diamond-lattice KMC calibration).
+
+## Full-depth execution (2026-07-25) — gap analysis waves
+
+Source: docs/superpowers/reviews/2026-07-25-spec-gap-analysis.md
+Branch: zcode
+Build: build_phase2 Release testDiffusion PASS
+
+### Wave A — Phase 3 FEM (commit 0f88a0a)
+- ChargedFermi QP-local D(C)
+- ChargedReact / ChargedPair FEM
+- Cluster311 / VC / BIC / DislocationLoop FEM residuals
+- ParameterDatabase defect/cluster/segregation keys
+- TestPhase3FullDepthFem
+
+### Wave B — Phase 4 FEM (commit e13fba3)
+- OedSource FEM residual + ADR-0004 moving-interface idiom
+- Carbon trapping FEM; ChargedEquilibrium QP D; Cu/MobileImpurity FEM
+- TestPhase4FullDepthFem
+
+### Wave C — Phases 6/7/10 (this commit)
+- SiGeDiffusion FEM interdiffusion
+- KMC diamond neighbors + I+V recombination
+- PdeEquation applyTo/buildModels ? DiffusionEngine
+
+### Still skeleton / deferred (next sessions)
+- MovingMeshHandler / SolutionTransfer / 3D LevelSetToMesh
+- Runtime AMR in engine loop; ZZ estimator
+- KMC event tree O(log N); full diamond cubic geometry
+- Flash/laser FEM heat + Allen-Cahn; FDTD
+- Epitaxy physics depth; SPER level-set
+- Nonlinear Jacobian strategy (b) engine wiring
+- F8 Hypre parallel (MPI)
+
+
+## MovingMeshHandler + SolutionTransfer (2026-07-25)
+- Commit: c475863
+- Headers: include/viennaps/fields/MovingMeshHandler.hpp, SolutionTransfer.hpp
+- Tests: TestMovingMeshSolutionTransfer (relabel, lift, coarse+fine dose =0.1%)
+- Deferred remaining: 3D LevelSetToMesh, runtime AMR in CVODE, KMC event tree, flash FEM heat, F8 Hypre MPI
