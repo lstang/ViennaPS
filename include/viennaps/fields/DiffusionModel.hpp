@@ -58,6 +58,10 @@ public:
   }
 
 #ifdef VIENNAPS_HAS_MFEM
+  /// Optional mesh pointer for interface / face assembly (segregation).
+  virtual void setMesh(mfem::Mesh *mesh) { mesh_ = mesh; }
+  mfem::Mesh *mesh() const { return mesh_; }
+
   /// Contribute to stiffness matrix K for this species.
   /// speciesGF: this species' GridFunction (for concentration-dependent D)
   /// allSpecies: map of all species GridFunctions (for coupled models)
@@ -75,11 +79,21 @@ public:
       const mfem::GridFunction& /*speciesGF*/) const {}
 
   /// Contribute to nonlinear reaction RHS R for this species.
+  /// Integrators registered here are applied during LinearForm::Assemble().
   virtual void assembleReaction(
       mfem::LinearForm& R,
       const mfem::GridFunction& speciesGF,
       const std::map<std::string, mfem::GridFunction*>& allSpecies,
       const mfem::GridFunction* temp) const {}
+
+  /// Post-Assemble reaction contributions that write residual DOFs directly
+  /// (e.g. interior-face segregation). Called AFTER LinearForm::Assemble()
+  /// so entries are not zeroed.
+  virtual void finalizeReaction(
+      mfem::LinearForm& /*R*/,
+      const mfem::GridFunction& /*speciesGF*/,
+      const std::map<std::string, mfem::GridFunction*>& /*allSpecies*/,
+      const mfem::GridFunction* /*temp*/) const {}
 
   /// Contribute to mass matrix M.
   virtual void assembleMass(mfem::BilinearForm& M) const {}
@@ -96,6 +110,9 @@ protected:
   const MeshAttributes* attrs_ = nullptr;
   NumericType T_ = NumericType(1273.15);
   std::string name_;
+#ifdef VIENNAPS_HAS_MFEM
+  mfem::Mesh *mesh_ = nullptr;
+#endif
 };
 
 } // namespace viennaps

@@ -176,8 +176,55 @@ public:
   /// Force implicit Euler even when CVODE is available (deterministic tests).
   void setForceImplicitEuler(bool on) { forceImplicitEuler_ = on; }
 
+  /// Enable dual-species segregation operator-split after each time step.
+  void setEnableSegregationSplit(bool on) { enableSegregationSplit_ = on; }
+
   mfem::FiniteElementSpace *fes() { return fes_.get(); }
   mfem::Mesh *mesh() { return mesh_.get(); }
+
+  /// Set uniform value on dofs whose element support intersects attribute.
+  void initializeSpeciesOnAttribute(const std::string &name, NumericType value,
+                                    int attribute) {
+    auto *gf = ensureSpecies(name);
+    if (!mesh_ || !fes_)
+      return;
+    *gf = mfem::real_t(0);
+    mfem::Array<int> vdofs;
+    for (int e = 0; e < mesh_->GetNE(); ++e) {
+      if (mesh_->GetAttribute(e) != attribute)
+        continue;
+      fes_->GetElementVDofs(e, vdofs);
+      for (int i = 0; i < vdofs.Size(); ++i) {
+        const int id = vdofs[i];
+        if (id >= 0)
+          (*gf)(id) = static_cast<mfem::real_t>(value);
+      }
+    }
+  }
+
+  /// Mean concentration over elements of the given attribute.
+  NumericType meanOnAttribute(const std::string &name, int attribute) {
+    auto it = species_.find(name);
+    if (it == species_.end() || !mesh_ || !fes_)
+      return NumericType(0);
+    const mfem::GridFunction &gf = *it->second;
+    double sum = 0.0;
+    int n = 0;
+    mfem::Array<int> vdofs;
+    for (int e = 0; e < mesh_->GetNE(); ++e) {
+      if (mesh_->GetAttribute(e) != attribute)
+        continue;
+      fes_->GetElementVDofs(e, vdofs);
+      for (int i = 0; i < vdofs.Size(); ++i) {
+        const int id = vdofs[i];
+        if (id >= 0) {
+          sum += gf(id);
+          ++n;
+        }
+      }
+    }
+    return n > 0 ? static_cast<NumericType>(sum / n) : NumericType(0);
+  }
 
   /// Project host samples onto a species field, then rescale so
   /// getIntegral(name) matches targetDose (IntegralPreservingFunctionIC).
@@ -374,8 +421,10 @@ private:
     if (attrs_) {
       const NumericType T = physics_->temperature();
       for (const auto &model : physics_->models())
-        if (model)
+        if (model) {
           model->setup(*attrs_, T);
+          model->setMesh(mesh_.get());
+        }
     }
 
     std::map<std::string, SpeciesSystem> systems;
@@ -427,6 +476,15 @@ private:
       sys.K->Assemble();
       sys.M->Assemble();
       sys.R->Assemble();
+      // Post-assemble direct residual writes (interior-face segregation).
+      for (const auto &model : physics_->models()) {
+        if (!model)
+          continue;
+        if (!modelTargetsSpecies(*model, speciesName))
+          continue;
+        model->finalizeReaction(*sys.R, *speciesIt->second, allSpecies_,
+                                /*temp*/ nullptr);
+      }
       // Finalize the bilinear forms so their SpMat() is usable by iterative
       // solvers/preconditioners (DSmoother/HypreBoomerAMG require finalized
       // CSR form, not LIL). HasSpMat() is true after Assemble(); Finalize()
@@ -817,6 +875,7 @@ private:
   std::map<std::string, ImplicitCache> implicitCache_;
   bool picardReassembly_ = false;
   bool forceImplicitEuler_ = false;
+  bool enableSegregationSplit_ = false;
   // Owned Robin coef + bdr marker kept alive for K integrators (MFEM stores
   // references/pointers to both until Assemble()).
   std::map<std::string, std::unique_ptr<mfem::ConstantCoefficient>>
@@ -938,9 +997,21 @@ private:
         gfVec = unext;
       }
 
+      // Operator-split segregation (dual-species interface exchange).
+      if (enableSegregationSplit_)
+        applySegregationOperatorSplit(static_cast<double>(dt));
+
       t += dt;
     }
   }
+
+  void applySegregationOperatorSplit(double dt) {
+    if (!physics_ || !mesh_)
+      return;
+    // Implemented below after Segregation.hpp is included.
+    applySegregationOperatorSplitImpl(dt);
+  }
+  void applySegregationOperatorSplitImpl(double dt);
 
   // ---- Boundary-condition resolution ---------------------------------
   //
@@ -1061,6 +1132,36 @@ private:
     }
   }
 };
+
+} // namespace viennaps
+
+// Out-of-line segregation step (keeps Segregation.hpp out of the class body).
+#include "models/Segregation.hpp"
+
+namespace viennaps {
+
+template <class NumericType, int D>
+void DiffusionEngine<NumericType, D>::applySegregationOperatorSplitImpl(
+    double dt) {
+  if (!physics_ || !mesh_)
+    return;
+  for (const auto &model : physics_->models()) {
+    if (!model)
+      continue;
+    auto *seg = dynamic_cast<Segregation<NumericType> *>(model.get());
+    if (!seg)
+      continue;
+    const std::string &s1 = seg->speciesMat1();
+    const std::string &s2 = seg->speciesMat2();
+    auto it1 = allSpecies_.find(s1);
+    auto it2 = allSpecies_.find(s2);
+    if (it1 == allSpecies_.end() || it2 == allSpecies_.end())
+      continue;
+    const double d1 = static_cast<double>(getIntegral(s1));
+    const double d2 = static_cast<double>(getIntegral(s2));
+    seg->applyOperatorSplitStep(*it1->second, *it2->second, *mesh_, d1, d2, dt);
+  }
+}
 
 } // namespace viennaps
 

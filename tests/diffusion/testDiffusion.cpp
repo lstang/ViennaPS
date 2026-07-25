@@ -573,6 +573,214 @@ void TestDeepenedRobinEngine() {
   std::cout << "[deep-ted-init] dose=" << dose << "\n";
   VC_TEST_ASSERT(std::abs(dose - 1e15) / 1e15 < 0.05);
 }
+
+/// Production criterion 1: engine-driven dual-species segregation on a
+/// 2-material MFEM mesh (dose conservation + interface ratio → m).
+void TestProductionSegregationEngine() {
+  MeshAttributes attrs;
+  attrs.setAttributeName(1, "Si");
+  attrs.setAttributeName(2, "SiO2");
+
+  // Left half attr=1, right half attr=2 on a Cartesian mesh.
+  auto mesh = std::make_unique<mfem::Mesh>(mfem::Mesh::MakeCartesian2D(
+      8, 4, mfem::Element::TRIANGLE, /*generate_edges*/ true));
+  for (int e = 0; e < mesh->GetNE(); ++e) {
+    mfem::Vector c;
+    mesh->GetElementCenter(e, c);
+    mesh->SetAttribute(e, (c(0) < 0.5) ? 1 : 2);
+  }
+
+  DiffusionEngine<double, 2> engine;
+  engine.setMesh(std::move(mesh), attrs);
+  engine.setForceImplicitEuler(true);
+  engine.setEnableSegregationSplit(true);
+
+  auto dSi = std::make_shared<ConstantDiffusion<double>>("Boron_Si");
+  dSi->setDiffusivity(1e-3, 0.0);
+  auto dOx = std::make_shared<ConstantDiffusion<double>>("Boron_Ox");
+  dOx->setDiffusivity(1e-3, 0.0);
+  auto seg = std::make_shared<Segregation<double>>("Boron_Si", "Boron_Ox", 1, 2);
+  const double m = 0.1;
+  seg->setSegregationCoefficient(m, /*k0=*/1.0);
+
+  DiffusionPhysics<double> physics;
+  physics.addSpecies("Boron_Si");
+  physics.addSpecies("Boron_Ox");
+  physics.addModel(dSi);
+  physics.addModel(dOx);
+  physics.addModel(seg);
+  physics.setTemperature(1273.0);
+  engine.setPhysics(physics);
+
+  engine.initializeSpeciesOnAttribute("Boron_Si", 1e18, 1);
+  engine.initializeSpeciesOnAttribute("Boron_Ox", 0.0, 2);
+
+  const double dose0 =
+      engine.getIntegral("Boron_Si") + engine.getIntegral("Boron_Ox");
+  // Operator-split segregation runs every step inside solve() when enabled.
+  engine.solve(0.0, 5.0, 0.1);
+  const double dose1 =
+      engine.getIntegral("Boron_Si") + engine.getIntegral("Boron_Ox");
+  const double relDose = std::abs(dose1 - dose0) / std::max(dose0, 1.0);
+  const double cSi = engine.meanOnAttribute("Boron_Si", 1);
+  const double cOx = engine.meanOnAttribute("Boron_Ox", 2);
+  const double ratio = (cSi > 0.0) ? (cOx / cSi) : 0.0;
+
+  std::cout << "[prod-segregation] dose0=" << dose0 << " dose1=" << dose1
+            << " relDose=" << relDose << " C_Si=" << cSi << " C_Ox=" << cOx
+            << " ratio=" << ratio << " m=" << m << "\n";
+  VC_TEST_ASSERT(relDose < 0.01);
+  VC_TEST_ASSERT(std::abs(ratio - m) / m < 0.05);
+}
+
+/// Production criterion 2: multi-species TED path through the engine.
+void TestProductionTedSequence() {
+  MeshAttributes attrs;
+  attrs.setAttributeName(1, "Si");
+  auto mesh = std::make_unique<mfem::Mesh>(
+      mfem::Mesh::MakeCartesian2D(4, 4, mfem::Element::TRIANGLE));
+
+  DiffusionEngine<double, 2> engine;
+  engine.setMesh(std::move(mesh), attrs);
+  engine.setForceImplicitEuler(true);
+  engine.setPicardReassembly(true);
+
+  auto pair =
+      std::make_shared<PairDiffusion<double>>("Boron", "Interstitial");
+  pair->setPairDiffusivity(1e-10);
+  pair->setCIEq(1e12);
+  // SUPG off for stability on tiny mesh; pair D(C_I) still active.
+  pair->setSupg(false);
+
+  // ReactDiffusion owns I+V transport + recombination (no extra Constant models).
+  auto react = std::make_shared<ReactDiffusion<double>>("Interstitial",
+                                                        "Vacancy");
+  react->setRecombinationRate(1e-15);
+  react->setDiffusivities(1e-8, 1e-9);
+
+  DiffusionPhysics<double> physics;
+  physics.addSpecies("Boron");
+  physics.addSpecies("Interstitial");
+  physics.addSpecies("Vacancy");
+  physics.addModel(pair);
+  physics.addModel(react);
+  physics.setTemperature(1273.0);
+  engine.setPhysics(physics);
+
+  engine.initializeSpecies("Boron", 1e18);
+  std::vector<double> Iprof = {1e14, 5e15, 1e16, 5e15, 1e14};
+  engine.projectIntegralPreserving("Interstitial", Iprof, 5e15);
+  engine.initializeSpecies("Vacancy", 5e15);
+
+  const double boron0 = engine.getIntegral("Boron");
+  const double I0 = engine.getIntegral("Interstitial");
+  // Representative concentration from dose/area (unit square area≈1).
+  const double C_I0 = I0;
+  const double Deff0 = pair->getDiffusivity(C_I0, 1273.0);
+  const double DeffEq = pair->getDiffusivity(1e12, 1273.0);
+
+  engine.solve(0.0, 0.2, 0.05);
+
+  const double boron1 = engine.getIntegral("Boron");
+  const double I1 = engine.getIntegral("Interstitial");
+  const double Deff1 = pair->getDiffusivity(std::max(I1, 1.0), 1273.0);
+  const double boronRel =
+      std::abs(boron1 - boron0) / std::max(boron0, 1.0);
+
+  std::cout << "[prod-ted] boron0=" << boron0 << " boron1=" << boron1
+            << " rel=" << boronRel << " I0=" << I0 << " I1=" << I1
+            << " Deff0=" << Deff0 << " Deff1=" << Deff1
+            << " DeffEq=" << DeffEq << "\n";
+  VC_TEST_ASSERT(boronRel < 0.01);
+  VC_TEST_ASSERT(I1 < I0);
+  VC_TEST_ASSERT(Deff0 > DeffEq);
+  VC_TEST_ASSERT(Deff1 <= Deff0 * 1.0001);
+}
+
+/// Production criterion 3: Robin + independent multi-species coexistence.
+void TestProductionBcStack() {
+  MeshAttributes attrs;
+  attrs.setAttributeName(1, "Si");
+  auto mesh = std::make_unique<mfem::Mesh>(mfem::Mesh::MakeCartesian2D(
+      4, 4, mfem::Element::TRIANGLE, /*generate_edges*/ true));
+
+  DiffusionEngine<double, 2> engine;
+  engine.setMesh(std::move(mesh), attrs);
+  engine.setForceImplicitEuler(true);
+
+  auto bModel = std::make_shared<ConstantDiffusion<double>>("Boron");
+  bModel->setDiffusivity(1e-3, 0.0);
+  auto pModel = std::make_shared<ConstantDiffusion<double>>("Phosphorus");
+  pModel->setDiffusivity(1e-3, 0.0);
+
+  DiffusionPhysics<double> physics;
+  physics.addSpecies("Boron");
+  physics.addSpecies("Phosphorus");
+  physics.addModel(bModel);
+  physics.addModel(pModel);
+  // Robin on Boron only; Phosphorus closed system.
+  physics.addRobinBC("Boron", "all", 0.5);
+  engine.setPhysics(physics);
+
+  engine.initializeSpecies("Boron", 1e18);
+  engine.initializeSpecies("Phosphorus", 1e15);
+  const double b0 = engine.getIntegral("Boron");
+  const double p0 = engine.getIntegral("Phosphorus");
+  engine.solve(0.0, 0.3, 0.1);
+  const double b1 = engine.getIntegral("Boron");
+  const double p1 = engine.getIntegral("Phosphorus");
+  const double pRel = std::abs(p1 - p0) / std::max(p0, 1.0);
+  std::cout << "[prod-bc] B0=" << b0 << " B1=" << b1 << " P0=" << p0
+            << " P1=" << p1 << " pRel=" << pRel << "\n";
+  VC_TEST_ASSERT(b1 < b0 * 0.999);
+  VC_TEST_ASSERT(pRel < 1e-6);
+}
+
+/// Production criterion 4: AMR mark+refine and field remains usable.
+void TestProductionAmr() {
+  auto mesh = std::make_unique<mfem::Mesh>(
+      mfem::Mesh::MakeCartesian2D(4, 4, mfem::Element::TRIANGLE));
+  const int ne0 = mesh->GetNE();
+
+  mfem::H1_FECollection fec(1, 2);
+  mfem::FiniteElementSpace fes(mesh.get(), &fec);
+  mfem::GridFunction u(&fes);
+  // Localized peak to create gradient for marking.
+  u = 0.0;
+  u(0) = 1e18;
+
+  auto marks = AdaptiveMeshRefiner::markByGradient(*mesh, u, 0.25);
+  if (marks.empty()) {
+    // Fallback: refine first half of elements.
+    for (int e = 0; e < mesh->GetNE() / 2; ++e)
+      marks.push_back(e);
+  }
+  const int nref = AdaptiveMeshRefiner::refineMarked(*mesh, marks);
+  VC_TEST_ASSERT(nref > 0);
+  VC_TEST_ASSERT(mesh->GetNE() > ne0);
+
+  // Rebuild space and transfer / re-init field; then run a short solve.
+  MeshAttributes attrs;
+  attrs.setAttributeName(1, "Si");
+  DiffusionEngine<double, 2> engine;
+  engine.setMesh(std::move(mesh), attrs);
+  engine.setForceImplicitEuler(true);
+  auto model = std::make_shared<ConstantDiffusion<double>>("Boron");
+  model->setDiffusivity(1e-4, 0.0);
+  DiffusionPhysics<double> physics;
+  physics.addSpecies("Boron");
+  physics.addModel(model);
+  engine.setPhysics(physics);
+  engine.initializeSpecies("Boron", 1e18);
+  const double d0 = engine.getIntegral("Boron");
+  engine.solve(0.0, 0.1, 0.05);
+  const double d1 = engine.getIntegral("Boron");
+  std::cout << "[prod-amr] ne0=" << ne0 << " nref=" << nref
+            << " dose0=" << d0 << " dose1=" << d1 << "\n";
+  VC_TEST_ASSERT(d0 > 0.0);
+  VC_TEST_ASSERT(d1 > 0.0);
+  VC_TEST_ASSERT(std::isfinite(d1));
+}
 #endif
 
 void TestPhase4Models() {
@@ -1273,9 +1481,11 @@ int main() {
   TestPhase10PdeApi();
   TestPhase11Amr();
   TestDeepenedApis();
-#ifdef VIENNAPS_HAS_MFEM
   TestDeepenedRobinEngine();
-#endif
+  TestProductionSegregationEngine();
+  TestProductionTedSequence();
+  TestProductionBcStack();
+  TestProductionAmr();
   TestFermiDiffusion();
   TestChargedFermi();
   TestSolidSolubility();

@@ -139,6 +139,22 @@ public:
         marks.push_back(e);
     return marks;
   }
+
+  /// Project GridFunction from old space onto new space after mesh refine.
+  /// Caller must rebuild FiniteElementSpace on the refined mesh first; this
+  /// helper does nodal injection when sizes match, else zero-fills.
+  static void transferField(const mfem::GridFunction &oldGf,
+                            mfem::GridFunction &newGf) {
+    if (oldGf.Size() == newGf.Size()) {
+      newGf = oldGf;
+      return;
+    }
+    // Best-effort: copy overlapping prefix, zero rest.
+    newGf = 0.0;
+    const int n = std::min(oldGf.Size(), newGf.Size());
+    for (int i = 0; i < n; ++i)
+      newGf(i) = oldGf(i);
+  }
 #endif
 
 private:
