@@ -4,14 +4,20 @@
 #include <set>
 #include <vcTestAsserts.hpp>
 #include <fields/IntrinsicCarrier.hpp>
+#include <fields/DiffusivityMaterial.hpp>
 #include <fields/MeshAttributes.hpp>
 #include <fields/DiffusionModel.hpp>
 #include <fields/models/ConstantDiffusion.hpp>
+#include <fields/models/FermiDiffusion.hpp>
+#include <fields/models/ChargedFermiDiffusion.hpp>
+#include <fields/models/SolidSolubility.hpp>
+#include <fields/models/Segregation.hpp>
 #include <fields/DiffusionPhysics.hpp>
 #include <fields/DiffusionEngine.hpp>
 #include <fields/LevelSetToMesh.hpp>
 #include <geometries/psMakePlane.hpp>
 #include <psDomain.hpp>
+#include <vector>
 
 using namespace viennaps;
 
@@ -102,25 +108,9 @@ void TestConstantDiffusion() {
   VC_TEST_ASSERT(std::abs(model.getDiffusivity() - expectedD) / expectedD < 1e-6);
 }
 
-// ---- Minimal stubs for Phase 2/3 models referenced by the composition test ----
-// These exist ONLY so TestDiffusionPhysicsComposition can run in Phase 1.
-// Real FermiDiffusion (Phase 2) and CddDiffusion (Phase 3 Task 10) will
-// replace them. Each stub claims the same single species ("Boron") so the
-// gatekeeper test exercises the double-dC/dt prevention path.
-template <class NumericType>
-class FermiDiffusionStub : public DiffusionModel<NumericType> {
-public:
-  explicit FermiDiffusionStub(const std::string& species = "Boron") {
-    this->setName("FermiDiffusion");
-    species_ = species;
-  }
-  int numSpecies() const override { return 1; }
-  std::vector<std::string> speciesNames() const override { return {species_}; }
-
-private:
-  std::string species_;
-};
-
+// ---- Minimal stub for Phase 3 CDD used by the composition test ----
+// Real CddDiffusion (Phase 3 Task 10) will replace this. FermiDiffusion is
+// now the real Phase 2 model.
 template <class NumericType>
 class CddDiffusionStub : public DiffusionModel<NumericType> {
 public:
@@ -128,6 +118,202 @@ public:
   int numSpecies() const override { return 1; }
   std::vector<std::string> speciesNames() const override { return {"Boron"}; }
 };
+
+void TestFermiDiffusion() {
+  FermiDiffusion<double> model("Boron");
+  model.setDiffusivity(/*D_i=*/1e-13, /*alpha=*/1.0);
+  model.setIntrinsicCarrierConcentration(1e10); // force known ni
+  MeshAttributes attrs;
+  attrs.setAttributeName(1, "Si");
+  model.setup(attrs, 1273.0);
+
+  const double D_int = model.getDiffusivity(/*C=*/1e15, /*T=*/1273.0);
+  const double D_ext = model.getDiffusivity(/*C=*/1e20, /*T=*/1273.0);
+  std::cout << "[fermi-diffusion] D(1e15)=" << D_int << " D(1e20)=" << D_ext
+            << "\n";
+  // Extrinsic enhancement: high-C diffusivity > intrinsic-regime D.
+  VC_TEST_ASSERT(D_ext > D_int);
+
+  // Analytic dD/dC at extrinsic doping: D_i * alpha / ni > 0.
+  const double dDdC = model.evalDdC(/*C=*/1e20, /*T=*/1273.0);
+  const double expectedDdC = 1e-13 * 1.0 / 1e10;
+  std::cout << "[fermi-diffusion] dD/dC(1e20)=" << dDdC
+            << " expected=" << expectedDdC << "\n";
+  VC_TEST_ASSERT(dDdC > 0.0);
+  VC_TEST_ASSERT(std::abs(dDdC - expectedDdC) / expectedDdC < 1e-6);
+
+  // Intrinsic regime: dD/dC = 0 when C <= ni.
+  VC_TEST_ASSERT(model.evalDdC(/*C=*/1e9, /*T=*/1273.0) == 0.0);
+}
+
+void TestChargedFermi() {
+  ChargedFermiDiffusion<double> model("Boron");
+  model.setDiffusivity(1e-13);
+  model.setIntrinsicCarrierConcentration(1e10);
+  MeshAttributes attrs;
+  attrs.setAttributeName(1, "Si");
+  model.setup(attrs, 1273.0);
+
+  const double ni = 1e10;
+  const double D_intr = model.getDiffusivity(ni, 1273.0);
+  const double D_ext = model.getDiffusivity(1e20, 1273.0);
+  std::cout << "[charged-fermi] D(C=ni)=" << D_intr << " D(C=1e20)=" << D_ext
+            << "\n";
+  // At C = ni charge-state weights are equal → D = mean(D^z) > 0.
+  // Default relDz = {0.1, 1, 5} * D0 → mean = 2.033... * D0.
+  VC_TEST_ASSERT(D_intr > 0.0);
+  const double expectedMean = (0.1 + 1.0 + 5.0) / 3.0 * 1e-13;
+  VC_TEST_ASSERT(std::abs(D_intr - expectedMean) / expectedMean < 0.05);
+  // Extrinsic n-type shifts charge-state fractions → D differs from intrinsic.
+  VC_TEST_ASSERT(std::abs(D_ext - D_intr) / D_intr > 0.01);
+}
+
+void TestSolidSolubility() {
+  SolidSolubility<double> model("Boron", "BoronCluster");
+  // C_ss = 1e20 at any T (Ea=0).
+  model.setSolidSolubility(/*Css0=*/1e20, /*Ea=*/0.0);
+  MeshAttributes attrs;
+  attrs.setAttributeName(1, "Si");
+  model.setup(attrs, 1273.15); // ~1000 C
+
+  std::vector<double> active(4, 1e21);
+  std::vector<double> cluster(4, 0.0);
+  model.applyReactionStep(active, cluster, 1273.15);
+
+  for (std::size_t i = 0; i < active.size(); ++i) {
+    VC_TEST_ASSERT(active[i] <= 1e20 + 1.0); // floating tolerance
+    VC_TEST_ASSERT(std::abs(cluster[i] - 9e20) / 9e20 < 1e-12);
+  }
+  std::cout << "[solid-solubility] active=" << active[0]
+            << " cluster=" << cluster[0] << "\n";
+}
+
+void TestSegregation() {
+  // Unit-level two-sided interface residual + dose conservation.
+  // Two "materials" share an interface. With fast rates the ratio C2/C1
+  // approaches m = kf/kb. Total dose C1+C2 must be conserved exactly by
+  // the two-sided residual (element + neighbor with opposite signs).
+  SegregationCondition<double> cond;
+  const double m = 0.1;
+  // k0 large enough that the interface reaches equilibrium well within the
+  // integration window (time scale ~ 1/(kf+kb) = 1/(m*k0 + k0)).
+  const double k0 = 1.0;
+  cond.setSegregationCoefficient(m, k0);
+  VC_TEST_ASSERT(std::abs(cond.equilibriumRatio() - m) < 1e-12);
+
+#ifdef VIENNAPS_HAS_MFEM
+  // Single-dof "elements" on each side of the interface (collocation).
+  mfem::Vector C1(1), C2(1), shape(1);
+  C1(0) = 1e18; // Si side
+  C2(0) = 0.0;  // SiO2 side
+  shape(0) = 1.0;
+  const double dose0 = C1(0) + C2(0);
+
+  // Explicit Euler interface exchange: dC1/dt = -rate, dC2/dt = +rate
+  // from the two-sided residual with unit mass. dt must satisfy
+  // stability for the linear exchange ODE (dt * (kf+kb) < ~1).
+  const double dt = 0.05;
+  const int nsteps = 400; // t = 20 >> 1/(kf+kb) ≈ 0.9
+  for (int s = 0; s < nsteps; ++s) {
+    mfem::Vector R1(1), R2(1);
+    R1 = 0.0;
+    R2 = 0.0;
+    mfem::DenseMatrix Kee(1), Ken(1), Knn(1), Kne(1);
+    Kee = 0.0;
+    Ken = 0.0;
+    Knn = 0.0;
+    Kne = 0.0;
+    cond.assembleElementSide(R1, Kee, Ken, C1, C2, shape, shape, /*w=*/1.0);
+    cond.assembleNeighborSide(R2, Knn, Kne, C1, C2, shape, shape, /*w=*/1.0);
+    // Residuals are +rate (elem) and -rate (nbr) for the *weak form*
+    // contribution to ∫ v * rate. With unit mass, du/dt residual sign
+    // convention: we treat R as the flux term so C1 -= R1*dt, C2 -= R2*dt
+    // → C1 decreases by rate*dt, C2 increases by rate*dt.
+    C1(0) -= R1(0) * dt;
+    C2(0) -= R2(0) * dt;
+  }
+
+  const double dose1 = C1(0) + C2(0);
+  const double ratio = (C1(0) > 0.0) ? C2(0) / C1(0) : 0.0;
+  std::cout << "[segregation] C1=" << C1(0) << " C2=" << C2(0)
+            << " ratio=" << ratio << " m=" << m
+            << " dose0=" << dose0 << " dose1=" << dose1 << "\n";
+
+  // Dose conservation to 1%.
+  VC_TEST_ASSERT(std::abs(dose1 - dose0) / dose0 < 0.01);
+  // Interface ratio near m within 5%.
+  VC_TEST_ASSERT(std::abs(ratio - m) / m < 0.05);
+#else
+  // Without MFEM, still check the pure-math equilibrium relation.
+  const double C1 = 1e18;
+  const double C2_eq = m * C1;
+  VC_TEST_ASSERT(std::abs(cond.rate(C1, C2_eq)) < 1e-6 * cond.kf() * C1);
+#endif
+}
+
+void TestFermiWithSegregation() {
+  // Integration: Fermi diffusion in Si + ConstantDiffusion in SiO2 +
+  // segregation at the interface. Exercise dose conservation of the
+  // two-sided segregation condition while the bulk models set D.
+  FermiDiffusion<double> fermi("Boron");
+  fermi.setDiffusivity(1e-13, 1.0);
+  fermi.setIntrinsicCarrierConcentration(1e10);
+
+  ConstantDiffusion<double> oxide("Boron");
+  oxide.setDiffusivity(1e-15, 0.0);
+
+  SegregationCondition<double> seg;
+  const double m = 0.1;
+  seg.setSegregationCoefficient(m, /*k0=*/1.0);
+
+  // Collocation interface exchange coupled with "bulk" identity (no spatial
+  // mesh needed for the conservation/ratio check). Si starts at 1e18, oxide 0.
+  double C_si = 1e18;
+  double C_ox = 0.0;
+  const double dose0 = C_si + C_ox;
+  const double dt = 0.05;
+  const int nsteps = static_cast<int>(30.0 / dt); // 0→30s as in plan
+
+#ifdef VIENNAPS_HAS_MFEM
+  mfem::Vector vSi(1), vOx(1), shape(1);
+  shape(0) = 1.0;
+  for (int s = 0; s < nsteps; ++s) {
+    vSi(0) = C_si;
+    vOx(0) = C_ox;
+    mfem::Vector R1(1), R2(1);
+    R1 = 0.0;
+    R2 = 0.0;
+    mfem::DenseMatrix Kee(1), Ken(1), Knn(1), Kne(1);
+    Kee = 0.0;
+    Ken = 0.0;
+    Knn = 0.0;
+    Kne = 0.0;
+    seg.assembleElementSide(R1, Kee, Ken, vSi, vOx, shape, shape, 1.0);
+    seg.assembleNeighborSide(R2, Knn, Kne, vSi, vOx, shape, shape, 1.0);
+    C_si -= R1(0) * dt;
+    C_ox -= R2(0) * dt;
+  }
+#else
+  for (int s = 0; s < nsteps; ++s) {
+    const double r = seg.rate(C_si, C_ox);
+    C_si -= r * dt;
+    C_ox += r * dt;
+  }
+#endif
+
+  const double dose1 = C_si + C_ox;
+  const double ratio = (C_si > 0.0) ? C_ox / C_si : 0.0;
+  std::cout << "[fermi-segregation] C_si=" << C_si << " C_ox=" << C_ox
+            << " ratio=" << ratio << " dose_rel="
+            << std::abs(dose1 - dose0) / dose0 << "\n";
+  // Models are constructed (Fermi + Constant + Segregation) — interface
+  // physics must conserve dose and approach m.
+  VC_TEST_ASSERT(std::abs(dose1 - dose0) / dose0 < 0.01);
+  VC_TEST_ASSERT(std::abs(ratio - m) / m < 0.05);
+  // Sanity: Fermi extrinsic D > oxide D (models configured).
+  VC_TEST_ASSERT(fermi.getDiffusivity(1e18, 1273.0) >
+                 oxide.getDiffusivity());
+}
 
 void TestDiffusionPhysics() {
   DiffusionPhysics<double> physics;
@@ -164,8 +350,8 @@ void TestDiffusionPhysicsComposition() {
 
   // Both models touch Boron; both naively want a time derivative on it.
   // The physics must guarantee exactly ONE time derivative per species.
-  auto fermi = std::make_shared<FermiDiffusionStub<double>>("Boron");
-  auto cdd   = std::make_shared<CddDiffusionStub<double>>();  // composes PairTerm on Boron
+  auto fermi = std::make_shared<FermiDiffusion<double>>("Boron");
+  auto cdd = std::make_shared<CddDiffusionStub<double>>(); // Phase 3 stub
   physics.addModel(fermi);
   physics.addModel(cdd);
 
@@ -553,7 +739,13 @@ void TestMultiSpeciesSmoke() {
 }
 
 int main() {
+  try {
   TestIntrinsicCarrier();
+  TestFermiDiffusion();
+  TestChargedFermi();
+  TestSolidSolubility();
+  TestSegregation();
+  TestFermiWithSegregation();
   TestMeshAttributes();
   TestDiffusionModelInterface();
   TestConstantDiffusion();
@@ -568,11 +760,25 @@ int main() {
   TestReentrantSolve();
   std::cout << "All diffusion tests passed.\n";
   return 0;
+  } catch (const std::exception &ex) {
+    std::cerr << "TEST EXCEPTION: " << ex.what() << "\n";
+    return 1;
+  }
 }
 #else
 int main() {
+  try {
   TestIntrinsicCarrier();
+  TestFermiDiffusion();
+  TestChargedFermi();
+  TestSolidSolubility();
+  TestSegregation();
+  TestFermiWithSegregation();
   std::cout << "MFEM not available, skipping MFEM diffusion tests.\n";
   return 0;
+  } catch (const std::exception &ex) {
+    std::cerr << "TEST EXCEPTION: " << ex.what() << "\n";
+    return 1;
+  }
 }
 #endif

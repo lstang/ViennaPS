@@ -73,7 +73,12 @@
 #include <fields/DiffusionModel.hpp>
 #include <fields/DiffusionPhysics.hpp>
 #include <fields/IntrinsicCarrier.hpp>
+#include <fields/DiffusivityMaterial.hpp>
 #include <fields/models/ConstantDiffusion.hpp>
+#include <fields/models/FermiDiffusion.hpp>
+#include <fields/models/ChargedFermiDiffusion.hpp>
+#include <fields/models/SolidSolubility.hpp>
+#include <fields/models/Segregation.hpp>
 #ifdef VIENNAPS_HAS_MFEM
 #include <fields/LevelSetToMesh.hpp>
 #include <fields/DiffusionEngine.hpp>
