@@ -33,7 +33,23 @@
 #include <fields/models/NitrogenDiffusion.hpp>
 #include <fields/models/CopperDiffusion.hpp>
 #include <fields/models/MobileImpurity.hpp>
+#include <fields/GrainModel.hpp>
+#include <fields/GrainBoundaryMesh.hpp>
+#include <fields/BandgapModel.hpp>
+#include <fields/MaterialConverter.hpp>
+#include <fields/models/PolysiliconDiffusion.hpp>
+#include <fields/models/SiGeDiffusion.hpp>
+#include <fields/models/SiGeCDiffusion.hpp>
+#include <fields/models/IIIVDiffusion.hpp>
+#include <fields/kmc/KmcLattice.hpp>
+#include <fields/kmc/KmcEvent.hpp>
+#include <fields/kmc/KmcAtomisticEngine.hpp>
+#include <fields/kmc/KmcEpitaxy.hpp>
+#include <fields/models/FlashLaserAnneal.hpp>
+#include <fields/PdeApi.hpp>
+#include <fields/AdaptiveMeshRefiner.hpp>
 #include <fields/DiffusionPhysics.hpp>
+#include <random>
 #include <fields/DiffusionEngine.hpp>
 #include <fields/LevelSetToMesh.hpp>
 #include <geometries/psMakePlane.hpp>
@@ -253,6 +269,214 @@ void TestCddDiffusion() {
   VC_TEST_ASSERT(!physics.shouldCreateTimeDerivative("Boron", *cddModel));
   std::cout << "[cdd] TED ratio=" << D_ted / D_base
             << " double-dC/dt gate OK\n";
+}
+
+void TestPhase5Poly() {
+  GrainModel<double> g;
+  g.setRadius(1e-5);
+  g.setGrowthParameters(1e-6, 0.5, 1.0); // low Ea so high T grows
+  const double R0 = g.radius();
+  g.advance(300.0, 10.0);
+  const double Rlow = g.radius();
+  g.setRadius(R0);
+  g.advance(1400.0, 10.0);
+  const double Rhigh = g.radius();
+  VC_TEST_ASSERT(Rhigh > Rlow);
+
+  PolysiliconDiffusion<double> poly("Boron");
+  poly.setDiffusivities(1e-14, 1e-10);
+  poly.grains().setRadius(1e-5);
+  poly.setBoundaryWidth(1e-7);
+  const double D_fine = poly.getIsotropicDiffusivity();
+  poly.grains().setRadius(1e-4); // coarser grains
+  const double D_coarse = poly.getIsotropicDiffusivity();
+  VC_TEST_ASSERT(D_fine > 1e-14); // > bulk
+  VC_TEST_ASSERT(D_fine > D_coarse);
+
+  double Ci = 1e18, Cgb = 0.0;
+  poly.setSegregationCoefficient(10.0);
+  for (int i = 0; i < 500; ++i)
+    poly.applySegregationStep(Ci, Cgb, 1.0, 0.05);
+  VC_TEST_ASSERT(std::abs(Cgb / Ci - 10.0) / 10.0 < 0.05);
+
+  GrainBoundaryMesh gbMesh;
+  std::vector<std::pair<double, double>> centers = {{0.25, 0.25}, {0.75, 0.75}};
+  auto dual = gbMesh.build(8, 8, centers, 0.08);
+  VC_TEST_ASSERT(dual.numInterior > 0);
+  VC_TEST_ASSERT(GrainBoundaryMesh::hasConnectedBoundaryNetwork(dual.numBoundary));
+
+  PolyOxideBreakup<double> brk;
+  brk.setOxideThickness(1e-6);
+  brk.setRates(1e-7, 0.5);
+  for (int i = 0; i < 20; ++i)
+    brk.advance(1273.0, 1.0);
+  VC_TEST_ASSERT(brk.oxideThickness() < 1e-6);
+
+  PolyOxidationRate<double> ox;
+  ox.setBaseRate(1e-9);
+  VC_TEST_ASSERT(ox.rate(1e-6) > ox.rate(1e-4));
+  std::cout << "[phase5] poly D_fine=" << D_fine << " D_coarse=" << D_coarse
+            << " dual GB elems=" << dual.numBoundary << "\n";
+}
+
+void TestPhase6SiGe() {
+  BandgapModel<double> bg;
+  const double EgSi = bg.Eg_SiGe(0.0, 300.0);
+  const double EgGe = bg.Eg_SiGe(1.0, 300.0);
+  const double EgMid = bg.Eg_SiGe(0.5, 300.0);
+  VC_TEST_ASSERT(std::abs(EgSi - 1.12) < 0.05);
+  VC_TEST_ASSERT(std::abs(EgGe - 0.66) < 0.08);
+  VC_TEST_ASSERT(EgMid < EgSi && EgMid > EgGe);
+
+  SiGeDiffusion<double> sige;
+  sige.setBoronBaseDiffusivity(1e-13);
+  VC_TEST_ASSERT(sige.boronDiffusivity(0.3, 1273.0) !=
+                 sige.boronDiffusivity(0.0, 1273.0));
+
+  std::vector<double> xGe = {0, 0, 0, 1, 1, 1};
+  // Stable explicit Fourier number: D*dt/dx^2 < 0.5
+  sige.setGeDiffusivity(1e-12, 0.0);
+  for (int i = 0; i < 200; ++i)
+    sige.applyIntermixStep(xGe, 1273.0, 1e-6, 1e-4);
+  VC_TEST_ASSERT(xGe[2] > 0.0 && xGe[3] < 1.0);
+
+  SiGeCDiffusion<double> sigeC;
+  const double tedNoC =
+      SiGeCDiffusion<double>::tedFactor(1e15, 1e12, 0.0, 1e-15);
+  const double tedC =
+      SiGeCDiffusion<double>::tedFactor(1e15, 1e12, 1e18, 1e-15);
+  VC_TEST_ASSERT(tedC < tedNoC);
+
+  GeBPairing<double> pair;
+  std::vector<double> B(1, 1e18), Ge(1, 1e21), P(1, 0.0);
+  pair.setRates(1e-20, 0.0);
+  pair.applyStep(B, Ge, P, 1.0);
+  VC_TEST_ASSERT(B[0] < 1e18 && P[0] > 0.0);
+
+  StrainDiffusionModifier<double> strain;
+  const double D0 = 1e-13;
+  VC_TEST_ASSERT(strain.modifyD(D0, 0.01, 1273.0) != D0);
+
+  MeshAttributes attrs;
+  attrs.setAttributeName(1, "Si");
+  MaterialConverter::convert(attrs, 1, "GaAs");
+  VC_TEST_ASSERT(attrs.materialName(1) == "GaAs");
+
+  IIIVDiffusion<double> gaas("GaAs", "Si");
+  VC_TEST_ASSERT(gaas.getDiffusivity(1273.0) > 0.0);
+  std::cout << "[phase6] EgSi=" << EgSi << " EgGe=" << EgGe
+            << " tedC/tedNoC=" << tedC / tedNoC << "\n";
+}
+
+void TestPhase7Kmc() {
+  KmcLattice lat;
+  lat.resize(4, 4, 2);
+  lat.at(1, 1, 0).occupied = true;
+  lat.at(1, 1, 0).species = 1;
+  VC_TEST_ASSERT(lat.countSpecies(1) == 1);
+
+  KmcParameters p;
+  p.T = 1500.0;
+  p.hopBarrier = 0.1;
+  KmcAtomisticEngine eng(7);
+  eng.setLattice(lat);
+  eng.setParameters(p);
+  eng.run(50);
+  VC_TEST_ASSERT(eng.steps() > 0);
+
+  std::vector<double> conc(lat.size(), 1e20);
+  std::mt19937 rng(1);
+  KmcLattice lat2;
+  lat2.resize(2, 2, 2);
+  KmcAtomize::atomize(lat2, conc, 1e-21, 1, rng);
+  std::vector<double> back;
+  KmcDeatomize::deatomize(lat2, back, 1e-21, 1);
+  VC_TEST_ASSERT(back.size() == lat2.size());
+  std::cout << "[phase7] KMC steps=" << eng.steps()
+            << " t=" << eng.time() << "\n";
+}
+
+void TestPhase8Epitaxy() {
+  KmcLattice lat;
+  lat.resize(3, 3, 4);
+  KmcEpitaxyModel epi;
+  const int n = epi.planarGrow(lat, /*species*/ 2, /*layers*/ 1);
+  VC_TEST_ASSERT(n == 9);
+  VC_TEST_ASSERT(lat.countSpecies(2) == 9);
+  VC_TEST_ASSERT(epi.attachmentProbability(2, 4) == 0.5);
+  epi.setGeFraction(0.5);
+  VC_TEST_ASSERT(epi.geGrowthFactor() < 1.0);
+  VC_TEST_ASSERT(KmcVisibility::isVisible(lat, 0, 0, 3));
+  std::cout << "[phase8] deposited=" << n << "\n";
+}
+
+void TestPhase9Laser() {
+  HeatTransfer<double> heat;
+  std::vector<double> T(5, 300.0);
+  T[2] = 1000.0;
+  heat.step(T, 1e-4, 1e-6);
+  VC_TEST_ASSERT(T[1] > 300.0);
+
+  LaserIntensity<double> laser;
+  laser.setPeak(1e5);
+  laser.setAbsorption(1e4);
+  VC_TEST_ASSERT(laser.intensity(0) > laser.intensity(1e-4));
+
+  MeltingPhaseField<double> melt;
+  std::vector<double> phi(3, 0.0), TT = {1600.0, 1700.0, 1800.0};
+  melt.relax(phi, TT, 10.0, 1.0);
+  VC_TEST_ASSERT(phi[2] > phi[0]);
+
+  MeltDiffusion<double> md;
+  VC_TEST_ASSERT(md.getDiffusivity(1.0) > md.getDiffusivity(0.0));
+
+  FlashLaserAnneal<double> flash;
+  flash.setPulse(1600.0, 1e-3);
+  VC_TEST_ASSERT(flash.peakTemperature() == 1600.0);
+  std::cout << "[phase9] flash duration=" << flash.duration() << "\n";
+}
+
+void TestPhase10PdeApi() {
+  PdeEquation eq;
+  eq.addTerm(std::make_shared<DiffusionPdeTerm>("Boron", 1e-13));
+  eq.addTerm(std::make_shared<ReactionPdeTerm>("Boron", 0.0));
+  eq.addIC({"Boron", 1e18});
+  eq.addBC({PdeBC::Type::Neumann, "Boron", "all", 0.0});
+  VC_TEST_ASSERT(eq.species().size() == 1);
+  VC_TEST_ASSERT(eq.terms().size() == 2);
+
+  std::vector<double> field = {1e18, 1e17, 1e16, 1e15};
+  auto cut = ResultsExtractor::cut1D(field, {0, 2});
+  VC_TEST_ASSERT(cut.size() == 2 && cut[0] == 1e18);
+  const double d = ResultsExtractor::dose(field, 1e-6);
+  VC_TEST_ASSERT(d > 0);
+  VC_TEST_ASSERT(ResultsExtractor::levelCrossing(field, 5e16) >= 0);
+  VC_TEST_ASSERT(ResultsExtractor::sheetResistanceProxy(field, 1e-6) > 0);
+
+  CalibratedParameters cal;
+  cal.setDopant("Boron", 0.76, 3.46);
+  VC_TEST_ASSERT(cal.diffusivity("Boron", 1273.0) > 0);
+  std::cout << "[phase10] dose=" << d
+            << " D_B=" << cal.diffusivity("Boron", 1273.0) << "\n";
+}
+
+void TestPhase11Amr() {
+  std::vector<double> a = {1, 2, 3, 10}, b = {1, 2, 4, 8};
+  auto rel = MeshQualityEstimator::relativeDifference(a, b);
+  VC_TEST_ASSERT(rel[2] > 0);
+  auto g = MeshQualityEstimator::gradient1D(a, 1.0);
+  VC_TEST_ASSERT(g[3] > 0);
+  auto marks = AdaptiveMeshRefiner::mark(rel, 0.1);
+  VC_TEST_ASSERT(!marks.empty());
+  VC_TEST_ASSERT(AdaptiveMeshRefiner::uniformScale(1.0, 2.0) == 0.5);
+
+#ifdef VIENNAPS_HAS_MFEM
+  auto mesh = mfem::Mesh::MakeCartesian2D(4, 4, mfem::Element::TRIANGLE);
+  RefinementBox box{0.0, 0.5, 0.0, 0.5};
+  auto ids = AdaptiveMeshRefiner::markBox(mesh, box);
+  VC_TEST_ASSERT(!ids.empty());
+#endif
+  std::cout << "[phase11] marks=" << marks.size() << "\n";
 }
 
 void TestPhase4Models() {
@@ -945,6 +1169,13 @@ int main() {
   TestClusterModels();
   TestCddDiffusion();
   TestPhase4Models();
+  TestPhase5Poly();
+  TestPhase6SiGe();
+  TestPhase7Kmc();
+  TestPhase8Epitaxy();
+  TestPhase9Laser();
+  TestPhase10PdeApi();
+  TestPhase11Amr();
   TestFermiDiffusion();
   TestChargedFermi();
   TestSolidSolubility();
