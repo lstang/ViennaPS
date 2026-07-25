@@ -8,10 +8,10 @@
 ///   - SUNDIALS time integration of the coupled nonlinear system
 ///   - Full MFEM spatial discretization
 
-#include "psProcessModel.hpp"
-#include "psDomain.hpp"
-#include "fields/PhysicsField.hpp"
-#include "fields/MaterialPropertySystem.hpp"
+#include "../process/psProcessModel.hpp"
+#include "../psDomain.hpp"
+#include "../fields/PhysicsField.hpp"
+#include "../fields/MaterialPropertySystem.hpp"
 
 #include <iostream>
 

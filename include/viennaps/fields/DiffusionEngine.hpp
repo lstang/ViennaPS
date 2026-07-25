@@ -610,6 +610,9 @@ private:
     // should be small relative to the smallest expected |y|. Dopant concs
     // span 1e10-1e20, so abstol=1e5 catches the noise floor without
     // dominating at low concentrations.
+    // abstol=1e5: absolute floor for dopant-scale fields (~1e10–1e20).
+    // Defect species at lower concentrations may need a tighter per-species
+    // abstol later; a single global value is Phase-1/production default.
     cvode.SetSStolerances(/*reltol*/ 1e-6, /*abstol*/ 1e5);
     cvode.SetMaxStep(static_cast<double>(dtMax));
     cvode.UseMFEMLinearSolver();
@@ -716,6 +719,7 @@ private:
       for (int s = 0; s < nSpecies_; ++s) {
         const auto &name = names_[s];
         const auto &sp = solvers_.at(name);
+        // MFEM Vector::GetData() is non-const; Mult receives const Vector&.
         mfem::Vector ublock(const_cast<mfem::Vector &>(u).GetData() + s * ndof_,
                             ndof_);
         mfem::Vector yblock(y.GetData() + s * ndof_, ndof_);

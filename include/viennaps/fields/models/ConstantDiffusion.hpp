@@ -37,8 +37,10 @@ public:
 
   NumericType getDiffusivity() const {
     const NumericType kB = static_cast<NumericType>(8.617333262145e-5);
+    // T<=0 is non-physical; return 0 (frozen) rather than D0, which would
+    // look like a large diffusivity and mask setup bugs.
     if (this->T_ <= 0)
-      return D0_;
+      return NumericType(0);
     return D0_ * std::exp(-Ea_ / (kB * this->T_));
   }
 

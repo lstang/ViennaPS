@@ -6,13 +6,10 @@
 /// Integrates with level-set geometry and GDS masks.
 /// For high-fidelity parity with ATHENA/SProcess.
 
-#include "psProcessModel.hpp"
-#include "psDomain.hpp"
-#include "psMaterial.hpp"
-#include "fields/PhysicsField.hpp"
-#include "fields/MaterialPropertySystem.hpp"
-
-#include <viennals.hpp>
+#include "../process/psProcessModel.hpp"
+#include "../psDomain.hpp"
+#include "../fields/PhysicsField.hpp"
+#include "../fields/MaterialPropertySystem.hpp"
 
 #include <cmath>
 #include <vector>

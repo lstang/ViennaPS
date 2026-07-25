@@ -9,6 +9,7 @@
 
 #include "fields/PhysicsField.hpp"
 #include "fields/MaterialPropertySystem.hpp"
+#include "psPreCompileMacros.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -19,8 +20,9 @@
 namespace viennaps {
 
 // Forward declare to avoid pulling ViennaLS headers into multiphysics-only tests.
-template <class NumericType, int D>
-class Domain;
+// Must match psDomain.hpp: VIENNAPS_TEMPLATE_ND uses C++20 Numeric/Dimension
+// concepts when available (plain template <class,int> is a different signature).
+VIENNAPS_TEMPLATE_ND(NumericType, D) class Domain;
 
 template <class NumericType, int D>
 class PhysicsFieldAdapter {

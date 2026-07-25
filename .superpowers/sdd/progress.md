@@ -52,7 +52,7 @@ Verified at skill start: MFEM 4.9.1 at `f:/dev/mfem/build` detected, SUNDIALS de
 
 - Task 5 (DiffusionEngine): complete (commits 71d6557..1aced0f, review clean — spec ✅ + quality Approved; ConstantDiffusion dangling-coef bug from Task 3 fixed; SUNDIALS/HYPRE paths gated by MFEM_USE_SUNDIALS/MPI — production solver path needs MFEM rebuild as follow-up but fallback is in-spec)
 
-- Task 6 (umbrella header): complete (commits 1aced0f..31b94a4, review clean — spec ✅ + quality Approved; 2 pre-existing failures in intermediate/removeStrayPoints are unrelated psAnalyticImplant.hpp include-path bug)
+- Task 6 (umbrella header): complete (commits 1aced0f..31b94a4, review clean — spec ✅ + quality Approved; intermediate/removeStrayPoints failed on a `psAnalyticImplant.hpp` include-path bug introduced with that model on this branch — fixed in 2026-07-25 review reception)
 
 - Task 7 (dose conservation): complete (commits 31b94a4..78b2ed3, review clean — spec ✅ + quality Approved; ratio 1.28e-16 far below 1% tolerance)
 - All Phase 1 implementation tasks complete. Final whole-branch review next.
@@ -75,8 +75,9 @@ Commits 777f645..78b2ed3 (11 commits, 78KB). All Phase 1 spec ✅ + quality Appr
 ### Known follow-up (from Task 5)
 - Rebuild MFEM at `f:/dev/mfem/build` with `MFEM_USE_MPI=ON MFEM_USE_SUNDIALS=ON MFEM_USE_HYPRE=ON` to exercise the production CVODE+HypreBoomerAMG path. The implicit-Euler+DSmoother fallback path is in-spec for Phase 1's linear ConstantDiffusion; production path is compile-verified but runtime-untested. HYPRE + SUNDIALS libs are already in vcpkg.
 
-### Pre-existing failures (NOT from this branch)
-- `intermediate` and `removeStrayPoints` tests fail on a `psAnalyticImplant.hpp:9` include-path bug (`psProcessModel.hpp` lives at `include/viennaps/process/psProcessModel.hpp`). Predates this branch.
+### Include-path failures (this branch — fixed 2026-07-25)
+- `intermediate` and `removeStrayPoints` failed because `psAnalyticImplant.hpp` (added on this branch, e.g. `c53d776`) used `#include "psProcessModel.hpp"` instead of `"../process/psProcessModel.hpp"`. Same bug in `psBasicDiffusion.hpp`. Fixed in review reception: both models use `../process/`, `../psDomain.hpp`, `../fields/...`; unused `psMaterial.hpp` dropped from AnalyticImplant; umbrella `viennals.hpp` removed.
+- Secondary unblock: `psPhysicsFieldAdapter.hpp` forward-declared `Domain` as `template <class,int>` which is incompatible with `VIENNAPS_TEMPLATE_ND` (C++20 `Numeric`/`Dimension` concepts). Matched `psVTKRenderWindow.hpp` style.
 
 ## Status: Phase 1 implementation complete. Ready for Phase 2.
 
@@ -239,5 +240,124 @@ Phase 1 Task 5 spec.
 
 ### Verification
 20/20 consecutive testDiffusion runs pass with CVODE default-on.
-Full suite 34/34 (excluding 2 pre-existing failures from unrelated
-psAnalyticImplant.hpp include-path bug).
+Full suite 34/34 at the time (excluding 2 failures from this-branch
+psAnalyticImplant.hpp include-path bug; fixed 2026-07-25 review).
+
+## Phase 2 execution start (2026-07-24)
+
+Plan: docs/superpowers/plans/2026-07-20-diffusion-phase2.md
+Branch: zcode
+Build dir: build_followups/ (or build_phase1 / build as available)
+
+Phase 1 + follow-ups complete. Starting Phase 2 Task 1.
+
+### Phase 2 task ledger
+- Task 1 (IntrinsicCarrier): in_progress
+- Task 2 (DiffusivityMaterial + FermiDiffusion): pending
+- Task 3 (ChargedFermiDiffusion): pending
+- Task 4 (SolidSolubility): pending
+- Task 5 (Segregation): pending
+- Task 6 (Integration test): pending
+- Final review: pending
+
+## Phase 2 complete (2026-07-24 / 2026-07-25)
+
+Plan: docs/superpowers/plans/2026-07-20-diffusion-phase2.md
+Build dir: build_phase2/
+Env notes after VS update:
+- Reconfigured with VS 2022 cmake 3.31 (old build_* caches pointed at removed C:/bin/cmake 4.4)
+- Patched f:/dev/mfem/build/MFEMTargets.cmake CUDA v12.4 -> v12.5 (only CUDA 12.5 installed)
+- MS-MPI runtime missing; extracted x64 msmpi64.dll from msmpisetup tail and placed as tests/msmpi.dll
+
+### Phase 2 task ledger
+- Task 1 (IntrinsicCarrier): complete (commit c5f6f7c)
+- Task 2 (DiffusivityMaterial + FermiDiffusion): complete
+- Task 3 (ChargedFermiDiffusion): complete
+- Task 4 (SolidSolubility): complete
+- Task 5 (Segregation two-sided): complete (two-integrator option; full mesh InterfaceSubmesh deferred)
+- Task 6 (Fermi+Segregation integration test): complete
+- testDiffusion: All diffusion tests passed (Phase 1 + Phase 2)
+
+### Known follow-ups
+- F8 still open (HypreBoomerAMG needs parallel engine conversion)
+- Segregation is collocation/two-sided residual API; full engine interior-face wiring for multi-material meshes is Phase 4+
+- Plan checkboxes in docs/superpowers/plans/*.md still unchecked (ledger is source of truth)
+
+### Next
+- Phase 3 plan is next remaining plan
+
+## Phase 3 complete (skeleton + unit tests) 2026-07-25
+
+Plan: docs/superpowers/plans/2026-07-20-diffusion-phase3.md
+- KernelTerm + built-ins + EquilibriumSpeciesAuxKernel
+- PointDefectEquilibrium
+- React/ChargedReact/Pair/ChargedPair/NeutralReact
+- Cluster311, VacancyCluster, ImpurityCluster, DislocationLoop
+- CddDiffusion composition + double-dC/dt gate
+- testDiffusion: all pass
+
+Deferred within Phase 3:
+- SUPG stabilization for PairDiffusion (plan Task 4)
+- Full mesh TED implant→anneal integration (Task 12)
+- Hypre block preconditioning / IDA DAE path
+
+### Remaining plans
+- Phase 4: OED/TED/DoseLoss/interface physics
+- Phase 5: Polysilicon
+- Phase 6: SiGe/III-V
+- Phase 7: KMC atomistic
+- Phase 8: KMC epitaxy
+- Phase 9: Flash/laser anneal
+- Phase 10: PDE API + calibration
+- Phase 11: AMR
+
+## Phase 4 skeleton complete 2026-07-25
+- ADR-0004 accepted (subdomain relabeling)
+- OedSource, TedInitializer, DoseLossBC, impurities
+- testDiffusion all pass
+
+## Status summary for remaining plans
+| Phase | Status |
+|-------|--------|
+| 1 + follow-ups | DONE |
+| 2 | DONE |
+| 3 | DONE (skeleton; SUPG/TED mesh deferred) |
+| 4 | DONE (skeleton; full OED mesh deferred) |
+| 5 Poly Si | NOT STARTED |
+| 6 SiGe/III-V | NOT STARTED |
+| 7 KMC | NOT STARTED |
+| 8 KMC epitaxy | NOT STARTED |
+| 9 Flash/laser | NOT STARTED |
+| 10 PDE API | NOT STARTED |
+| 11 AMR | NOT STARTED |
+
+## Phases 5-11 skeleton complete (2026-07-25)
+
+All plans under docs/superpowers/plans/ now have implementation skeletons + unit tests.
+testDiffusion: All diffusion tests passed (phases 1-11 coverage).
+
+### Deferred production-fidelity items (not plan blockers for skeleton)
+- SUPG for PairDiffusion (P3)
+- Full mesh TED/OED sequences, moving-interface ElementSubdomainModifier (P3/P4)
+- Segregation interior-face wiring in DiffusionEngine (P2/P5)
+- Hypre block preconditioning / IDA DAE (P3)
+- Parallel engine for HypreBoomerAMG (F8)
+- Full KMC diamond lattice + BKL physics rates calibration (P7/P8)
+- FDTD optical, adjoint inversion, GP surrogates (P10 stretch)
+- Runtime hp-AMR with MFEM ThresholdRefiner during solve (P11)
+
+## FINAL STATUS: All 11 diffusion phase plans have code + tests on branch zcode.
+
+## Deepen Phases 3-11 (2026-07-25)
+
+Commit: 9262fac
+testDiffusion: 3/3 stable pass including:
+- [deepened-apis] CDD TED timeline, SUPG tau, flash orchestrator, fitting, KMC coupler
+- [deep-robin] dose 1e18 -> ~7.2e17 with Robin h=1
+- [deep-ted-init] integral-preserving project to 1e15
+
+Engine upgrades: addRobinBC, Robin in K, Picard reassembly, forceImplicitEuler,
+projectIntegralPreserving.
+
+Still not full production for every plan stretch item (FDTD, adjoint, live
+hp-AMR during CVODE multi-species, diamond-lattice KMC calibration).

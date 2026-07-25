@@ -84,6 +84,7 @@ public:
       mfem::LinearForm &R, const mfem::GridFunction &C1,
       const mfem::GridFunction &C2, mfem::Mesh &mesh, int attr1, int attr2,
       int side) const {
+    // MFEM FESpace() is const; face/vdof APIs need non-const Mesh/FES.
     mfem::FiniteElementSpace *fes =
         const_cast<mfem::FiniteElementSpace *>(C1.FESpace());
     if (!fes || C2.FESpace() != C1.FESpace())

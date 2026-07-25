@@ -4,9 +4,9 @@
 
 #include <string>
 #include <vector>
-#include <map>
 
 #ifdef VIENNAPS_HAS_MFEM
+#include <map>
 #include <mfem.hpp>
 #endif
 

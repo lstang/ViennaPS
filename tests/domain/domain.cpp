@@ -1,4 +1,3 @@
-#define VIENNAPS_HAS_SUNDIALS 1
 #include <vcTestAsserts.hpp>
 
 // Multiphysics Track 1 / Phase 1 smoke without full ViennaLS geometry includes.

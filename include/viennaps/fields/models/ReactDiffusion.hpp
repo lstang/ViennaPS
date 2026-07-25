@@ -78,9 +78,13 @@ public:
         !itV->second)
       return;
     // Residual contribution -k*C_I*C_V for BOTH species (recombination sink).
-    recombCoef_ = std::make_unique<ProductCoef>(*itI->second, *itV->second,
-                                                -static_cast<double>(k_));
-    R.AddDomainIntegrator(new mfem::DomainLFIntegrator(*recombCoef_));
+    // Vector ownership so coefficients outlive all DomainLFIntegrator refs
+    // until R.Assemble() (and until the next assembleReaction clears them).
+    recombCoefs_.clear();
+    recombCoefs_.push_back(std::make_unique<ProductCoef>(
+        *itI->second, *itV->second, -static_cast<double>(k_)));
+    R.AddDomainIntegrator(
+        new mfem::DomainLFIntegrator(*recombCoefs_.back()));
     (void)speciesGF;
   }
 
@@ -109,7 +113,7 @@ private:
   };
   mutable std::unique_ptr<mfem::ConstantCoefficient> stiffCoef_;
   mutable std::unique_ptr<mfem::ConstantCoefficient> massCoef_;
-  mutable std::unique_ptr<ProductCoef> recombCoef_;
+  mutable std::vector<std::unique_ptr<ProductCoef>> recombCoefs_;
 #endif
 
   std::string I_, V_;

@@ -64,10 +64,12 @@ if(NOT ZLIB_DIR)
   set(ZLIB_DIR "F:/dev/vcpkg/installed/x64-windows/share/zlib" CACHE PATH "")
 endif()
 
-# Force early discovery of custom MFEM (build tree)
-if(EXISTS "f:/dev/mfem/build/MFEMConfig.cmake" OR EXISTS "F:/dev/mfem/build/MFEMConfig.cmake")
-  set(mfem_DIR "f:/dev/mfem/build" CACHE PATH "MFEM build/install tree containing MFEMConfig.cmake" FORCE)
-  set(MFEM_DIR "f:/dev/mfem/build" CACHE PATH "" FORCE)
+# Force early discovery of custom MFEM (build tree). Single source of truth;
+# the multiphysics block below reuses mfem_DIR / MFEM_DIR if already set.
+set(_viennaps_mfem_candidate "f:/dev/mfem/build")
+if(EXISTS "${_viennaps_mfem_candidate}/MFEMConfig.cmake")
+  set(mfem_DIR "${_viennaps_mfem_candidate}" CACHE PATH "MFEM build/install tree containing MFEMConfig.cmake" FORCE)
+  set(MFEM_DIR "${_viennaps_mfem_candidate}" CACHE PATH "" FORCE)
 endif()
 
 # --------------------------------------------------------------------------------------------------------
@@ -234,21 +236,19 @@ target_link_libraries(${PROJECT_NAME} INTERFACE ViennaCore ViennaLS ViennaRay Vi
 # --------------------------------------------------------------------------------------------------------
 # Multipysics Dependencies (for unified field layer, high-fidelity diffusion/stress)
 # --------------------------------------------------------------------------------------------------------
-# MFEM for FEM discretization of bulk fields (dopants, defects, stress)
-# We use a custom/prebuilt MFEM at f:/dev/mfem/build (not from vcpkg)
-set(_mfem_candidate "f:/dev/mfem/build")
-if(EXISTS "${_mfem_candidate}/MFEMConfig.cmake")
-  set(mfem_DIR "${_mfem_candidate}" CACHE PATH "Location of MFEMConfig.cmake (build or install tree)" FORCE)
-  set(MFEM_DIR "${_mfem_candidate}" CACHE PATH "" FORCE)
-endif()
+# MFEM for FEM discretization of bulk fields (dopants, defects, stress).
+# Custom prebuilt path is set once above (_viennaps_mfem_candidate / mfem_DIR).
 if(NOT mfem_DIR AND NOT MFEM_DIR)
   set(mfem_DIR "f:/dev/mfem/build" CACHE PATH "Location of MFEMConfig.cmake (build or install tree)")
+endif()
+if(NOT DEFINED _viennaps_mfem_candidate)
+  set(_viennaps_mfem_candidate "f:/dev/mfem/build")
 endif()
 
 # Prioritize the custom MFEM location
 find_package(mfem CONFIG QUIET
-             HINTS "${mfem_DIR}" "${MFEM_DIR}" "${_mfem_candidate}"
-             PATHS "${mfem_DIR}" "${MFEM_DIR}" "${_mfem_candidate}"
+             HINTS "${mfem_DIR}" "${MFEM_DIR}" "${_viennaps_mfem_candidate}"
+             PATHS "${mfem_DIR}" "${MFEM_DIR}" "${_viennaps_mfem_candidate}"
              NO_DEFAULT_PATH)
 if(mfem_FOUND)
   message(STATUS "[ViennaPS] Found MFEM ${MFEM_VERSION} for multiphysics fields at ${mfem_DIR}")

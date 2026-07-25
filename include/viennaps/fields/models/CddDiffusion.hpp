@@ -128,6 +128,9 @@ public:
     react.setRecombinationRate(k_recomb_);
     react.assembleReaction(R, speciesGF, allSpecies, temp);
 
+    // Fresh ownership set for this assembly call (Picard may reassemble).
+    prodCoefs_.clear();
+
     // Host-specified reactions as product coefficients (bimolecular sink/source).
     for (const auto &rx : reactions_) {
       if (rx.reactants.size() == 2) {
@@ -146,9 +149,13 @@ public:
             scale = -static_cast<double>(rx.rate);
         if (scale == 0.0)
           continue;
-        prodCoef_ = std::make_unique<ProductCoef>(*itA->second, *itB->second,
-                                                  scale);
-        R.AddDomainIntegrator(new mfem::DomainLFIntegrator(*prodCoef_));
+        // Own every coefficient for the full Assemble() lifetime — overwriting
+        // a single unique_ptr would free prior ProductCoef objects while
+        // DomainLFIntegrator still holds Coefficient& (use-after-free).
+        prodCoefs_.push_back(std::make_unique<ProductCoef>(
+            *itA->second, *itB->second, scale));
+        R.AddDomainIntegrator(
+            new mfem::DomainLFIntegrator(*prodCoefs_.back()));
       }
     }
 
@@ -175,7 +182,11 @@ public:
     NumericType CI = C_I0;
     NumericType CV = C_I0; // damage
     for (int i = 0; i < nSteps; ++i) {
-      Deff.push_back(D_pair * CI / std::max(C_I_eq, NumericType(1)));
+      if (C_I_eq <= NumericType(0)) {
+        Deff.push_back(NumericType(0));
+      } else {
+        Deff.push_back(D_pair * CI / C_I_eq);
+      }
       const NumericType r = k_recomb * CI * CV * dt;
       CI = std::max(NumericType(0), CI - r);
       CV = std::max(NumericType(0), CV - r);
@@ -209,7 +220,7 @@ private:
     const mfem::GridFunction *b_;
     double scale_;
   };
-  mutable std::unique_ptr<ProductCoef> prodCoef_;
+  mutable std::vector<std::unique_ptr<ProductCoef>> prodCoefs_;
   mutable std::unique_ptr<mfem::ConstantCoefficient> massCoef_;
 #endif
 

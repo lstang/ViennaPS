@@ -1283,7 +1283,8 @@ void TestDirichletBC() {
   const double interiorMean = doseFinal; // area is 1
   std::cout << "[dirichlet-bc] interior_mean=" << interiorMean
             << " (expected ~1e18)\n";
-  VC_TEST_ASSERT(interiorMean > 0.5e18);
+  // Baseline ~0.76e18 with CVODE; require ≥70% to catch real regressions.
+  VC_TEST_ASSERT(interiorMean > 0.7e18);
 }
 
 void TestNeumannBC() {
