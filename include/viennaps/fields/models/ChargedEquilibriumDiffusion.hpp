@@ -1,12 +1,13 @@
 #pragma once
 
-/// ChargedEquilibriumDiffusion — D = D0 * f_eq(T, n, p) at charge equilibrium.
-/// FEM: QP-local D from concentration field (FermiDCoef-style).
+/// ChargedEquilibriumDiffusion — charge-state equilibrium diffusivity.
+/// D_eff = Σ_z D^z f^z  with f^z ∝ exp(−z · η), η = (E_F − E_i)/kT ≈ ln(n/ni)
+/// (SProcess 4.194 / same math as ChargedFermiDiffusion).
 
 #include "../DiffusionModel.hpp"
 #include "../IntrinsicCarrier.hpp"
 
-#include <algorithm>
+#include <cmath>
 #include <map>
 #include <memory>
 #include <string>
@@ -20,11 +21,34 @@ public:
   explicit ChargedEquilibriumDiffusion(std::string species = "Boron")
       : species_(std::move(species)) {
     this->setName("ChargedEquilibriumDiffusion(" + species_ + ")");
+    z_ = {-1, 0, 1};
+    // Unequal D^z so extrinsic shift changes D_eff (same defaults as ChargedFermi).
+    relDz_ = {NumericType(0.1), NumericType(1), NumericType(5)};
+    setD0(D0_);
   }
 
-  void setD0(NumericType D0) { D0_ = D0; }
-  void setAlpha(NumericType a) { alpha_ = a; }
+  void setD0(NumericType D0) {
+    D0_ = D0;
+    Dz_.resize(relDz_.size());
+    for (std::size_t i = 0; i < relDz_.size(); ++i)
+      Dz_[i] = relDz_[i] * D0_;
+  }
+
+  /// Absolute D^z per charge state (optional).
+  void setChargeStates(std::vector<int> z, std::vector<NumericType> Dz) {
+    z_ = std::move(z);
+    Dz_ = std::move(Dz);
+    if (z_.size() != Dz_.size()) {
+      const std::size_t n = std::min(z_.size(), Dz_.size());
+      z_.resize(n);
+      Dz_.resize(n);
+    }
+  }
+
   void setNi(NumericType ni) { ni_ = ni; }
+
+  /// Legacy API (ignored for formula; kept so existing setters compile).
+  void setAlpha(NumericType) {}
 
   NumericType getDiffusivity(NumericType C, NumericType T) const {
     NumericType ni = ni_;
@@ -33,7 +57,20 @@ public:
       ni = ic.ni(T, "Si");
     }
     const NumericType n = std::max(C, ni);
-    return D0_ * (NumericType(1) + alpha_ * n / std::max(ni, NumericType(1)));
+    const NumericType eta =
+        (ni > 0 && n > 0) ? std::log(n / ni) : NumericType(0);
+
+    NumericType sumW = NumericType(0);
+    NumericType sumD = NumericType(0);
+    for (std::size_t i = 0; i < z_.size(); ++i) {
+      const NumericType w =
+          std::exp(-static_cast<NumericType>(z_[i]) * eta);
+      sumW += w;
+      sumD += Dz_[i] * w;
+    }
+    if (sumW <= NumericType(0))
+      return D0_;
+    return sumD / sumW;
   }
 
   int numSpecies() const override { return 1; }
@@ -82,8 +119,10 @@ public:
 private:
   std::string species_;
   NumericType D0_ = NumericType(1e-14);
-  NumericType alpha_ = NumericType(1);
   NumericType ni_ = NumericType(0);
+  std::vector<int> z_;
+  std::vector<NumericType> Dz_;
+  std::vector<NumericType> relDz_;
 #ifdef VIENNAPS_HAS_MFEM
   mutable std::unique_ptr<EqDCoef> stiffCoef_;
   mutable std::unique_ptr<mfem::ConstantCoefficient> massCoef_;

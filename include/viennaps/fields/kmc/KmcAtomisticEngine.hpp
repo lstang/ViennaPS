@@ -1,16 +1,17 @@
 #pragma once
 
-/// KmcAtomisticEngine — BKL (n-fold way) KMC with hop + I/V recombination.
+/// KmcAtomisticEngine — BKL KMC with Hop, Recombine, Cluster, Dissociate.
 ///
-/// Lattice: cubic grid; optional diamond-like body-diagonal neighbors
-/// (Phase 7 full-depth). Species codes: 0 empty, 1 interstitial, 2 vacancy,
-/// >2 impurities/clusters.
+/// Event selection uses prefix-sum + binary search O(log N_events) after an
+/// O(N_sites) rebuild (full incremental heap is a follow-up). Species codes:
+/// 0 empty, 1 interstitial, 2 vacancy, 3 {311}-like cluster.
 
 #include "KmcEvent.hpp"
 #include "KmcLattice.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <numeric>
 #include <random>
 #include <vector>
 
@@ -27,23 +28,29 @@ public:
   void setParameters(KmcParameters p) { params_ = std::move(p); }
   const KmcParameters &parameters() const { return params_; }
 
-  /// true → cubic 6 + diamond-like body diagonals; false → cubic 6 only.
   void setDiamondNeighbors(bool on) { diamond_ = on; }
   bool diamondNeighbors() const { return diamond_; }
 
   void setRecombinationEnabled(bool on) { recomb_ = on; }
   bool recombinationEnabled() const { return recomb_; }
 
+  void setClusteringEnabled(bool on) { cluster_ = on; }
+  bool clusteringEnabled() const { return cluster_; }
+
   double time() const { return time_; }
   int steps() const { return steps_; }
   int recombCount() const { return recombCount_; }
+  int clusterCount() const { return clusterCount_; }
+  int dissocCount() const { return dissocCount_; }
 
-  /// One BKL step: hop events (+ optional I+V recombine), pick, advance time.
+  /// Build event list, select via prefix-sum binary search, apply.
   bool step() {
-    std::vector<KmcEvent> events;
-    events.reserve(lattice_.size() * 8);
+    events_.clear();
+    events_.reserve(lattice_.size() * 8);
     const double rHop = params_.hopRate();
     const double rRec = params_.recombRate();
+    const double rCl = params_.clusterRate();
+    const double rDi = params_.dissocRate();
 
     for (int k = 0; k < lattice_.nz(); ++k)
       for (int j = 0; j < lattice_.ny(); ++j)
@@ -52,27 +59,45 @@ public:
           if (!s.occupied)
             continue;
 
-          forEachNeighbor(i, j, k, [&](int i1, int j1, int k1) {
-            if (lattice_.at(i1, j1, k1).occupied)
-              return;
-            KmcEvent ev;
-            ev.type = KmcEventType::Hop;
-            ev.i0 = i;
-            ev.j0 = j;
-            ev.k0 = k;
-            ev.i1 = i1;
-            ev.j1 = j1;
-            ev.k1 = k1;
-            ev.rate = rHop;
-            events.push_back(ev);
-          });
-
-          // I(1) + V(2) recombination on neighboring sites.
-          if (recomb_ && s.species == 1) {
+          // Dissociation of {311}-like cluster → free I on site + neighbor empty.
+          if (cluster_ && s.species == KmcCluster311) {
             forEachNeighbor(i, j, k, [&](int i1, int j1, int k1) {
-              const auto &n = lattice_.at(i1, j1, k1);
-              if (!n.occupied || n.species != 2)
+              if (lattice_.at(i1, j1, k1).occupied)
                 return;
+              KmcEvent ev;
+              ev.type = KmcEventType::Dissociate;
+              ev.i0 = i;
+              ev.j0 = j;
+              ev.k0 = k;
+              ev.i1 = i1;
+              ev.j1 = j1;
+              ev.k1 = k1;
+              ev.rate = rDi;
+              events_.push_back(ev);
+            });
+          }
+
+          forEachNeighbor(i, j, k, [&](int i1, int j1, int k1) {
+            const auto &n = lattice_.at(i1, j1, k1);
+            if (!n.occupied) {
+              // Hop mobile species only (I, V; not clusters).
+              if (s.species == KmcInterstitial || s.species == KmcVacancy) {
+                KmcEvent ev;
+                ev.type = KmcEventType::Hop;
+                ev.i0 = i;
+                ev.j0 = j;
+                ev.k0 = k;
+                ev.i1 = i1;
+                ev.j1 = j1;
+                ev.k1 = k1;
+                ev.rate = rHop;
+                events_.push_back(ev);
+              }
+              return;
+            }
+            // I+V recombination (count each pair once via species order).
+            if (recomb_ && s.species == KmcInterstitial &&
+                n.species == KmcVacancy) {
               KmcEvent ev;
               ev.type = KmcEventType::Recombine;
               ev.i0 = i;
@@ -82,17 +107,39 @@ public:
               ev.j1 = j1;
               ev.k1 = k1;
               ev.rate = rRec;
-              events.push_back(ev);
-            });
-          }
+              events_.push_back(ev);
+            }
+            // I+I → {311} cluster (canonical TED sink).
+            if (cluster_ && s.species == KmcInterstitial &&
+                n.species == KmcInterstitial) {
+              // Order sites so each unordered pair is once.
+              const int a = (k * lattice_.ny() + j) * lattice_.nx() + i;
+              const int b = (k1 * lattice_.ny() + j1) * lattice_.nx() + i1;
+              if (a < b) {
+                KmcEvent ev;
+                ev.type = KmcEventType::Cluster;
+                ev.i0 = i;
+                ev.j0 = j;
+                ev.k0 = k;
+                ev.i1 = i1;
+                ev.j1 = j1;
+                ev.k1 = k1;
+                ev.rate = rCl;
+                events_.push_back(ev);
+              }
+            }
+          });
         }
 
-    if (events.empty())
+    if (events_.empty())
       return false;
 
-    double Rtot = 0.0;
-    for (const auto &e : events)
-      Rtot += e.rate;
+    // Prefix sums for O(log N) selection.
+    prefix_.resize(events_.size());
+    prefix_[0] = events_[0].rate;
+    for (std::size_t i = 1; i < events_.size(); ++i)
+      prefix_[i] = prefix_[i - 1] + events_[i].rate;
+    const double Rtot = prefix_.back();
     if (Rtot <= 0.0)
       return false;
 
@@ -100,17 +147,15 @@ public:
     const double u1 = std::max(U(rng_), 1e-16);
     const double u2 = U(rng_);
     time_ += -std::log(u1) / Rtot;
-    double thresh = u2 * Rtot;
-    double acc = 0.0;
-    const KmcEvent *chosen = &events.back();
-    for (const auto &e : events) {
-      acc += e.rate;
-      if (acc >= thresh) {
-        chosen = &e;
-        break;
-      }
-    }
-    apply(*chosen);
+    const double thresh = u2 * Rtot;
+    // lower_bound on prefix: first cumulative rate >= thresh
+    const auto it =
+        std::lower_bound(prefix_.begin(), prefix_.end(), thresh);
+    const std::size_t idx =
+        static_cast<std::size_t>(std::distance(prefix_.begin(), it));
+    const std::size_t chosen =
+        std::min(idx, events_.size() - 1);
+    apply(events_[chosen]);
     ++steps_;
     return true;
   }
@@ -164,20 +209,41 @@ private:
       b.occupied = false;
       b.species = 0;
       ++recombCount_;
+    } else if (e.type == KmcEventType::Cluster) {
+      auto &a = lattice_.at(e.i0, e.j0, e.k0);
+      auto &b = lattice_.at(e.i1, e.j1, e.k1);
+      // Keep cluster on lower-index site; free the other.
+      a.species = KmcCluster311;
+      a.occupied = true;
+      b.occupied = false;
+      b.species = 0;
+      ++clusterCount_;
+    } else if (e.type == KmcEventType::Dissociate) {
+      auto &a = lattice_.at(e.i0, e.j0, e.k0);
+      auto &b = lattice_.at(e.i1, e.j1, e.k1);
+      a.species = KmcInterstitial;
+      a.occupied = true;
+      b.species = KmcInterstitial;
+      b.occupied = true;
+      ++dissocCount_;
     }
   }
 
   KmcLattice lattice_;
   KmcParameters params_;
+  std::vector<KmcEvent> events_;
+  std::vector<double> prefix_;
   double time_ = 0.0;
   int steps_ = 0;
   int recombCount_ = 0;
+  int clusterCount_ = 0;
+  int dissocCount_ = 0;
   bool diamond_ = false;
   bool recomb_ = true;
+  bool cluster_ = true;
   std::mt19937 rng_;
 };
 
-/// Transfer continuum field → discrete KMC occupations (Poisson sampling).
 class KmcAtomize {
 public:
   static void atomize(KmcLattice &lat, const std::vector<double> &conc,
@@ -192,8 +258,7 @@ public:
           const double expected = conc[idx++] * volumePerSite;
           std::poisson_distribution<int> pois(
               std::max(0.0, std::min(expected, 20.0)));
-          const int n = pois(rng);
-          if (n > 0) {
+          if (pois(rng) > 0) {
             auto &s = lat.at(i, j, k);
             s.occupied = true;
             s.species = speciesCode;
@@ -202,7 +267,6 @@ public:
   }
 };
 
-/// Transfer KMC occupations → continuum concentration.
 class KmcDeatomize {
 public:
   static void deatomize(const KmcLattice &lat, std::vector<double> &conc,
@@ -226,12 +290,14 @@ struct KmcReport {
   int hopCount = 0;
   int occupied = 0;
   int recombCount = 0;
+  int clusterCount = 0;
 
   static KmcReport fromEngine(const KmcAtomisticEngine &eng) {
     KmcReport r;
     r.time = eng.time();
     r.steps = eng.steps();
     r.recombCount = eng.recombCount();
+    r.clusterCount = eng.clusterCount();
     r.occupied = 0;
     for (int k = 0; k < eng.lattice().nz(); ++k)
       for (int j = 0; j < eng.lattice().ny(); ++j)
@@ -242,7 +308,6 @@ struct KmcReport {
   }
 };
 
-/// Continuum ↔ KMC coupling facade for TED validation loops.
 class KmcContinuumCoupler {
 public:
   static std::vector<double>

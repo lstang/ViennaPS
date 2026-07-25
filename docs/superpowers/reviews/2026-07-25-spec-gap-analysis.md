@@ -58,17 +58,17 @@ Legend:
 |---|---|---|---|
 | Constant | ✅ | ✅ | Arrhenius D, dose conservation 1e-16 |
 | Fermi | ✅ | ✅ | D(C) coefficient, analytic dD/dC |
-| ChargedFermi | 🟡 | 🟡 | Mean-concentration Picard, not quadrature-point D |
-| Pair | ✅ | 🟡 | FEM assembled via CddDiffusion |
-| ChargedPair | 🟡 | ❌ | Header exists, no FEM assembly |
+| ChargedFermi | ✅ | ✅ | QP-local D (2026-07-25 full-depth + review) |
+| Pair | ✅ | 🟡 | FEM assembled via CddDiffusion / PairDiffusion |
+| ChargedPair | ✅ | 🟡 | FEM QP D with Fermi enhancement |
 | React | ✅ | 🟡 | FEM assembled, recombination sink |
-| ChargedReact | 🟡 | ❌ | Header exists, no FEM assembly |
-| NeutralReact | 🟡 | ❌ | Header exists, no FEM assembly |
-| CDD | ✅ | 🟡 | KernelTerm composition + reactions; use-after-free bug |
-| ChargedEquilibrium | 🟡 | ❌ | Header exists, no FEM assembly |
-| Carbon | 🟡 | ❌ | Header exists, no FEM assembly |
-| Nitrogen | 🟡 | ❌ | Header exists, no FEM assembly |
-| Copper | 🟡 | ❌ | Header exists, no FEM assembly |
+| ChargedReact | ✅ | 🟡 | FEM charge-enhanced product residual |
+| NeutralReact | ✅ | 🟡 | Thin alias of ReactDiffusion |
+| CDD | ✅ | 🟡 | KernelTerm composition; UAF fixed in review |
+| ChargedEquilibrium | ✅ | 🟡 | Fermi charge-state partition (was wrong formula; fixed) |
+| Carbon | ✅ | 🟡 | FEM + reverse rate detailed balance (review fix) |
+| Nitrogen | ✅ | 🟡 | ConstantDiffusion specialization |
+| Copper | ✅ | 🟡 | Drift via ConvectionIntegrator + MobileImpurity base (review) |
 
 ### 4.3 Cluster / Deactivation Models
 
@@ -106,7 +106,7 @@ Legend:
 
 | Spec Feature | Status | Notes |
 |---|---|---|
-| SiGe interdiffusion | 🟡 | 1D explicit step; **no FEM assembly** |
+| SiGe interdiffusion | 🟡 | FEM + optional defect-mediated D_inter (plain Arrhenius fallback) |
 | Bandgap model | ✅ | BandgapModel.hpp with niRatioToSi |
 | Boron D modified by Ge | ✅ | Via niRatioToSi |
 | Carbon suppression (I trapping) | 🟡 | SiGeCDiffusion::tedFactor; no FEM |
@@ -171,12 +171,12 @@ Legend:
 | Spec Feature | Status | Notes |
 |---|---|---|
 | BKL rejection-free KMC | ✅ | KmcAtomisticEngine |
-| Si diamond cubic lattice | ❌ | Uses simple cubic (6-neighbor) |
-| Event tree O(log N) | ❌ | Linear scan O(N) |
+| Si diamond cubic lattice | 🟡 | Cubic + body diagonals (not true 2×FCC) |
+| Event tree O(log N) | 🟡 | Prefix-sum binary search O(log N_events); rebuild still O(N) |
 | Hop events | ✅ | |
-| Recombination (I+V->0) | ❌ | |
-| Clustering (I+I->{311}) | ❌ | |
-| Dissociation | ❌ | |
+| Recombination (I+V->0) | ✅ | |
+| Clustering (I+I->{311}) | ✅ | Species code 3 |
+| Dissociation | ✅ | Cluster → 2×I |
 | Amorphous pocket | ❌ | |
 | Dopant-defect pairing | ❌ | |
 | Impurity clustering | ❌ | |

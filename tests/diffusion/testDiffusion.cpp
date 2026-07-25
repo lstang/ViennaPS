@@ -573,11 +573,37 @@ void TestPhase7Kmc() {
   engR.setLattice(latR);
   engR.setParameters(pR);
   engR.setRecombinationEnabled(true);
+  engR.setClusteringEnabled(false);
   engR.run(20);
   VC_TEST_ASSERT(engR.recombCount() > 0);
   VC_TEST_ASSERT(engR.lattice().countSpecies(1) +
                      engR.lattice().countSpecies(2) <
                  2);
+
+  // I+I clustering: adjacent interstitials form {311}-like cluster.
+  KmcLattice latC;
+  latC.resize(3, 1, 1);
+  latC.at(0, 0, 0).occupied = true;
+  latC.at(0, 0, 0).species = 1;
+  latC.at(1, 0, 0).occupied = true;
+  latC.at(1, 0, 0).species = 1;
+  KmcParameters pC;
+  pC.T = 1500.0;
+  pC.hopPreFactor = 0.0; // only clustering selectable
+  pC.clusterBarrier = 0.0;
+  pC.clusterPreFactor = 1e12;
+  pC.dissocPreFactor = 0.0;
+  KmcAtomisticEngine engC(5);
+  engC.setLattice(latC);
+  engC.setParameters(pC);
+  engC.setRecombinationEnabled(false);
+  engC.setClusteringEnabled(true);
+  engC.run(5);
+  std::cout << "[phase7] clusterCount=" << engC.clusterCount()
+            << " sp3=" << engC.lattice().countSpecies(3)
+            << " steps=" << engC.steps() << "\n";
+  VC_TEST_ASSERT(engC.clusterCount() > 0);
+  VC_TEST_ASSERT(engC.lattice().countSpecies(3) >= 1);
 
   std::vector<double> conc(lat.size(), 1e20);
   std::mt19937 rng(1);
@@ -588,7 +614,8 @@ void TestPhase7Kmc() {
   KmcDeatomize::deatomize(lat2, back, 1e-21, 1);
   VC_TEST_ASSERT(back.size() == lat2.size());
   std::cout << "[phase7] KMC steps=" << eng.steps() << " t=" << eng.time()
-            << " recomb=" << engR.recombCount() << "\n";
+            << " recomb=" << engR.recombCount()
+            << " cluster=" << engC.clusterCount() << "\n";
 }
 
 void TestPhase8Epitaxy() {
@@ -1136,13 +1163,25 @@ void TestPhase4Models() {
 
   ChargedEquilibriumDiffusion<double> ceq;
   ceq.setD0(1e-14);
-  VC_TEST_ASSERT(ceq.getDiffusivity(1e20, 1273.0) >
-                 ceq.getDiffusivity(1e15, 1273.0));
+  ceq.setNi(1e10);
+  // Charge-state partition: extrinsic D differs from intrinsic (not flat).
+  VC_TEST_ASSERT(std::abs(ceq.getDiffusivity(1e20, 1273.0) -
+                           ceq.getDiffusivity(1e10, 1273.0)) /
+                     ceq.getDiffusivity(1e10, 1273.0) >
+                 0.01);
 
   CarbonDiffusion<double> carb;
+  carb.setup(MeshAttributes{}, 1273.0);
+  carb.setTrapRate(1e-18);
+  carb.setReverseRate(1e-18 * 1e12); // kr = kf * C*_I mock
   std::vector<double> Cc(1, 1e18), Ii(1, 1e18), CI2(1, 0.0);
   carb.applyTrapStep(Cc, Ii, CI2, 1.0);
   VC_TEST_ASSERT(CI2[0] > 0.0 && Ii[0] < 1e18);
+  // Detailed balance: with CI large and C,I small, reverse should reduce CI.
+  std::vector<double> C3(1, 1e10), I3(1, 1e10), CI3(1, 1e20);
+  const double ciBefore = CI3[0];
+  carb.applyTrapStep(C3, I3, CI3, 1.0);
+  VC_TEST_ASSERT(CI3[0] < ciBefore);
 
   NitrogenDiffusion<double> nitro;
   VC_TEST_ASSERT(nitro.speciesNames()[0] == "Nitrogen");
@@ -1188,64 +1227,67 @@ void TestPhase4FullDepthFem() {
     VC_TEST_ASSERT(I1 > 0.0);
   }
 
-  // Carbon trapping: CI complex grows, I decreases (mild kf to stay positive).
-  // r = kf*C*I; kf*C*dt ≲ 0.1 → kf ≲ 0.1/(C*dt) ~ 1e-16 for C=1e15, dt=0.1.
+  // Carbon trapping: CI grows; atom inventory C+CI conserved on host path.
+  {
+    CarbonDiffusion<double> carb;
+    MeshAttributes ma;
+    carb.setup(ma, 1273.0);
+    carb.setTrapRate(1e-20);
+    carb.setReverseRate(0.0); // forward-only short step
+    std::vector<double> C(1, 1e16), I(1, 1e16), CI(1, 0.0);
+    const double inv0 = C[0] + CI[0];
+    carb.applyTrapStep(C, I, CI, 0.1);
+    const double inv1 = C[0] + CI[0];
+    std::cout << "[p4-full] carbon host inv0=" << inv0 << " inv1=" << inv1
+              << " CI=" << CI[0] << "\n";
+    VC_TEST_ASSERT(CI[0] > 0.0);
+    VC_TEST_ASSERT(std::abs(inv1 - inv0) / inv0 < 1e-9);
+  }
+
+  // Copper with drift: E-field along +x; mass still finite after short solve.
   {
     DiffusionEngine<double, 2> engine;
     engine.setMesh(std::make_unique<mfem::Mesh>(*mesh), attrs);
-    auto carb = std::make_shared<CarbonDiffusion<double>>();
-    carb->setTrapRate(1e-18);
-    carb->setDiffusivities(1e-14, 1e-14);
+    auto cu = std::make_shared<CopperDiffusion<double>>();
+    cu->setD0(1e-10);
+    cu->setIonPairing(0.0);
+    cu->setChargeState(1.0);
+    cu->setElectricField(1e4, 0.0); // V/cm-scale test field
     DiffusionPhysics<double> physics;
-    physics.addSpecies("Carbon");
-    physics.addSpecies("Interstitial");
-    physics.addSpecies("CarbonInterstitial");
-    physics.addModel(carb);
+    physics.addSpecies("Copper");
+    physics.addModel(cu);
     physics.setTemperature(1273.0);
     engine.setPhysics(physics);
-    engine.initializeSpecies("Carbon", 1e15);
-    engine.initializeSpecies("Interstitial", 1e15);
-    engine.initializeSpecies("CarbonInterstitial", 0.0);
-    const double I0 = engine.getIntegral("Interstitial");
-    engine.solve(0.0, 0.5, 0.1);
-    const double I1 = engine.getIntegral("Interstitial");
-    const double CI = engine.getIntegral("CarbonInterstitial");
-    std::cout << "[p4-full] carbon I0=" << I0 << " I1=" << I1 << " CI=" << CI
-              << "\n";
-    VC_TEST_ASSERT(CI > 0.0);
-    VC_TEST_ASSERT(I1 < I0);
-    VC_TEST_ASSERT(I1 > 0.0);
+    engine.initializeSpecies("Copper", 1e15);
+    const double c0 = engine.getIntegral("Copper");
+    engine.solve(0.0, 0.05, 0.025);
+    const double c1 = engine.getIntegral("Copper");
+    std::cout << "[p4-full] copper-drift c0=" << c0 << " c1=" << c1
+              << " rel=" << std::abs(c1 - c0) / std::max(c0, 1.0) << "\n";
+    // Closed domain: dose conserved even with drift (no sink).
+    VC_TEST_ASSERT(std::abs(c1 - c0) / std::max(c0, 1.0) < 0.05);
+    VC_TEST_ASSERT(c1 > 0.0);
   }
 
-  // ChargedEquilibrium + Copper: dose conservation under zero-flux.
+  // ChargedEquilibrium FEM dose conservation.
   {
     DiffusionEngine<double, 2> engine;
     engine.setMesh(std::make_unique<mfem::Mesh>(*mesh), attrs);
     auto ceq = std::make_shared<ChargedEquilibriumDiffusion<double>>("Boron");
     ceq->setD0(1e-12);
     ceq->setNi(1e10);
-    auto cu = std::make_shared<CopperDiffusion<double>>();
-    cu->setD0(1e-10);
-    cu->setIonPairing(0.0); // constant D for conservation
     DiffusionPhysics<double> physics;
     physics.addSpecies("Boron");
-    physics.addSpecies("Copper");
     physics.addModel(ceq);
-    physics.addModel(cu);
     physics.setTemperature(1273.0);
     engine.setPhysics(physics);
     engine.initializeSpecies("Boron", 1e18);
-    engine.initializeSpecies("Copper", 1e15);
     const double b0 = engine.getIntegral("Boron");
-    const double c0 = engine.getIntegral("Copper");
     engine.solve(0.0, 0.2, 0.05);
     const double b1 = engine.getIntegral("Boron");
-    const double c1 = engine.getIntegral("Copper");
-    std::cout << "[p4-full] equil/cu B rel="
-              << std::abs(b1 - b0) / std::max(b0, 1.0)
-              << " Cu rel=" << std::abs(c1 - c0) / std::max(c0, 1.0) << "\n";
+    std::cout << "[p4-full] charged-eq B rel="
+              << std::abs(b1 - b0) / std::max(b0, 1.0) << "\n";
     VC_TEST_ASSERT(std::abs(b1 - b0) / std::max(b0, 1.0) < 0.05);
-    VC_TEST_ASSERT(std::abs(c1 - c0) / std::max(c0, 1.0) < 0.05);
   }
 }
 

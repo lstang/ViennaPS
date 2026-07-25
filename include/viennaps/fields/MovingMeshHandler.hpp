@@ -33,6 +33,13 @@ public:
   bool interfaceAdjacentOnly() const { return interfaceOnly_; }
 
 #ifdef VIENNAPS_HAS_MFEM
+  /// Instance path: uses interfaceOnly_ flag set on this handler.
+  MeshMoveResult relabel(mfem::Mesh &mesh, int fromAttr, int toAttr,
+                         double progress, double threshold) const {
+    return relabelAttributes(mesh, fromAttr, toAttr, progress, threshold,
+                             interfaceOnly_);
+  }
+
   /// Subdomain relabeling (ADR-0004 idiom A): flip fromAttr → toAttr when
   /// oxidation progress ≥ threshold. Returns flipped element count.
   static MeshMoveResult relabelAttributes(mfem::Mesh &mesh, int fromAttr,

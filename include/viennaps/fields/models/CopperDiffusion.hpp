@@ -1,96 +1,33 @@
 #pragma once
 
-/// CopperDiffusion — fast Cu diffuser with ion-pairing enhancement in
-/// doped regions: D = D0 * (1 + beta * C_dopant / ni)
-/// FEM: QP D; dopant field via setDopantSpecies (else constant C_dopant_).
+/// CopperDiffusion — MobileImpurity specialization for Cu (Phase 4 Task 7).
+///
+/// D = D0 * (1 + beta * C_dopant / ni) with optional Nernst–Planck drift
+/// J = −D (∇C + (q/kT) z C E) and Cu + acceptor ⇌ CuA pairing.
 
-#include "../DiffusionModel.hpp"
-#include "../IntrinsicCarrier.hpp"
+#include "MobileImpurity.hpp"
 
-#include <algorithm>
-#include <map>
-#include <memory>
 #include <string>
-#include <vector>
 
 namespace viennaps {
 
 template <class NumericType>
-class CopperDiffusion : public DiffusionModel<NumericType> {
+class CopperDiffusion : public MobileImpurity<NumericType> {
 public:
-  CopperDiffusion() { this->setName("CopperDiffusion"); }
-
-  void setD0(NumericType D0) { D0_ = D0; }
-  void setIonPairing(NumericType beta) { beta_ = beta; }
-  void setDopantConcentration(NumericType C) { C_dopant_ = C; }
-  void setDopantSpecies(std::string s) { dopantSpecies_ = std::move(s); }
-
-  NumericType getDiffusivity(NumericType C_dopant, NumericType T) const {
-    IntrinsicCarrier<NumericType> ic;
-    const NumericType ni = ic.ni(T, "Si");
-    return D0_ * (NumericType(1) +
-                  beta_ * C_dopant / std::max(ni, NumericType(1)));
+  CopperDiffusion() : MobileImpurity<NumericType>("Copper") {
+    this->setName("CopperDiffusion");
+    this->setD0(NumericType(1e-5)); // Cu is fast
+    this->setIonPairing(NumericType(1));
+    this->setChargeState(NumericType(1)); // Cu+
+    // Pairing species enabled when setPairingRates + enablePairSpecies.
   }
 
-  int numSpecies() const override { return 1; }
-  std::vector<std::string> speciesNames() const override {
-    return {"Copper"};
+  /// Enable Cu + acceptor ⇌ CuA (adds second species "CopperPair").
+  void enablePairSpecies(const std::string &pair = "CopperPair",
+                         const std::string &acceptor = "Boron") {
+    this->pairSpecies_ = pair;
+    this->setAcceptorSpecies(acceptor);
   }
-
-#ifdef VIENNAPS_HAS_MFEM
-  class CuDCoef : public mfem::Coefficient {
-  public:
-    CuDCoef(const CopperDiffusion *m, double T, const mfem::GridFunction *dop,
-            double Cconst)
-        : m_(m), T_(T), dop_(dop), Cconst_(Cconst) {}
-    double Eval(mfem::ElementTransformation &T,
-                const mfem::IntegrationPoint &ip) override {
-      double C = Cconst_;
-      if (dop_)
-        C = dop_->GetValue(T, ip);
-      return static_cast<double>(
-          m_->getDiffusivity(static_cast<NumericType>(C),
-                             static_cast<NumericType>(T_)));
-    }
-
-  private:
-    const CopperDiffusion *m_;
-    double T_;
-    const mfem::GridFunction *dop_;
-    double Cconst_;
-  };
-
-  void assembleStiffness(
-      mfem::BilinearForm &K, const mfem::GridFunction & /*speciesGF*/,
-      const std::map<std::string, mfem::GridFunction *> &allSpecies,
-      const mfem::GridFunction * /*temp*/) const override {
-    const mfem::GridFunction *dop = nullptr;
-    if (!dopantSpecies_.empty()) {
-      auto it = allSpecies.find(dopantSpecies_);
-      if (it != allSpecies.end())
-        dop = it->second;
-    }
-    stiffCoef_ = std::make_unique<CuDCoef>(
-        this, static_cast<double>(this->T_), dop,
-        static_cast<double>(C_dopant_));
-    K.AddDomainIntegrator(new mfem::DiffusionIntegrator(*stiffCoef_));
-  }
-
-  void assembleMass(mfem::BilinearForm &M) const override {
-    massCoef_ = std::make_unique<mfem::ConstantCoefficient>(1.0);
-    M.AddDomainIntegrator(new mfem::MassIntegrator(*massCoef_));
-  }
-#endif
-
-private:
-  NumericType D0_ = NumericType(1e-5); // Cu is fast
-  NumericType beta_ = NumericType(1);
-  NumericType C_dopant_ = NumericType(0);
-  std::string dopantSpecies_;
-#ifdef VIENNAPS_HAS_MFEM
-  mutable std::unique_ptr<CuDCoef> stiffCoef_;
-  mutable std::unique_ptr<mfem::ConstantCoefficient> massCoef_;
-#endif
 };
 
 } // namespace viennaps

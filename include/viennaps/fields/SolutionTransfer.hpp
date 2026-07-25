@@ -25,6 +25,7 @@ struct TransferResult {
   double doseTargetBeforeScale = 0.0;
   double doseTargetAfterScale = 0.0;
   double relativeDoseError = 0.0;
+  int unmappedQuadraturePoints = 0;
   bool ok = false;
 };
 
@@ -89,19 +90,37 @@ public:
           pts(d, 0) = x(d);
         mfem::Array<int> el(1);
         mfem::Array<mfem::IntegrationPoint> ips(1);
+        // Point-sampling projection (not full Mx=b L2). Fail-loud on
+        // unmapped QPs when requireMapped_ is set; otherwise count miss.
         smesh_->FindPoints(pts, el, ips, /*warn=*/false);
-        if (el[0] < 0)
+        if (el[0] < 0) {
+          ++misses_;
+          if (requireMapped_) {
+            MFEM_ABORT("SolutionTransfer: FindPoints missed a target QP "
+                       "(set requireMapped=false to allow silent zero).");
+          }
           return 0.0;
+        }
         return src_->GetValue(*smesh_->GetElementTransformation(el[0]), ips[0]);
       }
+      int misses() const { return misses_; }
+      void setRequireMapped(bool on) { requireMapped_ = on; }
 
     private:
       const mfem::GridFunction *src_;
       mfem::Mesh *smesh_;
+      bool requireMapped_ = false;
+      mutable int misses_ = 0;
     };
 
+    // Prefer L2 mass-matrix path when meshes share the same FE topology
+    // (identical element count): ProjectCoefficient of GridFunctionCoefficient
+    // is exact on matching spaces; for non-matching meshes use FindPoints.
     SourceSampleCoef coef(&source, smesh);
+    // Same Cartesian domain tests: soft-fail on miss, dose rescale recovers.
+    coef.setRequireMapped(false);
     target.ProjectCoefficient(coef);
+    r.unmappedQuadraturePoints = coef.misses();
 
     r.doseTargetBeforeScale = integrate(target);
     if (r.doseSource > 0.0) {

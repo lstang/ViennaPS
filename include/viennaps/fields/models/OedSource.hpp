@@ -5,6 +5,7 @@
 
 #include "../DiffusionModel.hpp"
 #include "../DiffusionPhysics.hpp"
+#include "../MovingMeshHandler.hpp"
 
 #include <map>
 #include <memory>
@@ -55,26 +56,21 @@ public:
       int /*dummy*/,
 #endif
       int fromAttr, int toAttr, NumericType progress,
-      NumericType threshold) {
-    int flipped = 0;
+      NumericType threshold, bool interfaceAdjacentOnly = true) {
 #ifdef VIENNAPS_HAS_MFEM
-    if (progress < threshold)
-      return 0;
-    for (int e = 0; e < mesh.GetNE(); ++e) {
-      if (mesh.GetAttribute(e) == fromAttr) {
-        // Simple global flip when progress crosses threshold (unit test).
-        // Production: flip only elements adjacent to the interface.
-        mesh.SetAttribute(e, toAttr);
-        ++flipped;
-      }
-    }
+    // Delegate to MovingMeshHandler (ADR-0004); default interface-adjacent.
+    auto r = MovingMeshHandler::relabelAttributes(
+        mesh, fromAttr, toAttr, static_cast<double>(progress),
+        static_cast<double>(threshold), interfaceAdjacentOnly);
+    return r.elementsRelabeled;
 #else
     (void)fromAttr;
     (void)toAttr;
     (void)progress;
     (void)threshold;
+    (void)interfaceAdjacentOnly;
+    return 0;
 #endif
-    return flipped;
   }
 
   int numSpecies() const override { return 1; }

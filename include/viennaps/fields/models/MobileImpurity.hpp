@@ -1,12 +1,15 @@
 #pragma once
 
-/// MobileImpurity — general mobile impurity + optional ion-pairing.
-/// FEM: QP D with optional coupled dopant field (same pattern as Copper).
+/// MobileImpurity — general mobile impurity with ion-pairing and optional
+/// drift (Nernst–Planck): J = −D (∇C + (q/kT) z C E).
+///
+/// CopperDiffusion is a thin specialization of this class (Phase 4 Task 7–8).
 
 #include "../DiffusionModel.hpp"
 #include "../IntrinsicCarrier.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <map>
 #include <memory>
 #include <string>
@@ -14,11 +17,15 @@
 
 namespace viennaps {
 
+/// Boltzmann constant (eV/K) — shared default for drift terms.
+inline constexpr double kB_eV = 8.617333262145e-5;
+
 template <class NumericType>
 class MobileImpurity : public DiffusionModel<NumericType> {
 public:
-  explicit MobileImpurity(std::string species = "Impurity")
-      : species_(std::move(species)) {
+  explicit MobileImpurity(std::string species = "Impurity",
+                          std::string pairSpecies = "")
+      : species_(std::move(species)), pairSpecies_(std::move(pairSpecies)) {
     this->setName("MobileImpurity(" + species_ + ")");
   }
 
@@ -26,6 +33,24 @@ public:
   void setIonPairing(NumericType beta) { beta_ = beta; }
   void setDopantConcentration(NumericType C) { C_dopant_ = C; }
   void setDopantSpecies(std::string s) { dopantSpecies_ = std::move(s); }
+
+  /// Drift: charge state z and electric field E (V/cm components).
+  void setChargeState(NumericType z) { z_ = z; }
+  void setElectricField(NumericType Ex, NumericType Ey = 0,
+                        NumericType Ez = 0) {
+    Ex_ = Ex;
+    Ey_ = Ey;
+    Ez_ = Ez;
+    driftEnabled_ = (Ex != 0 || Ey != 0 || Ez != 0) && (z_ != 0);
+  }
+  void setDriftEnabled(bool on) { driftEnabled_ = on; }
+
+  /// Pairing reaction mobile + acceptor ⇌ pair (immobile).
+  void setPairingRates(NumericType kPair, NumericType kDiss) {
+    kPair_ = kPair;
+    kDiss_ = kDiss;
+  }
+  void setAcceptorSpecies(std::string s) { acceptorSpecies_ = std::move(s); }
 
   NumericType getDiffusivity(NumericType C_dopant, NumericType T) const {
     if (beta_ == NumericType(0))
@@ -36,9 +61,20 @@ public:
                   beta_ * C_dopant / std::max(ni, NumericType(1)));
   }
 
-  int numSpecies() const override { return 1; }
+  /// Nernst factor beta_NP = (q/kT)*z ≈ z/(kB*T) with E in V/cm, T in K.
+  NumericType nernstBeta(NumericType T) const {
+    if (T <= NumericType(0))
+      return NumericType(0);
+    return z_ / (static_cast<NumericType>(kB_eV) * T);
+  }
+
+  int numSpecies() const override {
+    return pairSpecies_.empty() ? 1 : 2;
+  }
   std::vector<std::string> speciesNames() const override {
-    return {species_};
+    if (pairSpecies_.empty())
+      return {species_};
+    return {species_, pairSpecies_};
   }
 
 #ifdef VIENNAPS_HAS_MFEM
@@ -65,19 +101,86 @@ public:
   };
 
   void assembleStiffness(
-      mfem::BilinearForm &K, const mfem::GridFunction & /*speciesGF*/,
+      mfem::BilinearForm &K, const mfem::GridFunction &speciesGF,
       const std::map<std::string, mfem::GridFunction *> &allSpecies,
       const mfem::GridFunction * /*temp*/) const override {
+    // Immobile pair species: no diffusion/drift.
+    if (!pairSpecies_.empty()) {
+      auto itP = allSpecies.find(pairSpecies_);
+      if (itP != allSpecies.end() && itP->second == &speciesGF) {
+        zeroCoef_ = std::make_unique<mfem::ConstantCoefficient>(0.0);
+        K.AddDomainIntegrator(new mfem::DiffusionIntegrator(*zeroCoef_));
+        return;
+      }
+    }
+
     const mfem::GridFunction *dop = nullptr;
     if (!dopantSpecies_.empty()) {
       auto it = allSpecies.find(dopantSpecies_);
       if (it != allSpecies.end())
         dop = it->second;
     }
-    stiffCoef_ = std::make_unique<ImpDCoef>(
+    dCoef_ = std::make_unique<ImpDCoef>(
         this, static_cast<double>(this->T_), dop,
         static_cast<double>(C_dopant_));
-    K.AddDomainIntegrator(new mfem::DiffusionIntegrator(*stiffCoef_));
+    K.AddDomainIntegrator(new mfem::DiffusionIntegrator(*dCoef_));
+
+    // Drift: (a·∇u, v) with a = −D·(q/kT)·z·E  so dC/dt includes
+    // +div(D z (q/kT) C E) term via weak form (see Phase 4 Task 7).
+    if (driftEnabled_) {
+      const double Drep = static_cast<double>(
+          getDiffusivity(C_dopant_, this->T_));
+      const double bNP =
+          static_cast<double>(nernstBeta(this->T_));
+      // a = −D * bNP * E  for residual (dC/dt,v) + (D∇C,∇v) + (a·∇C, v)=0
+      // matching dC/dt = div(D∇C) + div(D bNP C E) with constant E.
+      mfem::Vector a(3);
+      a = 0.0;
+      a(0) = -Drep * bNP * static_cast<double>(Ex_);
+      a(1) = -Drep * bNP * static_cast<double>(Ey_);
+      if (a.Size() > 2)
+        a(2) = -Drep * bNP * static_cast<double>(Ez_);
+      // ConvectionIntegrator expects VectorCoefficient of mesh dimension.
+      const int sdim =
+          K.FESpace() ? K.FESpace()->GetMesh()->SpaceDimension() : 2;
+      mfem::Vector aUse(sdim);
+      for (int d = 0; d < sdim; ++d)
+        aUse(d) = (d < a.Size()) ? a(d) : 0.0;
+      driftVel_ = std::make_unique<mfem::VectorConstantCoefficient>(aUse);
+      K.AddDomainIntegrator(new mfem::ConvectionIntegrator(*driftVel_));
+    }
+    (void)speciesGF;
+  }
+
+  void assembleReaction(
+      mfem::LinearForm &R, const mfem::GridFunction &speciesGF,
+      const std::map<std::string, mfem::GridFunction *> &allSpecies,
+      const mfem::GridFunction * /*temp*/) const override {
+    if (pairSpecies_.empty() || kPair_ == NumericType(0))
+      return;
+    auto itM = allSpecies.find(species_);
+    auto itP = allSpecies.find(pairSpecies_);
+    if (itM == allSpecies.end() || itP == allSpecies.end() || !itM->second ||
+        !itP->second)
+      return;
+    const mfem::GridFunction *acc = nullptr;
+    if (!acceptorSpecies_.empty()) {
+      auto itA = allSpecies.find(acceptorSpecies_);
+      if (itA != allSpecies.end())
+        acc = itA->second;
+    }
+    double scale = 0.0;
+    if (&speciesGF == itP->second)
+      scale = 1.0;
+    else if (&speciesGF == itM->second)
+      scale = -1.0;
+    else
+      return;
+    pairCoefs_.clear();
+    pairCoefs_.push_back(std::make_unique<PairRateCoef>(
+        *itM->second, *itP->second, acc, static_cast<double>(kPair_),
+        static_cast<double>(kDiss_), scale));
+    R.AddDomainIntegrator(new mfem::DomainLFIntegrator(*pairCoefs_.back()));
   }
 
   void assembleMass(mfem::BilinearForm &M) const override {
@@ -86,15 +189,50 @@ public:
   }
 #endif
 
-private:
+  /// Enable immobile pair species name (numSpecies becomes 2).
+  void setPairSpecies(std::string s) { pairSpecies_ = std::move(s); }
+
+protected:
   std::string species_;
+  std::string pairSpecies_;
+  std::string dopantSpecies_;
+  std::string acceptorSpecies_;
   NumericType D0_ = NumericType(1e-10);
   NumericType beta_ = NumericType(0);
   NumericType C_dopant_ = NumericType(0);
-  std::string dopantSpecies_;
+  NumericType z_ = NumericType(1);
+  NumericType Ex_ = NumericType(0), Ey_ = NumericType(0), Ez_ = NumericType(0);
+  bool driftEnabled_ = false;
+  NumericType kPair_ = NumericType(0);
+  NumericType kDiss_ = NumericType(0);
+
 #ifdef VIENNAPS_HAS_MFEM
-  mutable std::unique_ptr<ImpDCoef> stiffCoef_;
+  class PairRateCoef : public mfem::Coefficient {
+  public:
+    PairRateCoef(const mfem::GridFunction &mob, const mfem::GridFunction &pair,
+                 const mfem::GridFunction *acc, double kf, double kr,
+                 double scale)
+        : mob_(&mob), pair_(&pair), acc_(acc), kf_(kf), kr_(kr),
+          scale_(scale) {}
+    double Eval(mfem::ElementTransformation &T,
+                const mfem::IntegrationPoint &ip) override {
+      const double Cm = std::max(0.0, mob_->GetValue(T, ip));
+      const double Cp = std::max(0.0, pair_->GetValue(T, ip));
+      const double Ca = acc_ ? std::max(0.0, acc_->GetValue(T, ip)) : 1.0;
+      return scale_ * (kf_ * Cm * Ca - kr_ * Cp);
+    }
+
+  private:
+    const mfem::GridFunction *mob_;
+    const mfem::GridFunction *pair_;
+    const mfem::GridFunction *acc_;
+    double kf_, kr_, scale_;
+  };
+  mutable std::unique_ptr<ImpDCoef> dCoef_;
+  mutable std::unique_ptr<mfem::ConstantCoefficient> zeroCoef_;
   mutable std::unique_ptr<mfem::ConstantCoefficient> massCoef_;
+  mutable std::unique_ptr<mfem::VectorConstantCoefficient> driftVel_;
+  mutable std::vector<std::unique_ptr<PairRateCoef>> pairCoefs_;
 #endif
 };
 
