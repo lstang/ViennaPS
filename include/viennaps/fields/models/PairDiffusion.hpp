@@ -101,7 +101,13 @@ public:
   }
 #endif
 
-private:
+  /// Accessors for derived charged-pair FEM assembly.
+  const std::string &interstitialName() const { return I_; }
+  const std::string &dopantName() const { return dopant_; }
+  NumericType pairDiffusivity() const { return D_pair_; }
+  NumericType ciEqOverride() const { return Ceq_; }
+
+protected:
   std::string dopant_, I_;
   NumericType D_pair_ = NumericType(1e-13);
   NumericType Ceq_ = NumericType(0);

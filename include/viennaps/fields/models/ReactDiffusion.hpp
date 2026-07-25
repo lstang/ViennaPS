@@ -94,7 +94,10 @@ public:
   }
 #endif
 
-private:
+  const std::string &interstitialName() const { return I_; }
+  const std::string &vacancyName() const { return V_; }
+
+protected:
 #ifdef VIENNAPS_HAS_MFEM
   class ProductCoef : public mfem::Coefficient {
   public:

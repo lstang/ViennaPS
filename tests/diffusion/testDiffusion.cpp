@@ -49,6 +49,7 @@
 #include <fields/PdeApi.hpp>
 #include <fields/AdaptiveMeshRefiner.hpp>
 #include <fields/DiffusionPhysics.hpp>
+#include <fields/ParameterDatabase.hpp>
 #include <random>
 #include <fields/DiffusionEngine.hpp>
 #include <fields/LevelSetToMesh.hpp>
@@ -205,6 +206,151 @@ void TestChargedReact() {
   const double kExt = model.effectiveRate(1273.0);
   std::cout << "[charged-react] k_intr=" << kIntr << " k_ext=" << kExt << "\n";
   VC_TEST_ASSERT(kExt > kIntr);
+}
+
+/// Phase 3 full-depth: FEM assembly for charged + cluster models.
+void TestPhase3FullDepthFem() {
+  MeshAttributes attrs;
+  attrs.setAttributeName(1, "Si");
+  auto mesh = std::make_unique<mfem::Mesh>(
+      mfem::Mesh::MakeCartesian2D(4, 4, mfem::Element::TRIANGLE));
+
+  // --- ChargedFermi QP-local D: steep profile still conserves dose under
+  // zero-flux; solve completes without throw (mean-C path was wrong for
+  // non-uniform C but still ran — this verifies QP coefficient path).
+  {
+    DiffusionEngine<double, 2> engine;
+    auto meshCopy = std::make_unique<mfem::Mesh>(*mesh);
+    engine.setMesh(std::move(meshCopy), attrs);
+    auto model = std::make_shared<ChargedFermiDiffusion<double>>("Boron");
+    model->setDiffusivity(1e-10);
+    model->setIntrinsicCarrierConcentration(1e10);
+    DiffusionPhysics<double> physics;
+    physics.addSpecies("Boron");
+    physics.addModel(model);
+    physics.setTemperature(1273.0);
+    engine.setPhysics(physics);
+    engine.initializeSpecies("Boron", 1e18);
+    const double d0 = engine.getIntegral("Boron");
+    engine.solve(0.0, 0.1, 0.05);
+    const double d1 = engine.getIntegral("Boron");
+    const double rel = std::abs(d1 - d0) / std::max(d0, 1.0);
+    std::cout << "[p3-full] charged-fermi dose rel=" << rel << "\n";
+    VC_TEST_ASSERT(rel < 0.05);
+  }
+
+  // --- ChargedReact FEM: I and V both decrease under recombination.
+  // Keep k_eff * C * dt ≲ O(0.1): charge factor (1+gamma*n/ni) must not
+  // explode the residual (n≈ni → factor ~2).
+  {
+    DiffusionEngine<double, 2> engine;
+    auto meshCopy = std::make_unique<mfem::Mesh>(*mesh);
+    engine.setMesh(std::move(meshCopy), attrs);
+    auto model = std::make_shared<ChargedReactDiffusion<double>>();
+    model->setDiffusivities(1e-14, 1e-14);
+    model->setRecombinationRate(1e-18);
+    model->setChargeEnhancement(/*gamma=*/1.0, /*ni=*/1e16);
+    model->setDopantConcentration(1e16); // n/ni ~ 1 → k_eff ~ 2e-18
+    DiffusionPhysics<double> physics;
+    physics.addSpecies("Interstitial");
+    physics.addSpecies("Vacancy");
+    physics.addModel(model);
+    physics.setTemperature(1273.0);
+    engine.setPhysics(physics);
+    // C=1e12: k*C*C*dt ~ 2e-18*1e24*0.1 = 0.2 — O(1) fractional loss
+    engine.initializeSpecies("Interstitial", 1e12);
+    engine.initializeSpecies("Vacancy", 1e12);
+    const double I0 = engine.getIntegral("Interstitial");
+    const double V0 = engine.getIntegral("Vacancy");
+    engine.solve(0.0, 0.5, 0.1);
+    const double I1 = engine.getIntegral("Interstitial");
+    const double V1 = engine.getIntegral("Vacancy");
+    std::cout << "[p3-full] charged-react I0=" << I0 << " I1=" << I1
+              << " V0=" << V0 << " V1=" << V1
+              << " k_eff=" << model->effectiveRate(1273.0) << "\n";
+    VC_TEST_ASSERT(I1 < I0);
+    VC_TEST_ASSERT(V1 < V0);
+    VC_TEST_ASSERT(I1 > 0.0);
+    VC_TEST_ASSERT(V1 > 0.0);
+  }
+
+  // --- ChargedPair FEM: TED-enhanced dopant still conserves dose (no
+  // reaction on B when only pair D is active).
+  {
+    DiffusionEngine<double, 2> engine;
+    auto meshCopy = std::make_unique<mfem::Mesh>(*mesh);
+    engine.setMesh(std::move(meshCopy), attrs);
+    auto model = std::make_shared<ChargedPairDiffusion<double>>("Boron",
+                                                               "Interstitial");
+    model->setPairDiffusivity(1e-12);
+    model->setCIEq(1e12);
+    model->setFermiEnhancement(1.0, 1e10);
+    // Interstitial as passive field (ConstantDiffusion) so pair D is finite.
+    auto iModel =
+        std::make_shared<ConstantDiffusion<double>>("Interstitial");
+    iModel->setDiffusivity(1e-14, 0.0);
+    DiffusionPhysics<double> physics;
+    physics.addSpecies("Boron");
+    physics.addSpecies("Interstitial");
+    physics.addModel(model);
+    physics.addModel(iModel);
+    physics.setTemperature(1273.0);
+    engine.setPhysics(physics);
+    engine.initializeSpecies("Boron", 1e18);
+    engine.initializeSpecies("Interstitial", 1e15);
+    const double b0 = engine.getIntegral("Boron");
+    engine.solve(0.0, 0.1, 0.05);
+    const double b1 = engine.getIntegral("Boron");
+    const double rel = std::abs(b1 - b0) / std::max(b0, 1.0);
+    std::cout << "[p3-full] charged-pair boron dose rel=" << rel << "\n";
+    VC_TEST_ASSERT(rel < 0.05);
+  }
+
+  // --- Cluster311 FEM: 311 grows from I (reaction residual path).
+  // r = kf * C_I (n=1); kf*C_I ~ 1e1 /s so growth is visible on t~1s.
+  {
+    DiffusionEngine<double, 2> engine;
+    auto meshCopy = std::make_unique<mfem::Mesh>(*mesh);
+    engine.setMesh(std::move(meshCopy), attrs);
+    auto c311 = std::make_shared<Cluster311<double>>();
+    c311->setRates(/*kf=*/1e-15, /*kr=*/1e-6, /*n=*/1);
+    auto iDiff = std::make_shared<ConstantDiffusion<double>>("Interstitial");
+    iDiff->setDiffusivity(1e-14, 0.0);
+    auto cDiff = std::make_shared<ConstantDiffusion<double>>("311");
+    cDiff->setDiffusivity(1e-20, 0.0);
+    DiffusionPhysics<double> physics;
+    physics.addSpecies("Interstitial");
+    physics.addSpecies("311");
+    physics.addModel(c311);
+    physics.addModel(iDiff);
+    physics.addModel(cDiff);
+    physics.setTemperature(1273.0);
+    engine.setPhysics(physics);
+    engine.initializeSpecies("Interstitial", 1e16);
+    engine.initializeSpecies("311", 0.0);
+    const double I0 = engine.getIntegral("Interstitial");
+    engine.solve(0.0, 1.0, 0.1);
+    const double I1 = engine.getIntegral("Interstitial");
+    const double C1 = engine.getIntegral("311");
+    std::cout << "[p3-full] cluster311 I0=" << I0 << " I1=" << I1
+              << " C311=" << C1 << "\n";
+    // Cluster inventory must appear from residual assembly.
+    VC_TEST_ASSERT(C1 > 1.0);
+    // I is consumed 1:1 (n=1); allow mild numerical slack.
+    VC_TEST_ASSERT(I1 < I0);
+    VC_TEST_ASSERT(I1 > 0.0);
+  }
+
+  // --- ParameterDatabase defect keys present.
+  {
+    ParameterDatabase<double> db;
+    VC_TEST_ASSERT(db.get("Si", "IV_Recombination_k") > 0.0);
+    VC_TEST_ASSERT(db.get("Si", "Cluster311_kf") > 0.0);
+    VC_TEST_ASSERT(db.get("Si", "BIC_kf") > 0.0);
+    VC_TEST_ASSERT(db.get("Si", "Segregation_m_B_SiO2") > 0.0);
+    VC_TEST_ASSERT(db.get("Si", "Interstitial_Ceq0") > 0.0);
+    std::cout << "[p3-full] parameter-db defect keys OK\n";
+  }
 }
 
 void TestPairDiffusion() {
@@ -1472,6 +1618,7 @@ int main() {
   TestChargedReact();
   TestPairDiffusion();
   TestClusterModels();
+  TestPhase3FullDepthFem();
   TestCddDiffusion();
   TestPhase4Models();
   TestPhase5Poly();

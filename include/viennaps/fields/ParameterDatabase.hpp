@@ -117,6 +117,37 @@ private:
     // SPER / amorph
     setArrhenius("Si", "SPER_Velocity", 1e7, 2.7);
     setProperty("Si", "AmorphThreshold", 1e22);
+
+    // --- Defect / cluster / interface params (Phase 3 full-depth) ---
+    // Order-of-magnitude TCAD defaults; SProcess 311 / recombination chapters
+    // use calibrated tables — override via setProperty/setArrhenius for device work.
+    // Point-defect equilibria (also registered on MaterialPropertySystem defaults).
+    setProperty("Si", "Interstitial_Ceq0", NumericType(2.9e24));
+    setProperty("Si", "Interstitial_Ef", NumericType(3.46));
+    setProperty("Si", "Vacancy_Ceq0", NumericType(1.4e23));
+    setProperty("Si", "Vacancy_Ef", NumericType(2.6));
+    // Bulk I+V recombination rate scale [cm^3/s] at process T (test-friendly).
+    setProperty("Si", "IV_Recombination_k", NumericType(1e-15));
+    // {311} formation / dissociation (kf on C_I^n, kr linear).
+    setProperty("Si", "Cluster311_kf", NumericType(1e-20));
+    setProperty("Si", "Cluster311_kr", NumericType(1e-3));
+    setProperty("Si", "Cluster311_n", NumericType(2));
+    // Vacancy clusters
+    setProperty("Si", "VacancyCluster_kf", NumericType(1e-20));
+    setProperty("Si", "VacancyCluster_kr", NumericType(1e-3));
+    // BIC / impurity-interstitial clusters
+    setProperty("Si", "BIC_kf", NumericType(1e-18));
+    setProperty("Si", "BIC_kr", NumericType(1e-3));
+    // Dislocation loop growth from I supersaturation
+    setProperty("Si", "DislocationLoop_k", NumericType(1e12));
+    setProperty("Si", "DislocationLoop_p", NumericType(1));
+    // Segregation coefficient m = C_mat2/C_mat1 at Si/SiO2 (B-like default)
+    setProperty("Si", "Segregation_m_B_SiO2", NumericType(0.1));
+    setProperty("SiO2", "Segregation_m_B_Si", NumericType(10.0));
+    // Dose-loss / surface transfer velocity h [cm/s] placeholder
+    setProperty("Si", "DoseLoss_h_Boron", NumericType(1e-4));
+    // Pair diffusivity scale for TED (cm^2/s) when not taken from Arrhenius D
+    setProperty("Si", "Pair_D_Boron", NumericType(1e-13));
   }
 };
 

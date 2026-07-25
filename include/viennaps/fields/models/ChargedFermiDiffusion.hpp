@@ -10,8 +10,11 @@
 /// E_F is estimated from charge neutrality for n-type doping:
 ///   n ≈ max(C, ni), p = ni^2/n, and (E_F - E_i)/kT ≈ ln(n/ni).
 ///
-/// Default charge states z ∈ {-1, 0, +1} with equal intrinsic D^z = D0/3
-/// so that D_eff → D0 at C = ni (intrinsic limit).
+/// Default charge states z ∈ {-1, 0, +1} with unequal relative D^z so that
+/// shifting f^z with Fermi level changes D_eff.
+///
+/// FEM: quadrature-point D via ChargedFermiDCoef (gap analysis: was mean-C
+/// Picard only). Mirrors FermiDiffusion::FermiDCoef pattern.
 
 #include "../DiffusionModel.hpp"
 #include "../IntrinsicCarrier.hpp"
@@ -78,7 +81,8 @@ public:
 
   /// Effective diffusivity at concentration C and temperature T.
   NumericType getDiffusivity(NumericType C, NumericType T) const {
-    const NumericType ni = (ni_ > 0) ? ni_ : IntrinsicCarrier<NumericType>{}.ni(T, "Si");
+    const NumericType ni =
+        (ni_ > 0) ? ni_ : IntrinsicCarrier<NumericType>{}.ni(T, "Si");
     const NumericType n = std::max(C, ni);
     // (E_F - E_i)/kT ≈ ln(n/ni) for n-type non-degenerate approx.
     const NumericType eta =
@@ -106,20 +110,39 @@ public:
   void setApplicableAttributes(std::vector<int> a) { attrs_ = std::move(a); }
 
 #ifdef VIENNAPS_HAS_MFEM
+  /// D(x) from local concentration at each quadrature point (not mean C).
+  class ChargedFermiDCoef : public mfem::Coefficient {
+  public:
+    ChargedFermiDCoef(const ChargedFermiDiffusion *model, double T)
+        : model_(model), T_(T), conc_(nullptr) {}
+
+    void SetConcentrationField(const mfem::GridFunction *c) { conc_ = c; }
+
+    double Eval(mfem::ElementTransformation &T,
+                const mfem::IntegrationPoint &ip) override {
+      double C = 0.0;
+      if (conc_)
+        C = conc_->GetValue(T, ip);
+      return static_cast<double>(
+          model_->getDiffusivity(static_cast<NumericType>(C),
+                                 static_cast<NumericType>(T_)));
+    }
+
+  private:
+    const ChargedFermiDiffusion *model_;
+    double T_;
+    const mfem::GridFunction *conc_;
+  };
+
   void assembleStiffness(
       mfem::BilinearForm &K, const mfem::GridFunction &speciesGF,
       const std::map<std::string, mfem::GridFunction *> & /*allSpecies*/,
       const mfem::GridFunction * /*temp*/) const override {
-    // Picard: lag D from a representative field value (mean concentration).
-    // Full quadrature-dependent D is available via getDiffusivity; a dedicated
-    // Coefficient can replace this when engine Newton is wired (Phase 2+).
-    const double Cmean = speciesGF.Size() > 0
-                             ? speciesGF.Sum() / speciesGF.Size()
-                             : 0.0;
-    const double Deff =
-        static_cast<double>(getDiffusivity(static_cast<NumericType>(Cmean),
-                                           this->T_));
-    stiffCoef_ = std::make_unique<mfem::ConstantCoefficient>(Deff);
+    // QP-local D(C(x)): lags concentration field (Picard) but evaluates at
+    // every integration point — required for steep profiles (gap analysis).
+    stiffCoef_ = std::make_unique<ChargedFermiDCoef>(
+        this, static_cast<double>(this->T_));
+    stiffCoef_->SetConcentrationField(&speciesGF);
     K.AddDomainIntegrator(new mfem::DiffusionIntegrator(*stiffCoef_));
   }
 
@@ -139,7 +162,7 @@ private:
   bool customDz_ = false;
   std::vector<int> attrs_;
 #ifdef VIENNAPS_HAS_MFEM
-  mutable std::unique_ptr<mfem::ConstantCoefficient> stiffCoef_;
+  mutable std::unique_ptr<ChargedFermiDCoef> stiffCoef_;
   mutable std::unique_ptr<mfem::ConstantCoefficient> massCoef_;
 #endif
 };
