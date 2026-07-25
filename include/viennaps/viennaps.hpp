@@ -72,6 +72,7 @@
 #include <fields/MeshAttributes.hpp>
 #include <fields/DiffusionModel.hpp>
 #include <fields/DiffusionPhysics.hpp>
+#include <fields/IntrinsicCarrier.hpp>
 #include <fields/models/ConstantDiffusion.hpp>
 #ifdef VIENNAPS_HAS_MFEM
 #include <fields/LevelSetToMesh.hpp>

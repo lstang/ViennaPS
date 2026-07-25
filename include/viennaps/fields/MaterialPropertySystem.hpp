@@ -133,6 +133,15 @@ private:
     setProperty("Si", "Interstitial_Ceq", 1e15);
     setProperty("Si", "Vacancy_Ceq",      1e15);
 
+    // Band-structure parameters for IntrinsicCarrier (Phase 2).
+    // Temperature-independent constants are sufficient for Phase 2;
+    // N_c, N_v ~ T^{3/2} can be added later if needed.
+    // Typical Si at 300 K: N_c ~ 2.8e19, N_v ~ 1.04e19 cm^-3, E_g ~ 1.12 eV.
+    // n_i(300) = sqrt(Nc*Nv)*exp(-Eg/(2*kB*T)) ~ 6.7e9 ≈ 1e10 cm^-3.
+    setProperty("Si", "Nc", NumericType(2.8e19));
+    setProperty("Si", "Nv", NumericType(1.04e19));
+    setProperty("Si", "Eg", NumericType(1.12));
+
     // Oxide
     setArrhenius("SiO2", "Boron_D",  3.0e-3, 3.5);
     setArrhenius("SiO2", "Interstitial_D",  0.05, 2.0);

@@ -3,6 +3,7 @@
 #include <memory>
 #include <set>
 #include <vcTestAsserts.hpp>
+#include <fields/IntrinsicCarrier.hpp>
 #include <fields/MeshAttributes.hpp>
 #include <fields/DiffusionModel.hpp>
 #include <fields/models/ConstantDiffusion.hpp>
@@ -12,8 +13,55 @@
 #include <geometries/psMakePlane.hpp>
 #include <psDomain.hpp>
 
-#ifdef VIENNAPS_HAS_MFEM
 using namespace viennaps;
+
+// Pure-math calculator — no MFEM required.
+void TestIntrinsicCarrier() {
+  IntrinsicCarrier<double> ic;
+
+  // ni(300 K, Si) ~ 1e10 cm^-3
+  const double ni300 = ic.ni(300.0, "Si");
+  std::cout << "[intrinsic-carrier] ni(300, Si) = " << ni300 << "\n";
+  VC_TEST_ASSERT(std::abs(ni300 - 1e10) / 1e10 < 0.5); // within 50%
+
+  // ni increases with temperature
+  const double ni1273 = ic.ni(1273.0, "Si");
+  std::cout << "[intrinsic-carrier] ni(1273, Si) = " << ni1273 << "\n";
+  VC_TEST_ASSERT(ni1273 > ni300);
+  VC_TEST_ASSERT(ni1273 > 1e10);
+
+  // Boltzmann n-type: C = 1e17 >> ni(300) => n ~ C
+  const double nBoltz =
+      ic.electronConcentration(1e17, 300.0, "Si", /*useFermiDirac=*/false);
+  std::cout << "[intrinsic-carrier] n_boltz(1e17, 300) = " << nBoltz << "\n";
+  VC_TEST_ASSERT(std::abs(nBoltz - 1e17) / 1e17 < 1e-6);
+
+  // Degenerate doping: Fermi-Dirac activity γ < 1 reduces free-carrier
+  // estimate relative to pure Boltzmann statistics.
+  const double Cdeg = 1e21;
+  const double nB =
+      ic.electronConcentration(Cdeg, 300.0, "Si", /*useFermiDirac=*/false);
+  const double nFD =
+      ic.electronConcentration(Cdeg, 300.0, "Si", /*useFermiDirac=*/true);
+  std::cout << "[intrinsic-carrier] n_boltz(1e21) = " << nB
+            << " n_FD(1e21) = " << nFD << "\n";
+  VC_TEST_ASSERT(nFD < nB);
+
+  // activity hook: Boltzmann => 1, Fermi-Dirac at degenerate C => (0,1)
+  const double gB = ic.activity(Cdeg, 300.0, "Si",
+                                CarrierStatistics::Boltzmann);
+  const double gFD = ic.activity(Cdeg, 300.0, "Si",
+                                 CarrierStatistics::FermiDirac);
+  VC_TEST_ASSERT(std::abs(gB - 1.0) < 1e-12);
+  VC_TEST_ASSERT(gFD > 0.0 && gFD < 1.0);
+
+  // holeConcentration: p = ni^2 / n
+  const double p = ic.holeConcentration(1e17, 300.0, "Si");
+  const double expectedP = (ni300 * ni300) / nBoltz;
+  VC_TEST_ASSERT(std::abs(p - expectedP) / expectedP < 1e-6);
+}
+
+#ifdef VIENNAPS_HAS_MFEM
 
 void TestMeshAttributes() {
   MeshAttributes attrs;
@@ -505,6 +553,7 @@ void TestMultiSpeciesSmoke() {
 }
 
 int main() {
+  TestIntrinsicCarrier();
   TestMeshAttributes();
   TestDiffusionModelInterface();
   TestConstantDiffusion();
@@ -522,7 +571,8 @@ int main() {
 }
 #else
 int main() {
-  std::cout << "MFEM not available, skipping.\n";
+  TestIntrinsicCarrier();
+  std::cout << "MFEM not available, skipping MFEM diffusion tests.\n";
   return 0;
 }
 #endif
