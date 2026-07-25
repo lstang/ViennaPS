@@ -27,3 +27,14 @@ output/
 modeldb/
 _viennals/
 3rdparty/
+
+# Local reference manuals (proprietary Silvaco/Synopsys docs, not for commit)
+Manual/
+
+# Build/run scratch logs
+*.log
+configure_log.txt
+last_configure.log
+
+# uv lockfile (keep out of VCS until pyproject workspace is finalized)
+uv.lock
