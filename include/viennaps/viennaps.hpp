@@ -92,6 +92,14 @@
 #include <fields/models/ImpurityCluster.hpp>
 #include <fields/models/DislocationLoop.hpp>
 #include <fields/models/CddDiffusion.hpp>
+#include <fields/models/OedSource.hpp>
+#include <fields/models/TedInitializer.hpp>
+#include <fields/models/DoseLossBC.hpp>
+#include <fields/models/ChargedEquilibriumDiffusion.hpp>
+#include <fields/models/CarbonDiffusion.hpp>
+#include <fields/models/NitrogenDiffusion.hpp>
+#include <fields/models/CopperDiffusion.hpp>
+#include <fields/models/MobileImpurity.hpp>
 #ifdef VIENNAPS_HAS_MFEM
 #include <fields/LevelSetToMesh.hpp>
 #include <fields/DiffusionEngine.hpp>

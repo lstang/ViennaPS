@@ -25,6 +25,14 @@
 #include <fields/models/ImpurityCluster.hpp>
 #include <fields/models/DislocationLoop.hpp>
 #include <fields/models/CddDiffusion.hpp>
+#include <fields/models/OedSource.hpp>
+#include <fields/models/TedInitializer.hpp>
+#include <fields/models/DoseLossBC.hpp>
+#include <fields/models/ChargedEquilibriumDiffusion.hpp>
+#include <fields/models/CarbonDiffusion.hpp>
+#include <fields/models/NitrogenDiffusion.hpp>
+#include <fields/models/CopperDiffusion.hpp>
+#include <fields/models/MobileImpurity.hpp>
 #include <fields/DiffusionPhysics.hpp>
 #include <fields/DiffusionEngine.hpp>
 #include <fields/LevelSetToMesh.hpp>
@@ -245,6 +253,66 @@ void TestCddDiffusion() {
   VC_TEST_ASSERT(!physics.shouldCreateTimeDerivative("Boron", *cddModel));
   std::cout << "[cdd] TED ratio=" << D_ted / D_base
             << " double-dC/dt gate OK\n";
+}
+
+void TestPhase4Models() {
+  // OED injection increases C_I at interface bin.
+  OedSource<double> oed;
+  oed.setInjectionEfficiency(0.01);
+  oed.setOxidationRate(1e-8); // cm/s
+  std::vector<double> CI(5, 0.0);
+  oed.applyInjection(CI, /*bin=*/0, /*dx=*/1e-6, /*dt=*/1.0);
+  VC_TEST_ASSERT(CI[0] > 0.0);
+
+  // TED integral-preserving projection: dose matches on coarse & fine.
+  typename TedInitializer<double>::DamageProfile src;
+  src.values = {1e15, 2e15, 1e15};
+  const double dxS = 1e-6;
+  const double dose0 = TedInitializer<double>::totalDose(src.values, dxS);
+  std::vector<double> coarse(4, 0.0), fine(16, 0.0);
+  TedInitializer<double>::projectIntegralPreserving(src, dxS, coarse, dxS);
+  TedInitializer<double>::projectIntegralPreserving(src, dxS, fine, dxS / 4);
+  const double dC = TedInitializer<double>::totalDose(coarse, dxS);
+  const double dF = TedInitializer<double>::totalDose(fine, dxS / 4);
+  VC_TEST_ASSERT(std::abs(dC - dose0) / dose0 < 0.001);
+  VC_TEST_ASSERT(std::abs(dF - dose0) / dose0 < 0.001);
+
+  // Dose loss: h>0 decreases dose; h=0 conserves.
+  DoseLossBC<double> loss("Boron");
+  loss.setTransferCoefficient(1e-4);
+  double C = 1e18, dose = 1e18;
+  loss.applyLossStep(C, dose, /*area=*/1.0, /*dt=*/1.0);
+  VC_TEST_ASSERT(dose < 1e18);
+
+  DoseLossBC<double> noLoss("Boron");
+  noLoss.setTransferCoefficient(0.0);
+  double C2 = 1e18, dose2 = 1e18;
+  noLoss.applyLossStep(C2, dose2, 1.0, 1.0);
+  VC_TEST_ASSERT(std::abs(dose2 - 1e18) < 1e-6);
+
+  ChargedEquilibriumDiffusion<double> ceq;
+  ceq.setD0(1e-14);
+  VC_TEST_ASSERT(ceq.getDiffusivity(1e20, 1273.0) >
+                 ceq.getDiffusivity(1e15, 1273.0));
+
+  CarbonDiffusion<double> carb;
+  std::vector<double> Cc(1, 1e18), Ii(1, 1e18), CI2(1, 0.0);
+  carb.applyTrapStep(Cc, Ii, CI2, 1.0);
+  VC_TEST_ASSERT(CI2[0] > 0.0 && Ii[0] < 1e18);
+
+  NitrogenDiffusion<double> nitro;
+  VC_TEST_ASSERT(nitro.speciesNames()[0] == "Nitrogen");
+
+  CopperDiffusion<double> cu;
+  VC_TEST_ASSERT(cu.getDiffusivity(1e20, 1273.0) >
+                 cu.getDiffusivity(0.0, 1273.0));
+
+  MobileImpurity<double> mob("Sodium");
+  mob.setD0(1e-8);
+  VC_TEST_ASSERT(mob.getDiffusivity(0, 1273.0) == 1e-8);
+
+  std::cout << "[phase4] OED/TED/DoseLoss/impurities OK dose0=" << dose0
+            << " coarse=" << dC << " fine=" << dF << "\n";
 }
 
 void TestFermiDiffusion() {
@@ -876,6 +944,7 @@ int main() {
   TestPairDiffusion();
   TestClusterModels();
   TestCddDiffusion();
+  TestPhase4Models();
   TestFermiDiffusion();
   TestChargedFermi();
   TestSolidSolubility();
