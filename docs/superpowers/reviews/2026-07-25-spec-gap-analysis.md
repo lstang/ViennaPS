@@ -29,7 +29,7 @@ Legend:
 | Feature | Status | Notes |
 |---|---|---|
 | LevelSetToMesh 2D/3D Cartesian | ✅ | Conforming cut-cell still stretch |
-| MovingMesh relabel/ALE/Laplacian/remesh trigger | ✅ | |
+| MovingMesh relabel/ALE/Laplacian/remesh trigger | ✅ | Relabel + ALE displacement + Laplacian smoothing implemented; quality-triggered remesh is the follow-up marker |
 | SolutionTransfer L2 Mx=b | ✅ | |
 | AdaptiveMeshRefiner mark/refine/ZZ/threshold/derefine API | ✅ | NC derefine no-op on serial Cartesian |
 | Runtime AMR in solve | ✅ | Mark-count mid-solve (Euler path); static refine offline |
@@ -102,3 +102,24 @@ Legend:
 ---
 
 *Living ledger. Stretch ❌ rows are intentionally out of the production parity claim.*
+
+---
+
+## Audit trail (2026-07-25 review cycles)
+
+Three code-review passes against the phase plans ran on `zcode`. Findings and the bugs they caught:
+
+**Pass 1** (`c475863`, review at `2026-07-25-phases3-11-fulldepth-review.md`): 4 confirmed closures, 7 partial, 1 false closure (Copper drift), 3 KMC sub-claim false closures. Verdict: not ready.
+
+**Pass 2 / fix `ac18975`**: addressed C1-C3, I1-I5, M1-M2. 7 of 11 genuinely fixed.
+
+**Pass 3 / this audit**: verified `ac18975` against source, caught two bugs the fix introduced or missed:
+
+| Bug | Severity | Where | Resolution |
+|---|---|---|---|
+| **Drift sign inverted** | Critical (physics) | `MobileImpurity.hpp` set `a = −D·bNP·E`; Nernst-Planck continuity requires `a = +D·bNP·E` (verified via IBP identity + MFEM `ConvectionIntegrator` assembles `(a·∇u, v)`). Silent: the existing drift test used a uniform IC and couldn't see direction. | Sign corrected; new E2 test asserts centroid moves +x for z=+1, E>0 (observed `delta=+2.67e-7`, was `−2.67e-7` before fix). |
+| **E1: SiGe `||` vs `&&`** | Critical (silent half-model) | `SiGeDiffusion.hpp:97, 127`. With `useDefectMediated_ && (CI || CV)`, registering only Vacancy silently dropped the I term from `D_inter = D_I*·(C_I/C_I*) + D_V*·(C_V/C_V*)`. | `&&` at both sites + `MFEM_VERIFY` fail-loud when `useDefectMediated_` set but a field is missing. |
+
+Both fixed in the same commit as this audit. New physics-verification tests added: Copper drift direction (E2), Copper pairing mass balance (E3, mobile 1e18→9.5e17, pair 0→5e16, mass conserved 1e18). `testDiffusion` Release: **All diffusion tests passed.**
+
+**Still open (carry into next cycle):** KMC event rebuild still O(N) per step (only selection is O(log N)); KMC diamond lattice is body-diagonal stencil, not true 2×FCC coordinates; FEM defect-mediated SiGe branch untested in run (formula + E1 fix verified by reading); KMC dissociation has no test; `MobileImpurity` is `std::string`-keyed, not the `SpeciesTag` template P4 Task 8 specifies; PDE API still ignores PdeIC on `applyTo`.

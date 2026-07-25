@@ -125,22 +125,29 @@ public:
         static_cast<double>(C_dopant_));
     K.AddDomainIntegrator(new mfem::DiffusionIntegrator(*dCoef_));
 
-    // Drift: (a·∇u, v) with a = −D·(q/kT)·z·E  so dC/dt includes
-    // +div(D z (q/kT) C E) term via weak form (see Phase 4 Task 7).
+    // Nernst-Planck drift: J = -D(grad C + (q/kT) z C E). Continuity gives
+    //   dC/dt = div(D grad C) - div(C v_drift),  v_drift = (D q/kT) z E.
+    // Weak form (zero boundary flux):
+    //   (dC/dt,v) + (D grad C, grad v) - (C v_drift, grad v) = 0.
+    // Using the IBP identity (a.grad u, v) = -(a u, grad v), the drift term
+    // -(C v_drift, grad v) = (a grad u, v) requires a = +v_drift = +D bNP E.
+    // (Earlier code had a = -D bNP E, which inverted the drift direction;
+    //  caught by the copper-drift-direction test.)
     if (driftEnabled_) {
       const double Drep = static_cast<double>(
           getDiffusivity(C_dopant_, this->T_));
       const double bNP =
           static_cast<double>(nernstBeta(this->T_));
-      // a = −D * bNP * E  for residual (dC/dt,v) + (D∇C,∇v) + (a·∇C, v)=0
-      // matching dC/dt = div(D∇C) + div(D bNP C E) with constant E.
+      // a = +D * bNP * E  (positive z, positive E => drift along +E).
       mfem::Vector a(3);
       a = 0.0;
-      a(0) = -Drep * bNP * static_cast<double>(Ex_);
-      a(1) = -Drep * bNP * static_cast<double>(Ey_);
+      a(0) = Drep * bNP * static_cast<double>(Ex_);
+      a(1) = Drep * bNP * static_cast<double>(Ey_);
       if (a.Size() > 2)
-        a(2) = -Drep * bNP * static_cast<double>(Ez_);
-      // ConvectionIntegrator expects VectorCoefficient of mesh dimension.
+        a(2) = Drep * bNP * static_cast<double>(Ez_);
+      // ConvectionIntegrator assembles (a . grad u, v); engine form is
+      // M du/dt + K u = 0, so this contributes +a to the advection velocity
+      // (Cu+ with z>0, E>0 moves +x, as physically expected).
       const int sdim =
           K.FESpace() ? K.FESpace()->GetMesh()->SpaceDimension() : 2;
       mfem::Vector aUse(sdim);

@@ -94,7 +94,11 @@ public:
         cI = std::max(0.0, CI_->GetValue(T, ip));
       if (CV_)
         cV = std::max(0.0, CV_->GetValue(T, ip));
-      if (CI_ || CV_) {
+      // Defect-mediated D_inter is a SUM of I and V contributions
+      // (SProcess 26790-26850). Running with only one field registered
+      // silently drops the other term — require both. Caller-side
+      // assembleStiffness guards entry; this is defense in depth.
+      if (CI_ && CV_) {
         return static_cast<double>(
             m_->interdiffusivity(static_cast<NumericType>(cI),
                                  static_cast<NumericType>(cV),
@@ -124,11 +128,23 @@ public:
     if (itV != allSpecies.end())
       CV = itV->second;
 
-    if (useDefectMediated_ && (CI || CV)) {
+    // Defect-mediated D_inter requires BOTH C_I and C_V (SProcess 26790-26850);
+    // the formula is a sum, so allowing only one field silently drops a term.
+    // Fall back to Arrhenius if either is missing — caller can detect via the
+    // returned fallback flag or by registering both species up front.
+    if (useDefectMediated_ && CI && CV) {
       defectCoef_ = std::make_unique<DefectDCoef>(
           this, static_cast<double>(this->T_), CI, CV);
       K.AddDomainIntegrator(new mfem::DiffusionIntegrator(*defectCoef_));
     } else {
+      if (useDefectMediated_ && (CI == nullptr || CV == nullptr)) {
+        // Fail-loud: user asked for defect-mediated but did not register both
+        // Interstitial and Vacancy species. Falling back to Arrhenius would
+        // hide a silent half-model regression.
+        MFEM_VERIFY(false, "SiGeDiffusion: useDefectMediated requested but "
+                           "both Interstitial and Vacancy GridFunctions must "
+                           "be registered in the engine before assembly.");
+      }
       stiffCoef_ = std::make_unique<mfem::ConstantCoefficient>(
           static_cast<double>(geDiffusivity(this->T_)));
       K.AddDomainIntegrator(new mfem::DiffusionIntegrator(*stiffCoef_));

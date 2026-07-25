@@ -1,5 +1,6 @@
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <set>
 #include <vcTestAsserts.hpp>
@@ -1547,6 +1548,139 @@ void TestPhase4FullDepthFem() {
     // Closed domain: dose conserved even with drift (no sink).
     VC_TEST_ASSERT(std::abs(c1 - c0) / std::max(c0, 1.0) < 0.05);
     VC_TEST_ASSERT(c1 > 0.0);
+  }
+
+  // E2: Copper drift DIRECTION. Non-uniform IC peaked at x=x_min, E along +x,
+  // z=+1 (Cu+). Nernst-Planck flux J = -D(grad C + (q/kT) z C E); with E>0 the
+  // advection velocity D(q/kT)zE > 0, so the centroid must move +x. This is the
+  // direction-sensitive check the prior weak test could not make.
+  {
+    DiffusionEngine<double, 2> engine;
+    // Use a longer mesh so centroid shift is resolvable above round-off.
+    auto meshE2 = std::make_unique<mfem::Mesh>(
+        mfem::Mesh::MakeCartesian2D(16, 4, mfem::Element::TRIANGLE));
+    MeshAttributes attrsE2;
+    attrsE2.setAttributeName(1, "Si");
+    engine.setMesh(std::move(meshE2), attrsE2);
+    auto cu = std::make_shared<CopperDiffusion<double>>();
+    cu->setD0(1e-10);
+    cu->setIonPairing(0.0);
+    cu->setChargeState(1.0);
+    // Large E to make advection dominate diffusion over the short solve.
+    cu->setElectricField(1e5, 0.0);
+    DiffusionPhysics<double> physics;
+    physics.addSpecies("Copper");
+    physics.addModel(cu);
+    physics.setTemperature(1273.0);
+    engine.setPhysics(physics);
+
+    // Non-uniform IC: spike at x ~ 0 (left edge), zero elsewhere.
+    engine.initializeSpecies("Copper", 0.0);
+    mfem::GridFunction &gf =
+        const_cast<mfem::GridFunction &>(engine.getSolution("Copper"));
+    mfem::Mesh *m = gf.FESpace()->GetMesh();
+    double xMin = std::numeric_limits<double>::max();
+    double xMax = std::numeric_limits<double>::lowest();
+    for (int i = 0; i < m->GetNV(); ++i) {
+      xMin = std::min(xMin, m->GetVertex(i)[0]);
+      xMax = std::max(xMax, m->GetVertex(i)[0]);
+    }
+    // Spike at left edge (x close to xMin). Use a band of width dx.
+    const double dx = (xMax - xMin) / 16.0;
+    int nSet = 0;
+    for (int i = 0; i < gf.Size(); ++i) {
+      double xv[2] = {0.0, 0.0};
+      gf.FESpace()->GetMesh()->GetNode(i, xv);
+      if (xv[0] <= xMin + 0.5 * dx) {
+        gf[i] = 1.0;
+        ++nSet;
+      }
+    }
+    std::cout << "[p4-full] copper-drift-IC xMin=" << xMin << " xMax=" << xMax
+              << " dx=" << dx << " nDoF=" << gf.Size() << " nSet=" << nSet
+              << "\n";
+
+    // Centroid of the distribution (mass-weighted mean x).
+    auto computeCentroidX = [&gf]() -> double {
+      double num = 0.0, den = 0.0;
+      for (int i = 0; i < gf.Size(); ++i) {
+        double xv[2] = {0.0, 0.0};
+        gf.FESpace()->GetMesh()->GetNode(i, xv);
+        num += xv[0] * gf[i];
+        den += gf[i];
+      }
+      return den > 0.0 ? num / den : 0.0;
+    };
+    const double xCentroid0 = computeCentroidX();
+
+    engine.solve(0.0, 0.01, 0.005);
+
+    const double xCentroid1 = computeCentroidX();
+    std::cout << "[p4-full] copper-drift-direction xCentroid0=" << xCentroid0
+              << " xCentroid1=" << xCentroid1 << " delta=" << (xCentroid1 - xCentroid0)
+              << "\n";
+    // Drift must move the centroid +x (toward larger x) for z=+1, E>0.
+    // A sign error in the drift integrator would move it -x (or zero).
+    // Magnitude is small (~1e-7 for these parameters) but unambiguously
+    // above round-off (~1e-15); the sign is the physically meaningful check.
+    VC_TEST_ASSERT(xCentroid1 > xCentroid0);
+    VC_TEST_ASSERT(xCentroid1 - xCentroid0 > 1e-8);
+  }
+
+  // E3: Copper + acceptor pairing. Cu + A -> CuA (immobile).
+  // Mobile Cu must drop, CuA must appear, and mass conservation
+  // (delta_Cu_mobile + delta_CuA ~ 0) must hold to 0.1%.
+  {
+    DiffusionEngine<double, 2> engine;
+    engine.setMesh(std::make_unique<mfem::Mesh>(*mesh), attrs);
+    auto cu = std::make_shared<CopperDiffusion<double>>();
+    cu->setD0(1e-10);
+    cu->setIonPairing(0.0);
+    cu->setChargeState(0.0); // disable drift for this test
+    cu->setDriftEnabled(false);
+    cu->enablePairSpecies("CopperPair", "Boron");
+    // Moderate rates + small dt so the implicit-Euler pairing step does not
+    // overshoot mobile Cu below zero (the engine does not yet clip per-step
+    // reaction updates to non-negative values).
+    cu->setPairingRates(/*kPair*/ 1e-20, /*kDiss*/ 1e-2);
+    // Boron needs a (trivial) diffusion model so its K matrix is non-empty;
+    // otherwise the engine cannot assemble the system for that species.
+    auto bDiff = std::make_shared<ConstantDiffusion<double>>("Boron");
+    bDiff->setDiffusivity(1e-14, 0.0);
+    DiffusionPhysics<double> physics;
+    physics.addSpecies("Copper");
+    physics.addSpecies("CopperPair");
+    physics.addSpecies("Boron");
+    physics.addModel(cu);
+    physics.addModel(bDiff);
+    physics.setTemperature(1273.0);
+    engine.setPhysics(physics);
+    engine.initializeSpecies("Copper", 1e18);
+    engine.initializeSpecies("CopperPair", 0.0);
+    engine.initializeSpecies("Boron", 1e19);
+
+    const double cuMobile0 = engine.getIntegral("Copper");
+    const double cuPair0 = engine.getIntegral("CopperPair");
+    const double inv0 = cuMobile0 + cuPair0;
+
+    engine.solve(0.0, 0.5, 0.01);
+
+    const double cuMobile1 = engine.getIntegral("Copper");
+    const double cuPair1 = engine.getIntegral("CopperPair");
+    const double inv1 = cuMobile1 + cuPair1;
+    std::cout << "[p4-full] copper-pairing mobile0=" << cuMobile0
+              << " mobile1=" << cuMobile1 << " pair0=" << cuPair0
+              << " pair1=" << cuPair1 << " inv0=" << inv0 << " inv1=" << inv1
+              << "\n";
+    // Mobile Cu drops as CuA forms.
+    VC_TEST_ASSERT(cuMobile1 < cuMobile0);
+    // Mobile Cu must remain non-negative (implicit-Euler should not overshoot
+    // a sink term below zero with a small enough dt).
+    VC_TEST_ASSERT(cuMobile1 >= 0.0);
+    // Pair species appears (was zero).
+    VC_TEST_ASSERT(cuPair1 > 0.0);
+    // Mass conservation: Cu_mobile + CuA preserved to 0.1%.
+    VC_TEST_ASSERT(std::abs(inv1 - inv0) / std::max(inv0, 1.0) < 1e-3);
   }
 
   // ChargedEquilibrium FEM dose conservation.
