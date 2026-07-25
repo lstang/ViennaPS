@@ -1,29 +1,45 @@
-# ADR-0004: Moving-Interface Idiom for Si/SiO2 Oxidation
+# ADR-0004: Moving Si/SiO2 Interface for OED
 
 **Status:** Accepted  
 **Date:** 2026-07-25  
-**Context:** Phase 4 Task 0 — OED interstitial injection tracks a moving Si/SiO2 boundary.
+**Phase:** 4 Task 0
+
+## Context
+
+Oxidation-enhanced diffusion (OED) injects interstitials at a **moving** Si/SiO2
+boundary. The Phase 4 plan requires choosing one of three MOOSE-verified idioms.
 
 ## Decision
 
-**Default idiom: (A) subdomain relabeling**, mirroring MOOSE
-`ElementSubdomainModifierBase` / `ThresholdElementSubdomainModifier`.
+**Default idiom: (A) Element subdomain relabeling**
 
-- Elements flip Si → SiO2 as oxide grows.
-- Moving boundary is tracked via material-attribute pairs (attribute map on
-  `MeshAttributes`), not a fixed Neumann segment.
-- Field reinitialization on newly oxidized elements uses a
-  nearest-neighbor / polynomial-nearby strategy (MOOSE
-  `ReinitStrategy::POLYNOMIAL_NEARBY`).
+Mirror MOOSE `ElementSubdomainModifierBase` / `ThresholdElementSubdomainModifier`:
 
-**Secondary:** free-surface ALE (idiom C, `INSADDisplaceBoundaryBC` pattern)
-may be layered later for smooth oxide free-surface motion. Idiom B (full
-MFEM mesh displace) is reserved for small smooth growth without topology
-change.
+- Elements flip attribute Si → SiO2 as oxidation progress crosses a threshold.
+- Interface boundary is the face set between the two attributes.
+- Field reinit on newly oxidized elements: polynomial neighbor extrapolation
+  (MOOSE `POLYNOMIAL_NEARBY`) — Phase 4 implements a simplified global flip
+  in `OedSource::relabelOxidized` for unit tests; production should flip only
+  interface-adjacent elements.
+
+**Secondary idiom: (C) Boundary-node ALE** for the free oxide surface when
+smooth surface motion is needed without topology change
+(`INSADDisplaceBoundaryBC` pattern).
+
+**Not default: (B) MFEM ALE mesh displace** — reserved for small growth without
+element inversion; harder to combine with sharp material change.
 
 ## Consequences
 
-- `OedSource` queries the current interface faces each step from mesh
-  attributes (not a static boundary id).
-- Full mesh topology updates remain out of scope for the Phase 4 unit-test
-  skeleton; host-side flux APIs are provided first.
+- `OedSource::registerWith` applies Neumann flux on the current interface
+  boundary attribute string.
+- `OedSource::assembleReaction` provides a uniform volumetric flux proxy when
+  mesh boundary attrs are not yet wired (engine tests).
+- Full ALE + L2 solution transfer across remesh is Phase 11 / MovingMeshHandler
+  follow-up (gap analysis high priority).
+
+## References
+
+- MOOSE `framework/include/meshmodifiers/ElementSubdomainModifierBase.h`
+- Phase 4 plan Task 0
+- SProcess UG: Emulated Oxidation-Enhanced Diffusion

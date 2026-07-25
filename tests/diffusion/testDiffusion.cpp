@@ -989,6 +989,96 @@ void TestPhase4Models() {
             << " coarse=" << dC << " fine=" << dF << "\n";
 }
 
+/// Phase 4 full-depth: FEM assembly for OED residual, C trapping, equil. D.
+void TestPhase4FullDepthFem() {
+  MeshAttributes attrs;
+  attrs.setAttributeName(1, "Si");
+  auto mesh = std::make_unique<mfem::Mesh>(
+      mfem::Mesh::MakeCartesian2D(4, 4, mfem::Element::TRIANGLE));
+
+  // OED volumetric injection increases interstitial inventory.
+  {
+    DiffusionEngine<double, 2> engine;
+    engine.setMesh(std::make_unique<mfem::Mesh>(*mesh), attrs);
+    auto oed = std::make_shared<OedSource<double>>();
+    oed->setInjectionEfficiency(1.0);
+    oed->setOxidationRate(1e10); // large so flux is visible on short t
+    auto iDiff = std::make_shared<ConstantDiffusion<double>>("Interstitial");
+    iDiff->setDiffusivity(1e-14, 0.0);
+    DiffusionPhysics<double> physics;
+    physics.addSpecies("Interstitial");
+    physics.addModel(oed);
+    physics.addModel(iDiff);
+    physics.setTemperature(1273.0);
+    engine.setPhysics(physics);
+    engine.initializeSpecies("Interstitial", 0.0);
+    engine.solve(0.0, 0.2, 0.05);
+    const double I1 = engine.getIntegral("Interstitial");
+    std::cout << "[p4-full] oed I1=" << I1 << "\n";
+    VC_TEST_ASSERT(I1 > 0.0);
+  }
+
+  // Carbon trapping: CI complex grows, I decreases (mild kf to stay positive).
+  // r = kf*C*I; kf*C*dt ≲ 0.1 → kf ≲ 0.1/(C*dt) ~ 1e-16 for C=1e15, dt=0.1.
+  {
+    DiffusionEngine<double, 2> engine;
+    engine.setMesh(std::make_unique<mfem::Mesh>(*mesh), attrs);
+    auto carb = std::make_shared<CarbonDiffusion<double>>();
+    carb->setTrapRate(1e-18);
+    carb->setDiffusivities(1e-14, 1e-14);
+    DiffusionPhysics<double> physics;
+    physics.addSpecies("Carbon");
+    physics.addSpecies("Interstitial");
+    physics.addSpecies("CarbonInterstitial");
+    physics.addModel(carb);
+    physics.setTemperature(1273.0);
+    engine.setPhysics(physics);
+    engine.initializeSpecies("Carbon", 1e15);
+    engine.initializeSpecies("Interstitial", 1e15);
+    engine.initializeSpecies("CarbonInterstitial", 0.0);
+    const double I0 = engine.getIntegral("Interstitial");
+    engine.solve(0.0, 0.5, 0.1);
+    const double I1 = engine.getIntegral("Interstitial");
+    const double CI = engine.getIntegral("CarbonInterstitial");
+    std::cout << "[p4-full] carbon I0=" << I0 << " I1=" << I1 << " CI=" << CI
+              << "\n";
+    VC_TEST_ASSERT(CI > 0.0);
+    VC_TEST_ASSERT(I1 < I0);
+    VC_TEST_ASSERT(I1 > 0.0);
+  }
+
+  // ChargedEquilibrium + Copper: dose conservation under zero-flux.
+  {
+    DiffusionEngine<double, 2> engine;
+    engine.setMesh(std::make_unique<mfem::Mesh>(*mesh), attrs);
+    auto ceq = std::make_shared<ChargedEquilibriumDiffusion<double>>("Boron");
+    ceq->setD0(1e-12);
+    ceq->setNi(1e10);
+    auto cu = std::make_shared<CopperDiffusion<double>>();
+    cu->setD0(1e-10);
+    cu->setIonPairing(0.0); // constant D for conservation
+    DiffusionPhysics<double> physics;
+    physics.addSpecies("Boron");
+    physics.addSpecies("Copper");
+    physics.addModel(ceq);
+    physics.addModel(cu);
+    physics.setTemperature(1273.0);
+    engine.setPhysics(physics);
+    engine.initializeSpecies("Boron", 1e18);
+    engine.initializeSpecies("Copper", 1e15);
+    const double b0 = engine.getIntegral("Boron");
+    const double c0 = engine.getIntegral("Copper");
+    engine.solve(0.0, 0.2, 0.05);
+    const double b1 = engine.getIntegral("Boron");
+    const double c1 = engine.getIntegral("Copper");
+    std::cout << "[p4-full] equil/cu B rel="
+              << std::abs(b1 - b0) / std::max(b0, 1.0)
+              << " Cu rel=" << std::abs(c1 - c0) / std::max(c0, 1.0) << "\n";
+    VC_TEST_ASSERT(std::abs(b1 - b0) / std::max(b0, 1.0) < 0.05);
+    VC_TEST_ASSERT(std::abs(c1 - c0) / std::max(c0, 1.0) < 0.05);
+  }
+}
+
 void TestFermiDiffusion() {
   FermiDiffusion<double> model("Boron");
   model.setDiffusivity(/*D_i=*/1e-13, /*alpha=*/1.0);
@@ -1621,6 +1711,7 @@ int main() {
   TestPhase3FullDepthFem();
   TestCddDiffusion();
   TestPhase4Models();
+  TestPhase4FullDepthFem();
   TestPhase5Poly();
   TestPhase6SiGe();
   TestPhase7Kmc();

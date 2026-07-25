@@ -6,6 +6,8 @@
 #include "../DiffusionModel.hpp"
 #include "../DiffusionPhysics.hpp"
 
+#include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -78,11 +80,36 @@ public:
   int numSpecies() const override { return 1; }
   std::vector<std::string> speciesNames() const override { return {I_}; }
 
+#ifdef VIENNAPS_HAS_MFEM
+  /// Volumetric OED injection proxy when interface BC attrs are unavailable:
+  /// R += Γ_I as a uniform DomainLFIntegrator (unit test / 1D-like path).
+  /// Production path prefers registerWith() Neumann on the moving boundary.
+  void assembleReaction(
+      mfem::LinearForm &R, const mfem::GridFunction & /*speciesGF*/,
+      const std::map<std::string, mfem::GridFunction *> & /*allSpecies*/,
+      const mfem::GridFunction * /*temp*/) const override {
+    const double flux = static_cast<double>(injectionFlux());
+    if (flux == 0.0)
+      return;
+    srcCoef_ = std::make_unique<mfem::ConstantCoefficient>(flux);
+    R.AddDomainIntegrator(new mfem::DomainLFIntegrator(*srcCoef_));
+  }
+
+  void assembleMass(mfem::BilinearForm &M) const override {
+    massCoef_ = std::make_unique<mfem::ConstantCoefficient>(1.0);
+    M.AddDomainIntegrator(new mfem::MassIntegrator(*massCoef_));
+  }
+#endif
+
 private:
   std::string I_;
   std::string boundary_ = "all";
   NumericType theta_ = NumericType(0.01);
   NumericType v_ox_ = NumericType(0);
+#ifdef VIENNAPS_HAS_MFEM
+  mutable std::unique_ptr<mfem::ConstantCoefficient> srcCoef_;
+  mutable std::unique_ptr<mfem::ConstantCoefficient> massCoef_;
+#endif
 };
 
 } // namespace viennaps
