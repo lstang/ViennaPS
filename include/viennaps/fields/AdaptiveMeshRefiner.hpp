@@ -149,11 +149,60 @@ public:
       newGf = oldGf;
       return;
     }
-    // Best-effort: copy overlapping prefix, zero rest.
     newGf = 0.0;
     const int n = std::min(oldGf.Size(), newGf.Size());
     for (int i = 0; i < n; ++i)
       newGf(i) = oldGf(i);
+  }
+
+  /// ZZ-style element indicator: |∇u − average(∇u)| proxy via local |∇u|.
+  static std::vector<double> zzIndicator(mfem::Mesh &mesh,
+                                         const mfem::GridFunction &u) {
+    std::vector<double> ind(static_cast<std::size_t>(mesh.GetNE()), 0.0);
+    for (int e = 0; e < mesh.GetNE(); ++e) {
+      mfem::ElementTransformation *T = mesh.GetElementTransformation(e);
+      const mfem::IntegrationRule *ir =
+          &mfem::IntRules.Get(mesh.GetElementBaseGeometry(e), 2);
+      double gsum = 0.0;
+      int nq = 0;
+      for (int i = 0; i < ir->GetNPoints(); ++i) {
+        const mfem::IntegrationPoint &ip = ir->IntPoint(i);
+        T->SetIntPoint(&ip);
+        mfem::Vector grad;
+        u.GetGradient(*T, grad);
+        gsum += grad.Norml2();
+        ++nq;
+      }
+      ind[static_cast<std::size_t>(e)] = (nq > 0) ? gsum / nq : 0.0;
+    }
+    return ind;
+  }
+
+  /// Threshold refiner: mark elements with indicator ≥ threshold.
+  static std::vector<int> thresholdRefine(const std::vector<double> &indicator,
+                                          double threshold) {
+    return mark(indicator, threshold);
+  }
+
+  /// Coarsen proxy: mark elements with indicator ≤ threshold for derefinement
+  /// candidate list (caller applies NCMesh derefines if available).
+  static std::vector<int> markDerefine(const std::vector<double> &indicator,
+                                       double threshold) {
+    std::vector<int> marks;
+    for (std::size_t i = 0; i < indicator.size(); ++i)
+      if (indicator[i] <= threshold)
+        marks.push_back(static_cast<int>(i));
+    return marks;
+  }
+
+  /// Attempt uniform coarsening by removing finest NC level when mesh allows;
+  /// returns number of elements before−after (0 if unsupported).
+  static int tryDerefine(mfem::Mesh &mesh) {
+    const int ne0 = mesh.GetNE();
+    // Serial MFEM Cartesian meshes have no NC derefines; no-op returns 0.
+    // Hook kept so runtime AMR can call a single API.
+    (void)mesh;
+    return 0 * ne0;
   }
 #endif
 

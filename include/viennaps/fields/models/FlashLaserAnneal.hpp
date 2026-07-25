@@ -140,16 +140,17 @@ private:
 template <class NumericType>
 class MeltDiffusion : public DiffusionModel<NumericType> {
 public:
-  explicit MeltDiffusion(std::string species = "Boron")
-      : species_(std::move(species)) {
+  explicit MeltDiffusion(std::string species = "Boron",
+                         std::string meltFrac = "MeltFraction")
+      : species_(std::move(species)), melt_(std::move(meltFrac)) {
     this->setName("MeltDiffusion(" + species_ + ")");
   }
 
   void setSolidD(NumericType D) { Ds_ = D; }
   void setLiquidD(NumericType D) { Dl_ = D; }
+  void setMeltSpecies(std::string m) { melt_ = std::move(m); }
 
   NumericType getDiffusivity(NumericType phi) const {
-    // phi=0 solid, phi=1 liquid
     return Ds_ * (NumericType(1) - phi) + Dl_ * phi;
   }
 
@@ -158,10 +159,51 @@ public:
     return {species_};
   }
 
+#ifdef VIENNAPS_HAS_MFEM
+  class MeltDCoef : public mfem::Coefficient {
+  public:
+    MeltDCoef(const MeltDiffusion *m, const mfem::GridFunction *phi)
+        : m_(m), phi_(phi) {}
+    double Eval(mfem::ElementTransformation &T,
+                const mfem::IntegrationPoint &ip) override {
+      double p = 0.0;
+      if (phi_)
+        p = std::min(1.0, std::max(0.0, phi_->GetValue(T, ip)));
+      return static_cast<double>(
+          m_->getDiffusivity(static_cast<NumericType>(p)));
+    }
+
+  private:
+    const MeltDiffusion *m_;
+    const mfem::GridFunction *phi_;
+  };
+
+  void assembleStiffness(
+      mfem::BilinearForm &K, const mfem::GridFunction & /*speciesGF*/,
+      const std::map<std::string, mfem::GridFunction *> &allSpecies,
+      const mfem::GridFunction * /*temp*/) const override {
+    const mfem::GridFunction *phi = nullptr;
+    auto it = allSpecies.find(melt_);
+    if (it != allSpecies.end())
+      phi = it->second;
+    meltCoef_ = std::make_unique<MeltDCoef>(this, phi);
+    K.AddDomainIntegrator(new mfem::DiffusionIntegrator(*meltCoef_));
+  }
+  void assembleMass(mfem::BilinearForm &M) const override {
+    massCoef_ = std::make_unique<mfem::ConstantCoefficient>(1.0);
+    M.AddDomainIntegrator(new mfem::MassIntegrator(*massCoef_));
+  }
+#endif
+
 private:
   std::string species_;
+  std::string melt_;
   NumericType Ds_ = NumericType(1e-12);
   NumericType Dl_ = NumericType(1e-4);
+#ifdef VIENNAPS_HAS_MFEM
+  mutable std::unique_ptr<MeltDCoef> meltCoef_;
+  mutable std::unique_ptr<mfem::ConstantCoefficient> massCoef_;
+#endif
 };
 
 template <class NumericType>

@@ -62,9 +62,18 @@ public:
     C_gb += rate * dt;
   }
 
-  int numSpecies() const override { return 1; }
+  /// Dual-species names when GB segregation is active as FEM residual.
+  void enableGbSegregationSpecies(std::string gbSpecies = "Boron_GB") {
+    gbSpecies_ = std::move(gbSpecies);
+  }
+
+  int numSpecies() const override {
+    return gbSpecies_.empty() ? 1 : 2;
+  }
   std::vector<std::string> speciesNames() const override {
-    return {species_};
+    if (gbSpecies_.empty())
+      return {species_};
+    return {species_, gbSpecies_};
   }
 
 #ifdef VIENNAPS_HAS_MFEM
@@ -101,10 +110,41 @@ public:
     massCoef_ = std::make_unique<mfem::ConstantCoefficient>(1.0);
     M.AddDomainIntegrator(new mfem::MassIntegrator(*massCoef_));
   }
+
+  /// FEM residual for GI↔GB exchange when dual species are registered.
+  void assembleReaction(
+      mfem::LinearForm &R, const mfem::GridFunction &speciesGF,
+      const std::map<std::string, mfem::GridFunction *> &allSpecies,
+      const mfem::GridFunction * /*temp*/) const override {
+    if (gbSpecies_.empty())
+      return;
+    auto itI = allSpecies.find(species_);
+    auto itG = allSpecies.find(gbSpecies_);
+    if (itI == allSpecies.end() || itG == allSpecies.end() || !itI->second ||
+        !itG->second)
+      return;
+    double scale = 0.0;
+    if (&speciesGF == itG->second)
+      scale = 1.0;
+    else if (&speciesGF == itI->second)
+      scale = -1.0;
+    else
+      return;
+    const double kf = static_cast<double>(m_seg_ * k0_fem_);
+    const double kb = static_cast<double>(k0_fem_);
+    segCoefs_.clear();
+    segCoefs_.push_back(std::make_unique<SegCoef>(
+        *itI->second, *itG->second, kf, kb, scale));
+    R.AddDomainIntegrator(new mfem::DomainLFIntegrator(*segCoefs_.back()));
+  }
 #endif
+
+  void setFemSegregationRate(NumericType k0) { k0_fem_ = k0; }
 
 private:
   std::string species_;
+  std::string gbSpecies_;
+  NumericType k0_fem_ = NumericType(1e-3);
   Mode mode_ = Mode::Isotropic;
   NumericType D_bulk_ = NumericType(1e-14);
   NumericType D_gb_ = NumericType(1e-10);
@@ -114,10 +154,26 @@ private:
   int boundaryAttr_ = 2;
   GrainModel<NumericType> grains_;
 #ifdef VIENNAPS_HAS_MFEM
+  class SegCoef : public mfem::Coefficient {
+  public:
+    SegCoef(const mfem::GridFunction &gi, const mfem::GridFunction &gb,
+            double kf, double kb, double scale)
+        : gi_(&gi), gb_(&gb), kf_(kf), kb_(kb), scale_(scale) {}
+    double Eval(mfem::ElementTransformation &T,
+                const mfem::IntegrationPoint &ip) override {
+      return scale_ * (kf_ * gi_->GetValue(T, ip) - kb_ * gb_->GetValue(T, ip));
+    }
+
+  private:
+    const mfem::GridFunction *gi_;
+    const mfem::GridFunction *gb_;
+    double kf_, kb_, scale_;
+  };
   mutable std::unique_ptr<mfem::ConstantCoefficient> stiffCoef_;
   mutable std::unique_ptr<mfem::ConstantCoefficient> massCoef_;
   mutable std::unique_ptr<mfem::PWConstCoefficient> pwCoef_;
   mutable std::vector<double> pwValues_;
+  mutable std::vector<std::unique_ptr<SegCoef>> segCoefs_;
 #endif
 };
 

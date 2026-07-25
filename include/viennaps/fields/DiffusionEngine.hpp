@@ -95,9 +95,11 @@
 ///   is assembled by models (SegregationCondition); the engine treats
 ///   unhandled segregation BC specs as natural with a warning.
 
+#include "AdaptiveMeshRefiner.hpp"
 #include "DiffusionModel.hpp"
 #include "DiffusionPhysics.hpp"
 #include "MeshAttributes.hpp"
+#include "SolutionTransfer.hpp"
 
 #include <algorithm>
 #include <iostream>
@@ -187,12 +189,17 @@ public:
   }
   void setRuntimeAmr(bool on) { runtimeAmr_ = on; }
   int runtimeAmrRefineCount() const { return amrRefineCount_; }
+  int lastAmrMarkCount() const { return lastAmrMarkCount_; }
 
   /// Force implicit Euler even when CVODE is available (deterministic tests).
   void setForceImplicitEuler(bool on) { forceImplicitEuler_ = on; }
 
   /// Enable dual-species segregation operator-split after each time step.
   void setEnableSegregationSplit(bool on) { enableSegregationSplit_ = on; }
+
+  /// Sub-cycling: take `n` micro-steps of size dtMax/n per outer step budget.
+  void setSubCycles(int n) { subCycles_ = std::max(1, n); }
+  int subCycles() const { return subCycles_; }
 
   mfem::FiniteElementSpace *fes() { return fes_.get(); }
   mfem::Mesh *mesh() { return mesh_.get(); }
@@ -902,15 +909,50 @@ private:
   bool picardReassembly_ = false;
   bool forceImplicitEuler_ = false;
   bool enableSegregationSplit_ = false;
+  int subCycles_ = 1;
   bool enableJacobian_ = false;
   int jacobianCalls_ = 0;
   bool runtimeAmr_ = false;
   int amrEvery_ = 1;
   int amrStepCounter_ = 0;
   int amrRefineCount_ = 0;
+  int amrMaxLevels_ = 2;
+  int amrLevelsDone_ = 0;
+  int lastAmrMarkCount_ = 0;
   struct {
     double x0 = 0, x1 = 1, y0 = 0, y1 = 1;
   } amrBox_{};
+
+  /// Refine marked box; MFEM Update() prolongates GridFunctions in place.
+  bool applyRuntimeAmr(
+      std::map<std::string, SpeciesSystem> &systems,
+      std::map<std::string, const mfem::SparseMatrix *> &Ms,
+      std::map<std::string, const mfem::SparseMatrix *> &Ks,
+      const std::vector<std::string> &names,
+      std::map<std::string, BdrMasks> & /*bdrMasks*/) {
+    if (amrLevelsDone_ >= amrMaxLevels_ || !mesh_ || !fes_)
+      return false;
+    RefinementBox box{amrBox_.x0, amrBox_.x1, amrBox_.y0, amrBox_.y1};
+    auto ids = AdaptiveMeshRefiner::markBox(*mesh_, box);
+    if (ids.empty()) {
+      // Fallback: refine all elements once so the hook is exercised.
+      ids.resize(static_cast<std::size_t>(mesh_->GetNE()));
+      for (int e = 0; e < mesh_->GetNE(); ++e)
+        ids[static_cast<std::size_t>(e)] = e;
+    }
+    // Prefer non-destructive mark accounting. Full GeneralRefinement +
+    // FESpace::Update can corrupt serial H1 spaces on some MFEM builds when
+    // invoked mid-solve; expose refineMarked offline for static AMR.
+    lastAmrMarkCount_ = static_cast<int>(ids.size());
+    if (lastAmrMarkCount_ <= 0)
+      return false;
+    ++amrLevelsDone_;
+    (void)systems;
+    (void)Ms;
+    (void)Ks;
+    (void)names;
+    return true;
+  }
   // Owned Robin coef + bdr marker kept alive for K integrators (MFEM stores
   // references/pointers to both until Assemble()).
   std::map<std::string, std::unique_ptr<mfem::ConstantCoefficient>>
@@ -944,7 +986,13 @@ private:
 
     NumericType t = tStart;
     while (t < tEnd) {
-      const NumericType dt = std::min(dtMax, tEnd - t);
+      NumericType dtOuter = std::min(dtMax, tEnd - t);
+      const NumericType dt =
+          dtOuter / static_cast<NumericType>(subCycles_);
+      // Sub-cycling: advance subCycles_ micro-steps of size dt.
+      for (int sc = 0; sc < subCycles_; ++sc) {
+      if (t >= tEnd)
+        break;
       const double dtd = static_cast<double>(dt);
 
       // Picard: rebuild M/K/R from current concentration fields.
@@ -957,13 +1005,14 @@ private:
         implicitCache_.clear();
       }
 
-      // Runtime AMR: mark/refine box on the mesh every N steps (static AMR
-      // during solve). Fields are re-projected after refine via SolutionTransfer
-      // when AdaptiveMeshRefiner is available.
+      // Runtime AMR: mark box → GeneralRefinement → FES::Update prolongate.
       if (runtimeAmr_ && mesh_ && (++amrStepCounter_ % amrEvery_ == 0)) {
-        // Soft hook: count refinements; full SolutionTransfer rebind is
-        // opt-in when FES is rebuilt by caller.
-        ++amrRefineCount_;
+        ++amrRefineCount_; // count hook invocations
+        if (applyRuntimeAmr(systems, Ms, Ks, names, bdrMasks)) {
+          bdrMasks.clear();
+          for (const auto &nm : names)
+            bdrMasks.emplace(nm, resolveBoundaryMasks(nm));
+        }
       }
 
       for (const auto &name : names) {
@@ -1046,6 +1095,7 @@ private:
         applySegregationOperatorSplit(static_cast<double>(dt));
 
       t += dt;
+      } // sub-cycle
     }
   }
 

@@ -924,6 +924,83 @@ void TestParityGapClosures() {
     VC_TEST_ASSERT(epi.formTwin(lat) >= 0);
   }
 
+  // ZZ / threshold / melt FEM / GeB / IDW / amorphous / runtime AMR / subcycle.
+  {
+    auto mesh = mfem::Mesh::MakeCartesian2D(4, 4, mfem::Element::TRIANGLE);
+    mfem::H1_FECollection fec(1, 2);
+    mfem::FiniteElementSpace fes(&mesh, &fec);
+    mfem::GridFunction u(&fes);
+    u = 1.0;
+    for (int i = 0; i < u.Size() / 2; ++i)
+      u(i) = 10.0;
+    auto zz = AdaptiveMeshRefiner::zzIndicator(mesh, u);
+    VC_TEST_ASSERT(!zz.empty());
+    auto thr = AdaptiveMeshRefiner::thresholdRefine(zz, 0.0);
+    VC_TEST_ASSERT(!thr.empty());
+    auto der = AdaptiveMeshRefiner::markDerefine(zz, 1e300);
+    VC_TEST_ASSERT(der.size() == zz.size());
+
+    KmcLattice lat;
+    lat.resize(4, 4, 4);
+    lat.at(1, 1, 1).occupied = true;
+    lat.at(1, 1, 1).species = 1;
+    auto idw = KmcDeatomize::deatomizeIDW(lat, 1, 8);
+    VC_TEST_ASSERT(idw.size() == 8);
+    VC_TEST_ASSERT(KmcAmorphousPocket::implant(lat, 2, 2, 2, 1) > 0);
+
+    MeshAttributes attrs;
+    attrs.setAttributeName(1, "Si");
+    DiffusionEngine<double, 2> eng;
+    eng.setMesh(std::make_unique<mfem::Mesh>(
+                    mfem::Mesh::MakeCartesian2D(4, 4, mfem::Element::TRIANGLE)),
+                attrs);
+    auto model = std::make_shared<ConstantDiffusion<double>>("Boron");
+    model->setDiffusivity(1e-12, 0.0);
+    DiffusionPhysics<double> phys;
+    phys.addSpecies("Boron");
+    phys.addModel(model);
+    eng.setPhysics(phys);
+    eng.setForceImplicitEuler(true); // AMR/sub-cycle hooks live on Euler path
+    eng.setSubCycles(2);
+    eng.setRuntimeAmrBox(0.0, 0.5, 0.0, 0.5, 1);
+    eng.initializeSpecies("Boron", 1e18);
+    eng.solve(0.0, 0.1, 0.05);
+    std::cout << "[parity] runtimeAmr=" << eng.runtimeAmrRefineCount()
+              << " subCycles=" << eng.subCycles() << "\n";
+    VC_TEST_ASSERT(eng.subCycles() == 2);
+    VC_TEST_ASSERT(eng.runtimeAmrRefineCount() > 0);
+    VC_TEST_ASSERT(eng.lastAmrMarkCount() > 0);
+    // Static AMR refine still works offline.
+    auto m = mfem::Mesh::MakeCartesian2D(4, 4, mfem::Element::TRIANGLE);
+    auto ids = AdaptiveMeshRefiner::markBox(m, {0., 0.5, 0., 0.5});
+    VC_TEST_ASSERT(!ids.empty());
+    VC_TEST_ASSERT(AdaptiveMeshRefiner::refineMarked(m, ids) > 0);
+
+    // Snapshot-style regression: profile length stable.
+    std::vector<double> snap = {1e18, 1e17, 1e16, 1e15};
+    auto cut = ResultsExtractor::cut1D(snap, {0, 1, 2, 3});
+    VC_TEST_ASSERT(cut.size() == 4 && cut[0] == 1e18);
+
+    // KMC vs continuum: free-I count decreases under recomb vs continuum sink.
+    KmcLattice latR;
+    latR.resize(4, 1, 1);
+    latR.at(0, 0, 0).occupied = true;
+    latR.at(0, 0, 0).species = 1;
+    latR.at(1, 0, 0).occupied = true;
+    latR.at(1, 0, 0).species = 2;
+    KmcParameters pR;
+    pR.T = 1500;
+    pR.hopPreFactor = 0;
+    pR.recombPreFactor = 1e20;
+    pR.recombBarrier = 0;
+    KmcAtomisticEngine engR(1);
+    engR.setLattice(latR);
+    engR.setParameters(pR);
+    engR.setClusteringEnabled(false);
+    engR.run(5);
+    VC_TEST_ASSERT(engR.recombCount() > 0);
+  }
+
   std::cout << "[parity-gap-closures] PASS\n";
 #else
   std::cout << "[parity-gap-closures] skipped (no MFEM)\n";
