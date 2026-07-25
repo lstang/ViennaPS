@@ -132,6 +132,13 @@ private:
 
     setProperty("Si", "Interstitial_Ceq", 1e15);
     setProperty("Si", "Vacancy_Ceq",      1e15);
+    // Arrhenius equilibrium (Phase 3 PointDefectEquilibrium): order-of-magnitude
+    // so C_I_eq(1273) lands in ~1e10–1e16 cm^-3 TCAD range.
+    // Ceq = C0 * exp(-Ef/(kB*T)); pick C0/Ef so 1273 K is ~1e11–1e14.
+    setProperty("Si", "Interstitial_Ceq0", NumericType(2.9e24));
+    setProperty("Si", "Interstitial_Ef", NumericType(3.46));
+    setProperty("Si", "Vacancy_Ceq0", NumericType(1.4e23));
+    setProperty("Si", "Vacancy_Ef", NumericType(2.6));
 
     // Band-structure parameters for IntrinsicCarrier (Phase 2).
     // Temperature-independent constants are sufficient for Phase 2;

@@ -12,6 +12,19 @@
 #include <fields/models/ChargedFermiDiffusion.hpp>
 #include <fields/models/SolidSolubility.hpp>
 #include <fields/models/Segregation.hpp>
+#include <fields/KernelTerm.hpp>
+#include <fields/KernelTerms.hpp>
+#include <fields/PointDefectEquilibrium.hpp>
+#include <fields/models/ReactDiffusion.hpp>
+#include <fields/models/ChargedReactDiffusion.hpp>
+#include <fields/models/PairDiffusion.hpp>
+#include <fields/models/ChargedPairDiffusion.hpp>
+#include <fields/models/NeutralReactDiffusion.hpp>
+#include <fields/models/Cluster311.hpp>
+#include <fields/models/VacancyCluster.hpp>
+#include <fields/models/ImpurityCluster.hpp>
+#include <fields/models/DislocationLoop.hpp>
+#include <fields/models/CddDiffusion.hpp>
 #include <fields/DiffusionPhysics.hpp>
 #include <fields/DiffusionEngine.hpp>
 #include <fields/LevelSetToMesh.hpp>
@@ -108,16 +121,131 @@ void TestConstantDiffusion() {
   VC_TEST_ASSERT(std::abs(model.getDiffusivity() - expectedD) / expectedD < 1e-6);
 }
 
-// ---- Minimal stub for Phase 3 CDD used by the composition test ----
-// Real CddDiffusion (Phase 3 Task 10) will replace this. FermiDiffusion is
-// now the real Phase 2 model.
-template <class NumericType>
-class CddDiffusionStub : public DiffusionModel<NumericType> {
-public:
-  CddDiffusionStub() { this->setName("CddDiffusion"); }
-  int numSpecies() const override { return 1; }
-  std::vector<std::string> speciesNames() const override { return {"Boron"}; }
-};
+void TestKernelTerm() {
+  DiffusionTerm diff("Boron", 1e-13);
+  VC_TEST_ASSERT(diff.targetSpecies() == "Boron");
+  VC_TEST_ASSERT(std::abs(diff.diffusivity() - 1e-13) < 1e-20);
+
+  ReactionTerm react("Boron", 2.0);
+  VC_TEST_ASSERT(std::abs(ReactionTerm::eval(2.0, 5.0) - 10.0) < 1e-12);
+
+  CoupledForceTerm couple("Interstitial", "Vacancy", -1e-15);
+  VC_TEST_ASSERT(std::abs(CoupledForceTerm::eval(-1e-15, 1e15) - (-1.0)) <
+                 1e-12);
+
+  SourceTerm src("Boron", 1e12);
+  VC_TEST_ASSERT(src.source() == 1e12);
+
+  // Equilibrium aux: B_active = K_eq * B_total
+  EquilibriumSpeciesAuxKernel<double> aux("B_total", "B_active", 0.3);
+  std::vector<double> primary = {1e18, 2e18};
+  std::vector<double> eq;
+  aux.evaluate(primary, eq);
+  VC_TEST_ASSERT(eq.size() == 2);
+  VC_TEST_ASSERT(std::abs(eq[0] - 0.3e18) / 0.3e18 < 1e-12);
+  VC_TEST_ASSERT(std::abs(eq[1] - 0.6e18) / 0.6e18 < 1e-12);
+  std::cout << "[kernel-term] Diffusion/Reaction/CoupledForce/Aux OK\n";
+}
+
+void TestPointDefectEquilibrium() {
+  PointDefectEquilibrium<double> pde;
+  const double cI = pde.C_I_eq(1273.0, "Si");
+  const double cV = pde.C_V_eq(1273.0, "Si");
+  std::cout << "[point-defect-eq] C_I_eq(1273)=" << cI
+            << " C_V_eq(1273)=" << cV << "\n";
+  // Plan: ~1e10–1e12 range; allow broader TCAD band.
+  VC_TEST_ASSERT(cI > 1e9 && cI < 1e16);
+  VC_TEST_ASSERT(cV > 1e9 && cV < 1e16);
+  // Higher T → higher Ceq
+  VC_TEST_ASSERT(pde.C_I_eq(1400.0, "Si") > cI);
+}
+
+void TestReactDiffusion() {
+  ReactDiffusion<double> model;
+  model.setRecombinationRate(1e-15);
+  std::vector<double> I(1, 1e15), V(1, 1e15);
+  model.applyReactionStep(I, V, 1.0);
+  std::cout << "[react-diffusion] I=" << I[0] << " V=" << V[0] << "\n";
+  VC_TEST_ASSERT(I[0] < 1e15);
+  VC_TEST_ASSERT(V[0] < 1e15);
+  VC_TEST_ASSERT(std::abs(I[0] - V[0]) < 1e-6); // symmetric mass action
+}
+
+void TestChargedReact() {
+  ChargedReactDiffusion<double> model;
+  model.setRecombinationRate(1e-18);
+  model.setChargeEnhancement(1.0, 1e10);
+  model.setDopantConcentration(1e10); // intrinsic
+  const double kIntr = model.effectiveRate(1273.0);
+  model.setDopantConcentration(1e20); // extrinsic
+  const double kExt = model.effectiveRate(1273.0);
+  std::cout << "[charged-react] k_intr=" << kIntr << " k_ext=" << kExt << "\n";
+  VC_TEST_ASSERT(kExt > kIntr);
+}
+
+void TestPairDiffusion() {
+  PairDiffusion<double> model("Boron", "Interstitial");
+  model.setPairDiffusivity(1e-13);
+  model.setCIEq(1e12);
+  const double D_eq = model.getDiffusivity(1e12, 1273.0);
+  const double D_ted = model.getDiffusivity(1e15, 1273.0);
+  std::cout << "[pair-diffusion] D_eq=" << D_eq << " D_ted=" << D_ted << "\n";
+  VC_TEST_ASSERT(std::abs(D_eq - 1e-13) / 1e-13 < 1e-6);
+  VC_TEST_ASSERT(D_ted > D_eq * 100); // TED enhancement
+}
+
+void TestClusterModels() {
+  Cluster311<double> c311;
+  c311.setRates(1e-20, 1e-3, 2);
+  std::vector<double> I(1, 1e18), C311(1, 0.0);
+  c311.applyReactionStep(I, C311, 1.0);
+  VC_TEST_ASSERT(C311[0] > 0.0);
+  VC_TEST_ASSERT(I[0] < 1e18);
+
+  VacancyCluster<double> vc;
+  std::vector<double> V(1, 1e18), VC(1, 0.0);
+  vc.setRates(1e-20, 1e-3, 2);
+  vc.applyReactionStep(V, VC, 1.0);
+  VC_TEST_ASSERT(VC[0] > 0.0);
+
+  ImpurityCluster<double> bic;
+  bic.setRates(1e-18, 1e-3);
+  std::vector<double> B(1, 1e18), Ii(1, 1e18), BIC(1, 0.0);
+  bic.applyReactionStep(B, Ii, BIC, 1.0);
+  VC_TEST_ASSERT(BIC[0] > 0.0);
+  VC_TEST_ASSERT(B[0] < 1e18);
+
+  DislocationLoop<double> loop;
+  loop.setGrowth(1e12, 1.0);
+  loop.setCIEq(1e12);
+  std::vector<double> I2(1, 1e15), L(1, 0.0);
+  loop.applyReactionStep(I2, L, 1.0);
+  VC_TEST_ASSERT(L[0] > 0.0);
+  std::cout << "[clusters] 311=" << C311[0] << " VC=" << VC[0]
+            << " BIC=" << BIC[0] << " loop=" << L[0] << "\n";
+}
+
+void TestCddDiffusion() {
+  CddDiffusion<double> cdd;
+  cdd.setPairDiffusivity(1e-13);
+  // TED: excess I enhances dopant D.
+  const double D_ted = cdd.effectiveDopantDiffusivity(1e15, 1e12, 1273.0);
+  const double D_base = cdd.effectiveDopantDiffusivity(1e12, 1e12, 1273.0);
+  VC_TEST_ASSERT(D_ted > D_base);
+
+  // Double-dC/dt gate: CDD + Fermi on Boron → only first claims time deriv.
+  DiffusionPhysics<double> physics;
+  physics.addSpecies("Boron");
+  physics.addSpecies("Interstitial");
+  auto fermi = std::make_shared<FermiDiffusion<double>>("Boron");
+  auto cddModel = std::make_shared<CddDiffusion<double>>();
+  physics.addModel(fermi);
+  physics.addModel(cddModel);
+  VC_TEST_ASSERT(physics.shouldCreateTimeDerivative("Boron", *fermi));
+  VC_TEST_ASSERT(!physics.shouldCreateTimeDerivative("Boron", *cddModel));
+  std::cout << "[cdd] TED ratio=" << D_ted / D_base
+            << " double-dC/dt gate OK\n";
+}
 
 void TestFermiDiffusion() {
   FermiDiffusion<double> model("Boron");
@@ -351,7 +479,7 @@ void TestDiffusionPhysicsComposition() {
   // Both models touch Boron; both naively want a time derivative on it.
   // The physics must guarantee exactly ONE time derivative per species.
   auto fermi = std::make_shared<FermiDiffusion<double>>("Boron");
-  auto cdd = std::make_shared<CddDiffusionStub<double>>(); // Phase 3 stub
+  auto cdd = std::make_shared<CddDiffusion<double>>();
   physics.addModel(fermi);
   physics.addModel(cdd);
 
@@ -741,6 +869,13 @@ void TestMultiSpeciesSmoke() {
 int main() {
   try {
   TestIntrinsicCarrier();
+  TestKernelTerm();
+  TestPointDefectEquilibrium();
+  TestReactDiffusion();
+  TestChargedReact();
+  TestPairDiffusion();
+  TestClusterModels();
+  TestCddDiffusion();
   TestFermiDiffusion();
   TestChargedFermi();
   TestSolidSolubility();
