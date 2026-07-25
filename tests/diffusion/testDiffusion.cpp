@@ -499,6 +499,30 @@ void TestPhase6SiGe() {
   pair.applyStep(B, Ge, P, 1.0);
   VC_TEST_ASSERT(B[0] < 1e18 && P[0] > 0.0);
 
+  // FEM Ge interdiffusion: dose conserved under zero-flux.
+  {
+    MeshAttributes attrs;
+    attrs.setAttributeName(1, "SiGe");
+    auto mesh = std::make_unique<mfem::Mesh>(
+        mfem::Mesh::MakeCartesian2D(4, 4, mfem::Element::TRIANGLE));
+    DiffusionEngine<double, 2> engine;
+    engine.setMesh(std::move(mesh), attrs);
+    auto sigeFem = std::make_shared<SiGeDiffusion<double>>();
+    sigeFem->setGeDiffusivity(1e-12, 0.0);
+    DiffusionPhysics<double> physics;
+    physics.addSpecies("Germanium");
+    physics.addModel(sigeFem);
+    physics.setTemperature(1273.0);
+    engine.setPhysics(physics);
+    engine.initializeSpecies("Germanium", 0.3);
+    const double g0 = engine.getIntegral("Germanium");
+    engine.solve(0.0, 0.2, 0.05);
+    const double g1 = engine.getIntegral("Germanium");
+    std::cout << "[p6-full] sige-fem Ge dose rel="
+              << std::abs(g1 - g0) / std::max(g0, 1e-30) << "\n";
+    VC_TEST_ASSERT(std::abs(g1 - g0) / std::max(g0, 1e-30) < 0.05);
+  }
+
   StrainDiffusionModifier<double> strain;
   const double D0 = 1e-13;
   VC_TEST_ASSERT(strain.modifyD(D0, 0.01, 1273.0) != D0);
@@ -527,8 +551,31 @@ void TestPhase7Kmc() {
   KmcAtomisticEngine eng(7);
   eng.setLattice(lat);
   eng.setParameters(p);
+  eng.setDiamondNeighbors(true);
   eng.run(50);
   VC_TEST_ASSERT(eng.steps() > 0);
+
+  // I+V recombination: place adjacent I and V, force recomb-dominated rates.
+  KmcLattice latR;
+  latR.resize(3, 1, 1);
+  latR.at(0, 0, 0).occupied = true;
+  latR.at(0, 0, 0).species = 1; // I
+  latR.at(1, 0, 0).occupied = true;
+  latR.at(1, 0, 0).species = 2; // V
+  KmcParameters pR;
+  pR.T = 1500.0;
+  pR.hopBarrier = 5.0; // suppress hops
+  pR.recombBarrier = 0.01;
+  pR.recombPreFactor = 1e20;
+  KmcAtomisticEngine engR(3);
+  engR.setLattice(latR);
+  engR.setParameters(pR);
+  engR.setRecombinationEnabled(true);
+  engR.run(20);
+  VC_TEST_ASSERT(engR.recombCount() > 0);
+  VC_TEST_ASSERT(engR.lattice().countSpecies(1) +
+                     engR.lattice().countSpecies(2) <
+                 2);
 
   std::vector<double> conc(lat.size(), 1e20);
   std::mt19937 rng(1);
@@ -538,8 +585,8 @@ void TestPhase7Kmc() {
   std::vector<double> back;
   KmcDeatomize::deatomize(lat2, back, 1e-21, 1);
   VC_TEST_ASSERT(back.size() == lat2.size());
-  std::cout << "[phase7] KMC steps=" << eng.steps()
-            << " t=" << eng.time() << "\n";
+  std::cout << "[phase7] KMC steps=" << eng.steps() << " t=" << eng.time()
+            << " recomb=" << engR.recombCount() << "\n";
 }
 
 void TestPhase8Epitaxy() {
@@ -602,6 +649,31 @@ void TestPhase10PdeApi() {
   CalibratedParameters cal;
   cal.setDopant("Boron", 0.76, 3.46);
   VC_TEST_ASSERT(cal.diffusivity("Boron", 1273.0) > 0);
+
+  // Engine bridge: PdeEquation → DiffusionPhysics → solve conserves dose.
+  {
+    MeshAttributes attrs;
+    attrs.setAttributeName(1, "Si");
+    auto mesh = std::make_unique<mfem::Mesh>(
+        mfem::Mesh::MakeCartesian2D(4, 4, mfem::Element::TRIANGLE));
+    DiffusionEngine<double, 2> engine;
+    engine.setMesh(std::move(mesh), attrs);
+    PdeEquation eqEng;
+    eqEng.addTerm(std::make_shared<DiffusionPdeTerm>("Boron", 1e-12));
+    eqEng.addBC({PdeBC::Type::Neumann, "Boron", "all", 0.0});
+    DiffusionPhysics<double> physics;
+    eqEng.applyTo(physics);
+    physics.setTemperature(1273.0);
+    engine.setPhysics(physics);
+    engine.initializeSpecies("Boron", 1e18);
+    const double b0 = engine.getIntegral("Boron");
+    engine.solve(0.0, 0.2, 0.05);
+    const double b1 = engine.getIntegral("Boron");
+    std::cout << "[p10-full] pde-api engine dose rel="
+              << std::abs(b1 - b0) / std::max(b0, 1.0) << "\n";
+    VC_TEST_ASSERT(std::abs(b1 - b0) / std::max(b0, 1.0) < 0.05);
+  }
+
   std::cout << "[phase10] dose=" << d
             << " D_B=" << cal.diffusivity("Boron", 1273.0) << "\n";
 }

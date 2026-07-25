@@ -1,6 +1,11 @@
 #pragma once
 
-/// PDE API — composable equation terms + results extraction (Phase 10 skeleton).
+/// PDE API — composable equation terms + results extraction (Phase 10).
+/// Engine bridge: PdeEquation::buildModels + applyBCs → DiffusionPhysics.
+
+#include "DiffusionModel.hpp"
+#include "DiffusionPhysics.hpp"
+#include "models/ConstantDiffusion.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -75,6 +80,55 @@ public:
         s.push_back(t->targetSpecies());
     }
     return s;
+  }
+
+  /// Build ConstantDiffusion models from DiffusionPdeTerm entries (Ea=0).
+  template <class NumericType>
+  std::vector<std::shared_ptr<DiffusionModel<NumericType>>>
+  buildModels() const {
+    std::vector<std::shared_ptr<DiffusionModel<NumericType>>> out;
+    for (const auto &t : terms_) {
+      auto *diff = dynamic_cast<const DiffusionPdeTerm *>(t.get());
+      if (!diff)
+        continue;
+      auto m = std::make_shared<ConstantDiffusion<NumericType>>(
+          diff->targetSpecies());
+      m->setDiffusivity(static_cast<NumericType>(diff->D()),
+                        NumericType(0));
+      out.push_back(std::move(m));
+    }
+    return out;
+  }
+
+  /// Register PdeBC entries on a DiffusionPhysics instance.
+  template <class NumericType>
+  void applyBCs(DiffusionPhysics<NumericType> &physics) const {
+    for (const auto &bc : bcs_) {
+      switch (bc.type) {
+      case PdeBC::Type::Dirichlet:
+        physics.addDirichletBC(bc.species, bc.boundary,
+                               static_cast<NumericType>(bc.value));
+        break;
+      case PdeBC::Type::Neumann:
+        physics.addNeumannBC(bc.species, bc.boundary,
+                             static_cast<NumericType>(bc.value));
+        break;
+      case PdeBC::Type::Robin:
+        physics.addRobinBC(bc.species, bc.boundary,
+                           static_cast<NumericType>(bc.value));
+        break;
+      }
+    }
+  }
+
+  /// Convenience: add species + models + BCs to physics from this equation.
+  template <class NumericType>
+  void applyTo(DiffusionPhysics<NumericType> &physics) const {
+    for (const auto &sp : species())
+      physics.addSpecies(sp);
+    for (auto &m : buildModels<NumericType>())
+      physics.addModel(m);
+    applyBCs(physics);
   }
 
 private:

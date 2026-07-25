@@ -7,6 +7,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -59,10 +61,31 @@ public:
     return {"Germanium"};
   }
 
+#ifdef VIENNAPS_HAS_MFEM
+  /// FEM Ge interdiffusion: constant-D DiffusionIntegrator at current T.
+  void assembleStiffness(
+      mfem::BilinearForm &K, const mfem::GridFunction & /*speciesGF*/,
+      const std::map<std::string, mfem::GridFunction *> & /*allSpecies*/,
+      const mfem::GridFunction * /*temp*/) const override {
+    stiffCoef_ = std::make_unique<mfem::ConstantCoefficient>(
+        static_cast<double>(geDiffusivity(this->T_)));
+    K.AddDomainIntegrator(new mfem::DiffusionIntegrator(*stiffCoef_));
+  }
+
+  void assembleMass(mfem::BilinearForm &M) const override {
+    massCoef_ = std::make_unique<mfem::ConstantCoefficient>(1.0);
+    M.AddDomainIntegrator(new mfem::MassIntegrator(*massCoef_));
+  }
+#endif
+
 private:
   NumericType D0_Ge_ = NumericType(1e-3);
   NumericType Ea_Ge_ = NumericType(4.0);
   NumericType D0_B_ = NumericType(1e-13);
+#ifdef VIENNAPS_HAS_MFEM
+  mutable std::unique_ptr<mfem::ConstantCoefficient> stiffCoef_;
+  mutable std::unique_ptr<mfem::ConstantCoefficient> massCoef_;
+#endif
 };
 
 /// Ge-B pairing: reduces mobile B.

@@ -1,6 +1,10 @@
 #pragma once
 
-/// KmcAtomisticEngine — simple BKL (n-fold way) KMC loop.
+/// KmcAtomisticEngine — BKL (n-fold way) KMC with hop + I/V recombination.
+///
+/// Lattice: cubic grid; optional diamond-like body-diagonal neighbors
+/// (Phase 7 full-depth). Species codes: 0 empty, 1 interstitial, 2 vacancy,
+/// >2 impurities/clusters.
 
 #include "KmcEvent.hpp"
 #include "KmcLattice.hpp"
@@ -23,30 +27,34 @@ public:
   void setParameters(KmcParameters p) { params_ = std::move(p); }
   const KmcParameters &parameters() const { return params_; }
 
+  /// true → cubic 6 + diamond-like body diagonals; false → cubic 6 only.
+  void setDiamondNeighbors(bool on) { diamond_ = on; }
+  bool diamondNeighbors() const { return diamond_; }
+
+  void setRecombinationEnabled(bool on) { recomb_ = on; }
+  bool recombinationEnabled() const { return recomb_; }
+
   double time() const { return time_; }
   int steps() const { return steps_; }
+  int recombCount() const { return recombCount_; }
 
-  /// One BKL step: build hop events for occupied sites, pick, advance time.
+  /// One BKL step: hop events (+ optional I+V recombine), pick, advance time.
   bool step() {
     std::vector<KmcEvent> events;
-    events.reserve(lattice_.size() * 6);
+    events.reserve(lattice_.size() * 8);
     const double rHop = params_.hopRate();
+    const double rRec = params_.recombRate();
+
     for (int k = 0; k < lattice_.nz(); ++k)
       for (int j = 0; j < lattice_.ny(); ++j)
         for (int i = 0; i < lattice_.nx(); ++i) {
           const auto &s = lattice_.at(i, j, k);
           if (!s.occupied)
             continue;
-          // 6-neighbor hops on cubic mesh (Si diamond approx for skeleton).
-          const int nbr[6][3] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0},
-                                 {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
-          for (auto &d : nbr) {
-            const int i1 = i + d[0], j1 = j + d[1], k1 = k + d[2];
-            if (i1 < 0 || j1 < 0 || k1 < 0 || i1 >= lattice_.nx() ||
-                j1 >= lattice_.ny() || k1 >= lattice_.nz())
-              continue;
+
+          forEachNeighbor(i, j, k, [&](int i1, int j1, int k1) {
             if (lattice_.at(i1, j1, k1).occupied)
-              continue;
+              return;
             KmcEvent ev;
             ev.type = KmcEventType::Hop;
             ev.i0 = i;
@@ -57,8 +65,28 @@ public:
             ev.k1 = k1;
             ev.rate = rHop;
             events.push_back(ev);
+          });
+
+          // I(1) + V(2) recombination on neighboring sites.
+          if (recomb_ && s.species == 1) {
+            forEachNeighbor(i, j, k, [&](int i1, int j1, int k1) {
+              const auto &n = lattice_.at(i1, j1, k1);
+              if (!n.occupied || n.species != 2)
+                return;
+              KmcEvent ev;
+              ev.type = KmcEventType::Recombine;
+              ev.i0 = i;
+              ev.j0 = j;
+              ev.k0 = k;
+              ev.i1 = i1;
+              ev.j1 = j1;
+              ev.k1 = k1;
+              ev.rate = rRec;
+              events.push_back(ev);
+            });
           }
         }
+
     if (events.empty())
       return false;
 
@@ -95,6 +123,31 @@ public:
   }
 
 private:
+  template <class Fn>
+  void forEachNeighbor(int i, int j, int k, Fn &&fn) const {
+    static const int cubic[6][3] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0},
+                                    {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+    for (const auto &d : cubic) {
+      const int i1 = i + d[0], j1 = j + d[1], k1 = k + d[2];
+      if (inBounds(i1, j1, k1))
+        fn(i1, j1, k1);
+    }
+    if (diamond_) {
+      static const int diag[4][3] = {
+          {1, 1, 1}, {1, -1, -1}, {-1, 1, -1}, {-1, -1, 1}};
+      for (const auto &d : diag) {
+        const int i1 = i + d[0], j1 = j + d[1], k1 = k + d[2];
+        if (inBounds(i1, j1, k1))
+          fn(i1, j1, k1);
+      }
+    }
+  }
+
+  bool inBounds(int i, int j, int k) const {
+    return i >= 0 && j >= 0 && k >= 0 && i < lattice_.nx() &&
+           j < lattice_.ny() && k < lattice_.nz();
+  }
+
   void apply(const KmcEvent &e) {
     if (e.type == KmcEventType::Hop) {
       auto &a = lattice_.at(e.i0, e.j0, e.k0);
@@ -103,6 +156,14 @@ private:
       b.occupied = true;
       a.occupied = false;
       a.species = 0;
+    } else if (e.type == KmcEventType::Recombine) {
+      auto &a = lattice_.at(e.i0, e.j0, e.k0);
+      auto &b = lattice_.at(e.i1, e.j1, e.k1);
+      a.occupied = false;
+      a.species = 0;
+      b.occupied = false;
+      b.species = 0;
+      ++recombCount_;
     }
   }
 
@@ -110,6 +171,9 @@ private:
   KmcParameters params_;
   double time_ = 0.0;
   int steps_ = 0;
+  int recombCount_ = 0;
+  bool diamond_ = false;
+  bool recomb_ = true;
   std::mt19937 rng_;
 };
 
@@ -161,11 +225,13 @@ struct KmcReport {
   int steps = 0;
   int hopCount = 0;
   int occupied = 0;
+  int recombCount = 0;
 
   static KmcReport fromEngine(const KmcAtomisticEngine &eng) {
     KmcReport r;
     r.time = eng.time();
     r.steps = eng.steps();
+    r.recombCount = eng.recombCount();
     r.occupied = 0;
     for (int k = 0; k < eng.lattice().nz(); ++k)
       for (int j = 0; j < eng.lattice().ny(); ++j)
@@ -179,7 +245,6 @@ struct KmcReport {
 /// Continuum ↔ KMC coupling facade for TED validation loops.
 class KmcContinuumCoupler {
 public:
-  /// Run KMC hops then deatomize back to continuum concentration.
   static std::vector<double>
   hopAndDeatomize(KmcLattice lat, KmcParameters params, int speciesCode,
                   double volumePerSite, int steps, unsigned seed = 1) {
