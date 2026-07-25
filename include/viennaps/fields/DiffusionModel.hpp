@@ -67,6 +67,13 @@ public:
       const std::map<std::string, mfem::GridFunction*>& allSpecies,
       const mfem::GridFunction* temp) const {}
 
+  /// Optional analytic Jacobian contribution dK/dC for strategy (b).
+  /// Default: no-op (engine uses Picard lag of assembleStiffness).
+  /// Models that opt into (b1) override this and document the choice.
+  virtual void assembleStiffnessJacobian(
+      mfem::MixedBilinearForm& /*dKdC*/,
+      const mfem::GridFunction& /*speciesGF*/) const {}
+
   /// Contribute to nonlinear reaction RHS R for this species.
   virtual void assembleReaction(
       mfem::LinearForm& R,
