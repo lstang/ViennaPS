@@ -6,6 +6,7 @@
 #include "KernelTerm.hpp"
 
 #include <cmath>
+#include <map>
 #include <memory>
 #include <string>
 
@@ -190,6 +191,50 @@ private:
   mutable std::unique_ptr<mfem::ConstantCoefficient> coef_;
 };
 
+/// SUPG stabilization for advection-like pair diffusion (MOOSE LevelSetAdvectionSUPG).
+/// tau = hmin / (2 ||v||); residual contribution tau (v·∇u)(v·∇test).
+/// Implemented as ConvectionIntegrator with velocity = v scaled by tau when
+/// ||v|| is estimated from a constant drift magnitude.
+class SupgAdvectionTerm : public KernelTerm {
+public:
+  SupgAdvectionTerm(std::string species, double vx, double vy,
+                    double hmin = 0.1)
+      : species_(std::move(species)), vx_(vx), vy_(vy), hmin_(hmin) {
+    setName("SupgAdvectionTerm(" + species_ + ")");
+  }
+
+  std::string targetSpecies() const override { return species_; }
+
+  /// Stabilization parameter tau = h/(2|v|).
+  double tau() const {
+    const double vmag = std::sqrt(vx_ * vx_ + vy_ * vy_);
+    if (vmag < 1e-30)
+      return 0.0;
+    return hmin_ / (2.0 * vmag);
+  }
+
+  void assembleStiffness(
+      mfem::BilinearForm &K,
+      const std::map<std::string, mfem::GridFunction *> & /*species*/,
+      const mfem::GridFunction * /*temp*/) const override {
+    const double t = tau();
+    if (t <= 0.0)
+      return;
+    // Effective artificial diffusion ~ tau |v|^2 for streamline diffusion.
+    const double v2 = vx_ * vx_ + vy_ * vy_;
+    artDiff_ = std::make_unique<mfem::ConstantCoefficient>(t * v2);
+    K.AddDomainIntegrator(new mfem::DiffusionIntegrator(*artDiff_));
+  }
+
+  double driftX() const { return vx_; }
+  double driftY() const { return vy_; }
+
+private:
+  std::string species_;
+  double vx_, vy_, hmin_;
+  mutable std::unique_ptr<mfem::ConstantCoefficient> artDiff_;
+};
+
 #else // !VIENNAPS_HAS_MFEM
 
 // Pure-math stubs so unit tests compile without MFEM.
@@ -252,6 +297,22 @@ public:
 
 private:
   std::string species_;
+};
+
+class SupgAdvectionTerm : public KernelTerm {
+public:
+  SupgAdvectionTerm(std::string species, double vx, double vy,
+                    double hmin = 0.1)
+      : species_(std::move(species)), vx_(vx), vy_(vy), hmin_(hmin) {}
+  std::string targetSpecies() const override { return species_; }
+  double tau() const {
+    const double vmag = std::sqrt(vx_ * vx_ + vy_ * vy_);
+    return (vmag < 1e-30) ? 0.0 : hmin_ / (2.0 * vmag);
+  }
+
+private:
+  std::string species_;
+  double vx_, vy_, hmin_;
 };
 
 #endif // VIENNAPS_HAS_MFEM

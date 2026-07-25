@@ -137,6 +137,56 @@ struct CalibratedParameters {
     const double kB = 8.617333262145e-5;
     return it->second.first * std::exp(-it->second.second / (kB * T));
   }
+
+  /// Blend two parameter sets (e.g. inheritance Si → SiGe).
+  static CalibratedParameters blend(const CalibratedParameters &a,
+                                    const CalibratedParameters &b,
+                                    double w) {
+    CalibratedParameters out = a;
+    for (const auto &kv : b.dopantD0Ea) {
+      auto it = out.dopantD0Ea.find(kv.first);
+      if (it == out.dopantD0Ea.end())
+        out.dopantD0Ea[kv.first] = kv.second;
+      else {
+        it->second.first =
+            (1.0 - w) * it->second.first + w * kv.second.first;
+        it->second.second =
+            (1.0 - w) * it->second.second + w * kv.second.second;
+      }
+    }
+    return out;
+  }
 };
 
+/// Least-squares fit of D0 from (T, D) samples with fixed Ea (log-linear).
+struct FittingUtilities {
+  static double fitD0FixedEa(const std::vector<double> &T,
+                             const std::vector<double> &D, double Ea) {
+    const double kB = 8.617333262145e-5;
+    double num = 0.0, den = 0.0;
+    const std::size_t n = std::min(T.size(), D.size());
+    for (std::size_t i = 0; i < n; ++i) {
+      if (T[i] <= 0 || D[i] <= 0)
+        continue;
+      const double y = std::log(D[i]) + Ea / (kB * T[i]);
+      num += y;
+      den += 1.0;
+    }
+    if (den <= 0)
+      return 0.0;
+    return std::exp(num / den);
+  }
+};
+
+/// Build a minimal PdeEquation for constant-D diffusion of one species.
+inline PdeEquation makeConstantDiffusionEquation(const std::string &species,
+                                                 double D, double C0) {
+  PdeEquation eq;
+  eq.addTerm(std::make_shared<DiffusionPdeTerm>(species, D));
+  eq.addIC({species, C0});
+  eq.addBC({PdeBC::Type::Neumann, species, "all", 0.0});
+  return eq;
+}
+
 } // namespace viennaps
+

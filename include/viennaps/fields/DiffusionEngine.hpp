@@ -88,9 +88,12 @@
 ///   (default — no integrator added). If `value != 0`, a
 ///   `BoundaryLFIntegrator(ConstantCoefficient(value))` is added to the
 ///   RHS `LinearForm` scoped to the matching boundary attributes.
-/// - **Segregation / Robin** (`type == "segregation"`, `"robin"`): not yet
-///   applied here — Phase 2 Task 5 adds the two-sided `InterfaceReaction`-
-///   style integrator for these.
+/// - **Robin** (`type == "robin"`): dose-loss form `-D dC/dn = h C`. The
+///   engine adds a boundary mass term `∫_Γ h u v` to the system matrix
+///   (weak form of the Robin condition). `BCSpec.value` is h.
+/// - **Segregation** (`type == "segregation"`): two-sided interface residual
+///   is assembled by models (SegregationCondition); the engine treats
+///   unhandled segregation BC specs as natural with a warning.
 
 #include "DiffusionModel.hpp"
 #include "DiffusionPhysics.hpp"
@@ -166,6 +169,44 @@ public:
     *gf = static_cast<mfem::real_t>(value);
   }
 
+  /// When true, reassemble M/K/R every time step (Picard for nonlinear D).
+  void setPicardReassembly(bool on) { picardReassembly_ = on; }
+  bool picardReassembly() const { return picardReassembly_; }
+
+  /// Force implicit Euler even when CVODE is available (deterministic tests).
+  void setForceImplicitEuler(bool on) { forceImplicitEuler_ = on; }
+
+  mfem::FiniteElementSpace *fes() { return fes_.get(); }
+  mfem::Mesh *mesh() { return mesh_.get(); }
+
+  /// Project host samples onto a species field, then rescale so
+  /// getIntegral(name) matches targetDose (IntegralPreservingFunctionIC).
+  void projectIntegralPreserving(const std::string &name,
+                                 const std::vector<NumericType> &samples,
+                                 NumericType targetDose) {
+    auto *gf = ensureSpecies(name);
+    if (samples.empty() || gf->Size() == 0)
+      return;
+    for (int i = 0; i < gf->Size(); ++i) {
+      const double xi = (gf->Size() == 1)
+                            ? 0.0
+                            : static_cast<double>(i) /
+                                  static_cast<double>(gf->Size() - 1);
+      const double sj = xi * static_cast<double>(samples.size() - 1);
+      const std::size_t j0 = static_cast<std::size_t>(sj);
+      const std::size_t j1 = std::min(j0 + 1, samples.size() - 1);
+      const double f = sj - static_cast<double>(j0);
+      (*gf)(i) = static_cast<mfem::real_t>(
+          (1.0 - f) * static_cast<double>(samples[j0]) +
+          f * static_cast<double>(samples[j1]));
+    }
+    const double doseNow = static_cast<double>(getIntegral(name));
+    if (doseNow > 0.0 && static_cast<double>(targetDose) > 0.0) {
+      *gf *= static_cast<mfem::real_t>(static_cast<double>(targetDose) /
+                                       doseNow);
+    }
+  }
+
   /// Integrate the system from `tStart` to `tEnd` with max step `dtMax`.
   /// Assembles M, K, R per species on entry; if SUNDIALS is built into
   /// MFEM, uses CVODE BDF with HypreBoomerAMG (or DSmoother) preconditioned
@@ -202,7 +243,10 @@ public:
     // previous Mult calls - leading to NaN on the second solve() call.
     // This was the root cause of F9, now resolved.
 #ifdef MFEM_USE_SUNDIALS
-    solveCVODE(tStart, tEnd, dtMax);
+    if (forceImplicitEuler_)
+      solveImplicitEuler(tStart, tEnd, dtMax);
+    else
+      solveCVODE(tStart, tEnd, dtMax);
 #else
     solveImplicitEuler(tStart, tEnd, dtMax);
 #endif
@@ -364,6 +408,20 @@ private:
         }
         model->assembleReaction(*sys.R, *speciesIt->second, allSpecies_,
                                 /*temp*/ nullptr);
+      }
+
+      // Robin dose-loss: fold ∫_Γ h u v into K so BOTH CVODE and implicit
+      // Euler paths see -D dC/dn = h C (weak form adds boundary mass).
+      {
+        BdrMasks masks = resolveBoundaryMasks(speciesName);
+        if (masks.robinCoefOwner && masks.robinAttrMarker.Size() > 0 &&
+            masks.robinAttrMarker.Max() > 0) {
+          robinCoefKeep_[speciesName] = std::move(masks.robinCoefOwner);
+          robinMarkerKeep_[speciesName] = masks.robinAttrMarker; // copy
+          sys.K->AddBoundaryIntegrator(
+              new mfem::BoundaryMassIntegrator(*robinCoefKeep_[speciesName]),
+              robinMarkerKeep_[speciesName]);
+        }
       }
 
       sys.K->Assemble();
@@ -757,6 +815,13 @@ private:
     NumericType dtCached = NumericType(-1);
   };
   std::map<std::string, ImplicitCache> implicitCache_;
+  bool picardReassembly_ = false;
+  bool forceImplicitEuler_ = false;
+  // Owned Robin coef + bdr marker kept alive for K integrators (MFEM stores
+  // references/pointers to both until Assemble()).
+  std::map<std::string, std::unique_ptr<mfem::ConstantCoefficient>>
+      robinCoefKeep_;
+  std::map<std::string, mfem::Array<int>> robinMarkerKeep_;
 
   void solveImplicitEuler(NumericType tStart, NumericType tEnd,
                           NumericType dtMax) {
@@ -788,6 +853,16 @@ private:
       const NumericType dt = std::min(dtMax, tEnd - t);
       const double dtd = static_cast<double>(dt);
 
+      // Picard: rebuild M/K/R from current concentration fields.
+      if (picardReassembly_) {
+        systems = assembleAllSpecies();
+        for (const auto &name : names) {
+          Ms[name] = &systems[name].M->SpMat();
+          Ks[name] = &systems[name].K->SpMat();
+        }
+        implicitCache_.clear();
+      }
+
       for (const auto &name : names) {
         mfem::GridFunction &gf = *allSpecies_[name];
         const auto &masks = bdrMasks.at(name);
@@ -796,10 +871,12 @@ private:
         auto &cache = implicitCache_[name];
         const bool dtChanged = !cache.A || cache.dtCached != dt;
         if (dtChanged) {
+          // A = M + dt*K + dt*BoundaryMass(h)  (Robin dose-loss).
           cache.A = std::make_unique<mfem::BilinearForm>(fes_.get());
           mfem::ConstantCoefficient oneCoef(1.0);
           cache.A->AddDomainIntegrator(new mfem::MassIntegrator(oneCoef));
           cache.A->Assemble();
+          // K already includes Robin boundary mass from assembleAllSpecies.
           cache.A->SpMat().Add(dtd, *Ks[name]);
           cache.A->Finalize();
 
@@ -829,10 +906,13 @@ private:
         if (masks.neumannAttrMarker.Size() > 0 &&
             masks.neumannAttrMarker.Max() > 0) {
           mfem::LinearForm bndRHS(fes_.get());
+          // MFEM requires non-const Array& for the bdr marker.
+          mfem::Array<int> neumannMarker = masks.neumannAttrMarker;
           bndRHS.AddBoundaryIntegrator(
-              new mfem::BoundaryLFIntegrator(*masks.neumannCoef));
+              new mfem::BoundaryLFIntegrator(*masks.neumannCoef),
+              neumannMarker);
           bndRHS.Assemble();
-          b.Add(1.0, bndRHS);
+          b.Add(dtd, bndRHS);
         }
 
         // Apply Dirichlet to RHS via the cached mat_e: b -= A_e * u, then
@@ -882,12 +962,16 @@ private:
   struct BdrMasks {
     mfem::Array<int> essAttrMarker;
     mfem::Array<int> neumannAttrMarker;
+    mfem::Array<int> robinAttrMarker;
     mfem::ConstantCoefficient *neumannCoef = nullptr;
     mfem::ConstantCoefficient *dirichletCoef = nullptr;
+    mfem::ConstantCoefficient *robinCoef = nullptr;
     mfem::real_t dirichletValue = 0;
+    mfem::real_t robinH = 0;
     // Own the coefficient objects so BdrMasks is self-contained.
     std::unique_ptr<mfem::ConstantCoefficient> neumannCoefOwner;
     std::unique_ptr<mfem::ConstantCoefficient> dirichletCoefOwner;
+    std::unique_ptr<mfem::ConstantCoefficient> robinCoefOwner;
   };
 
   BdrMasks resolveBoundaryMasks(const std::string &speciesName) const {
@@ -898,8 +982,10 @@ private:
     const int maxBdrAttr = mesh_->bdr_attributes.Max();
     m.essAttrMarker.SetSize(maxBdrAttr);
     m.neumannAttrMarker.SetSize(maxBdrAttr);
+    m.robinAttrMarker.SetSize(maxBdrAttr);
     m.essAttrMarker = 0;
     m.neumannAttrMarker = 0;
+    m.robinAttrMarker = 0;
 
     const auto &bcs = physics_->boundaryConditions(speciesName);
     for (const auto &bc : bcs) {
@@ -923,18 +1009,25 @@ private:
                   static_cast<mfem::real_t>(bc.value));
           m.neumannCoef = m.neumannCoefOwner.get();
         }
+      } else if (bc.type == "robin") {
+        // Dose-loss: -D dC/dn = h C → boundary mass with coef h.
+        marker = &m.robinAttrMarker;
+        m.robinH = static_cast<mfem::real_t>(bc.value);
+        if (!m.robinCoefOwner) {
+          m.robinCoefOwner =
+              std::make_unique<mfem::ConstantCoefficient>(m.robinH);
+          m.robinCoef = m.robinCoefOwner.get();
+        }
       } else {
-        // segregation / robin — Phase 2 Task 5 territory. Don't touch
-        // here; emit a one-time warning per species via std::cerr.
+        // segregation — model-assembled interface residual.
         static thread_local std::set<std::string> warned;
         const std::string key = speciesName + ":" + bc.type;
         if (warned.find(key) == warned.end()) {
           warned.insert(key);
           std::cerr << "[DiffusionEngine] WARNING: BC type '" << bc.type
                     << "' on species '" << speciesName
-                    << "' is not applied in Phase 1 (treating as natural)."
-                    << " Phase 2 Task 5 will add the InterfaceReaction-based "
-                    << "two-sided integrator.\n";
+                    << "' is not applied by the engine (treating as natural)."
+                    << " Use SegregationCondition on interior interfaces.\n";
         }
         continue;
       }

@@ -132,7 +132,6 @@ public:
     duration_ = duration;
   }
 
-  /// Effective anneal: raise T for pulse, return time-averaged D scale.
   NumericType effectiveTimeAt(NumericType Tref) const {
     (void)Tref;
     return duration_;
@@ -140,6 +139,34 @@ public:
 
   NumericType peakTemperature() const { return Tpeak_; }
   NumericType duration() const { return duration_; }
+
+  /// Orchestrate heat → melt phase → effective melt diffusivity history.
+  struct Result {
+    std::vector<NumericType> T;
+    std::vector<NumericType> phi;
+    std::vector<NumericType> Deff;
+  };
+
+  Result runPulse(std::vector<NumericType> T0, NumericType dx,
+                  NumericType dt, int nSteps) {
+    Result r;
+    r.T = std::move(T0);
+    r.phi.assign(r.T.size(), NumericType(0));
+    r.Deff.reserve(static_cast<std::size_t>(nSteps));
+    // Deposit laser energy near surface (index 0).
+    if (!r.T.empty())
+      r.T[0] += Tpeak_ * NumericType(0.1);
+    for (int s = 0; s < nSteps; ++s) {
+      heat.step(r.T, dx, dt);
+      melt.relax(r.phi, r.T, NumericType(5), dt);
+      NumericType Dmean = NumericType(0);
+      for (auto p : r.phi)
+        Dmean += meltDiff.getDiffusivity(p);
+      Dmean /= static_cast<NumericType>(std::max<std::size_t>(1, r.phi.size()));
+      r.Deff.push_back(Dmean);
+    }
+    return r;
+  }
 
   HeatTransfer<NumericType> heat;
   LaserIntensity<NumericType> laser;

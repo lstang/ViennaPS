@@ -1,9 +1,10 @@
 #pragma once
 
 /// DoseLossBC — surface evaporation Robin BC: -D dC/dn = h * C
-/// (MOOSE ADRobinBC with coef = h/D folded in).
+/// Register with DiffusionPhysics::addRobinBC(species, boundary, h).
 
 #include "../DiffusionModel.hpp"
+#include "../DiffusionPhysics.hpp"
 
 #include <algorithm>
 #include <string>
@@ -21,17 +22,22 @@ public:
 
   void setTransferCoefficient(NumericType h) { h_ = h; }
   void setDiffusivity(NumericType D) { D_ = D; }
+  void setBoundary(std::string b) { boundary_ = std::move(b); }
 
   NumericType h() const { return h_; }
-  /// Robin coefficient as used by MFEM: coef = h/D so dC/dn = coef * C.
+  /// Robin coefficient for forms written as dC/dn = coef * C: coef = h/D.
   NumericType robinCoefficient() const {
     return (D_ > NumericType(0)) ? (h_ / D_) : NumericType(0);
   }
 
-  /// 0D host mass-balance step: d(dose)/dt = -h * C_surface * area.
+  /// Attach this BC to physics as an engine-applied Robin condition.
+  void registerWith(DiffusionPhysics<NumericType> &physics) const {
+    physics.addRobinBC(species_, boundary_, h_);
+  }
+
   void applyLossStep(NumericType &C_surface, NumericType &dose,
                      NumericType area, NumericType dt) const {
-    const NumericType flux = h_ * C_surface; // out of domain
+    const NumericType flux = h_ * C_surface;
     const NumericType dDose = flux * area * dt;
     dose = std::max(NumericType(0), dose - dDose);
     C_surface = std::max(NumericType(0), C_surface - flux * dt);
@@ -44,12 +50,11 @@ public:
 
 private:
   std::string species_;
+  std::string boundary_ = "all";
   NumericType h_ = NumericType(0);
   NumericType D_ = NumericType(1e-13);
 };
 
-/// DissociationLossBC — species lost at surface transforming to another
-/// (MOOSE DissociationFluxBC): residual ~ -Kd * C.
 template <class NumericType>
 class DissociationLossBC : public DiffusionModel<NumericType> {
 public:
@@ -60,6 +65,12 @@ public:
 
   void setKd(NumericType Kd) { Kd_ = Kd; }
   NumericType Kd() const { return Kd_; }
+
+  /// Register as Robin with h = Kd (same weak form for first-order loss).
+  void registerWith(DiffusionPhysics<NumericType> &physics,
+                    const std::string &boundary = "all") const {
+    physics.addRobinBC(species_, boundary, Kd_);
+  }
 
   int numSpecies() const override { return 1; }
   std::vector<std::string> speciesNames() const override {

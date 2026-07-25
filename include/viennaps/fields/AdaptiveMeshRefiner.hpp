@@ -95,6 +95,50 @@ public:
     }
     return ids;
   }
+
+  /// Local refinement via MFEM GeneralRefinement (list of element ids).
+  static int refineMarked(mfem::Mesh &mesh, const std::vector<int> &elemIds) {
+    if (elemIds.empty())
+      return 0;
+    mfem::Array<int> el_to_refine;
+    for (int id : elemIds)
+      if (id >= 0 && id < mesh.GetNE())
+        el_to_refine.Append(id);
+    if (el_to_refine.Size() == 0)
+      return 0;
+    const int n = el_to_refine.Size();
+    mesh.GeneralRefinement(el_to_refine);
+    return n;
+  }
+
+  /// Gradient-based marking: elements with |∇u| ≥ fraction * max|∇u|.
+  static std::vector<int>
+  markByGradient(mfem::Mesh &mesh, const mfem::GridFunction &u,
+                 double fractionOfMax = 0.5) {
+    std::vector<double> g(static_cast<std::size_t>(mesh.GetNE()), 0.0);
+    double gmax = 0.0;
+    for (int e = 0; e < mesh.GetNE(); ++e) {
+      mfem::ElementTransformation *T = mesh.GetElementTransformation(e);
+      const mfem::IntegrationRule *ir =
+          &mfem::IntRules.Get(mesh.GetElementBaseGeometry(e), 2);
+      double local = 0.0;
+      for (int i = 0; i < ir->GetNPoints(); ++i) {
+        const mfem::IntegrationPoint &ip = ir->IntPoint(i);
+        T->SetIntPoint(&ip);
+        mfem::Vector grad;
+        u.GetGradient(*T, grad);
+        local = std::max(local, grad.Norml2());
+      }
+      g[static_cast<std::size_t>(e)] = local;
+      gmax = std::max(gmax, local);
+    }
+    const double thr = fractionOfMax * gmax;
+    std::vector<int> marks;
+    for (int e = 0; e < mesh.GetNE(); ++e)
+      if (g[static_cast<std::size_t>(e)] >= thr && thr > 0.0)
+        marks.push_back(e);
+    return marks;
+  }
 #endif
 
 private:

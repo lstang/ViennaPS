@@ -479,6 +479,102 @@ void TestPhase11Amr() {
   std::cout << "[phase11] marks=" << marks.size() << "\n";
 }
 
+void TestDeepenedApis() {
+  auto timeline =
+      CddDiffusion<double>::tedTimeline(1e-13, 1e15, 1e12, 1e-18, 20, 1.0);
+  VC_TEST_ASSERT(timeline.front() > timeline.back());
+
+  CddDiffusion<double> cdd;
+  cdd.enableClusters(true);
+  cdd.addReaction({{"Boron", "Interstitial"}, {"BIC"}, 1e-18, 0.0});
+  VC_TEST_ASSERT(cdd.speciesNames().size() >= 4);
+
+  SupgAdvectionTerm supg("Boron", 1.0, 0.0, 0.1);
+  VC_TEST_ASSERT(supg.tau() > 0.0);
+
+  FlashLaserAnneal<double> flash;
+  auto res = flash.runPulse(std::vector<double>(8, 300.0), 1e-4, 1e-6, 5);
+  VC_TEST_ASSERT(res.Deff.size() == 5);
+
+  const double D0fit = FittingUtilities::fitD0FixedEa(
+      {1000.0, 1100.0, 1200.0}, {1e-16, 5e-16, 2e-15}, 3.46);
+  VC_TEST_ASSERT(D0fit > 0.0);
+
+  CalibratedParameters a, b;
+  a.setDopant("Boron", 0.76, 3.46);
+  b.setDopant("Boron", 1.0, 3.5);
+  auto bl = CalibratedParameters::blend(a, b, 0.5);
+  VC_TEST_ASSERT(bl.diffusivity("Boron", 1273.0) > 0.0);
+
+  KmcLattice lat;
+  lat.resize(3, 3, 3);
+  lat.at(1, 1, 0).occupied = true;
+  lat.at(1, 1, 0).species = 1;
+  KmcParameters p;
+  p.T = 1400;
+  p.hopBarrier = 0.05;
+  auto conc = KmcContinuumCoupler::hopAndDeatomize(lat, p, 1, 1e-21, 5);
+  VC_TEST_ASSERT(conc.size() == 27);
+
+  PairDiffusion<double> pair;
+  pair.setPairDiffusivity(1e-13);
+  pair.setCIEq(1e12);
+  pair.setSupg(true, 0.1);
+  VC_TEST_ASSERT(pair.supgEnabled());
+  VC_TEST_ASSERT(pair.getDiffusivity(1e15, 1273.0) >
+                 pair.getDiffusivity(1e12, 1273.0));
+
+  std::cout << "[deepened-apis] OK timeline0=" << timeline.front()
+            << " timelineN=" << timeline.back() << "\n";
+}
+
+#ifdef VIENNAPS_HAS_MFEM
+void TestDeepenedRobinEngine() {
+  MeshAttributes attrs;
+  attrs.setAttributeName(1, "Si");
+  auto mesh = std::make_unique<mfem::Mesh>(mfem::Mesh::MakeCartesian2D(
+      4, 4, mfem::Element::TRIANGLE, /*generate_edges*/ true));
+  DiffusionEngine<double, 2> engine;
+  engine.setMesh(std::move(mesh), attrs);
+  engine.setForceImplicitEuler(true);
+  auto model = std::make_shared<ConstantDiffusion<double>>("Boron");
+  model->setDiffusivity(1e-3, 0.0);
+  DiffusionPhysics<double> physics;
+  physics.addSpecies("Boron");
+  physics.addModel(model);
+  DoseLossBC<double> loss("Boron");
+  loss.setTransferCoefficient(1.0);
+  loss.registerWith(physics);
+  engine.setPhysics(physics);
+  engine.initializeSpecies("Boron", 1e18);
+  const double d0 = engine.getIntegral("Boron");
+  engine.solve(0.0, 0.5, 0.1);
+  const double d1 = engine.getIntegral("Boron");
+  std::cout << "[deep-robin] dose0=" << d0 << " dose1=" << d1 << "\n";
+  VC_TEST_ASSERT(d1 < d0 * 0.999);
+
+  // Integral-preserving project on same engine type (fresh instance).
+  MeshAttributes attrs2;
+  attrs2.setAttributeName(1, "Si");
+  auto mesh2 = std::make_unique<mfem::Mesh>(
+      mfem::Mesh::MakeCartesian2D(6, 6, mfem::Element::TRIANGLE));
+  DiffusionEngine<double, 2> eng2;
+  eng2.setMesh(std::move(mesh2), attrs2);
+  eng2.setForceImplicitEuler(true);
+  DiffusionPhysics<double> phys2;
+  phys2.addSpecies("Interstitial");
+  auto im = std::make_shared<ConstantDiffusion<double>>("Interstitial");
+  im->setDiffusivity(1e-10, 0.0);
+  phys2.addModel(im);
+  eng2.setPhysics(phys2);
+  std::vector<double> samples = {0, 1e15, 2e15, 1e15, 0};
+  eng2.projectIntegralPreserving("Interstitial", samples, 1e15);
+  const double dose = eng2.getIntegral("Interstitial");
+  std::cout << "[deep-ted-init] dose=" << dose << "\n";
+  VC_TEST_ASSERT(std::abs(dose - 1e15) / 1e15 < 0.05);
+}
+#endif
+
 void TestPhase4Models() {
   // OED injection increases C_I at interface bin.
   OedSource<double> oed;
@@ -1176,6 +1272,10 @@ int main() {
   TestPhase9Laser();
   TestPhase10PdeApi();
   TestPhase11Amr();
+  TestDeepenedApis();
+#ifdef VIENNAPS_HAS_MFEM
+  TestDeepenedRobinEngine();
+#endif
   TestFermiDiffusion();
   TestChargedFermi();
   TestSolidSolubility();

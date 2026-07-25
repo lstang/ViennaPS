@@ -161,6 +161,36 @@ struct KmcReport {
   int steps = 0;
   int hopCount = 0;
   int occupied = 0;
+
+  static KmcReport fromEngine(const KmcAtomisticEngine &eng) {
+    KmcReport r;
+    r.time = eng.time();
+    r.steps = eng.steps();
+    r.occupied = 0;
+    for (int k = 0; k < eng.lattice().nz(); ++k)
+      for (int j = 0; j < eng.lattice().ny(); ++j)
+        for (int i = 0; i < eng.lattice().nx(); ++i)
+          if (eng.lattice().at(i, j, k).occupied)
+            ++r.occupied;
+    return r;
+  }
+};
+
+/// Continuum ↔ KMC coupling facade for TED validation loops.
+class KmcContinuumCoupler {
+public:
+  /// Run KMC hops then deatomize back to continuum concentration.
+  static std::vector<double>
+  hopAndDeatomize(KmcLattice lat, KmcParameters params, int speciesCode,
+                  double volumePerSite, int steps, unsigned seed = 1) {
+    KmcAtomisticEngine eng(seed);
+    eng.setLattice(std::move(lat));
+    eng.setParameters(params);
+    eng.run(steps);
+    std::vector<double> conc;
+    KmcDeatomize::deatomize(eng.lattice(), conc, volumePerSite, speciesCode);
+    return conc;
+  }
 };
 
 } // namespace viennaps

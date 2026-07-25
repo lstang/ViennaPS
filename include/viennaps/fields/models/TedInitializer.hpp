@@ -1,6 +1,6 @@
 #pragma once
 
-/// TedInitializer — project implant damage (I/V) onto FEM dofs with
+/// TedInitializer — project implant damage onto continuum fields with
 /// integral-preserving rescaling (MOOSE IntegralPreservingFunctionIC).
 
 #include <algorithm>
@@ -9,18 +9,19 @@
 #include <string>
 #include <vector>
 
+#ifdef VIENNAPS_HAS_MFEM
+#include <mfem.hpp>
+#endif
+
 namespace viennaps {
 
 template <class NumericType>
 class TedInitializer {
 public:
-  /// Analytic / mock damage profile samples (positions optional).
   struct DamageProfile {
-    std::vector<NumericType> values; ///< C_I or C_V samples
+    std::vector<NumericType> values;
   };
 
-  /// Project source onto target mesh samples and rescale so
-  /// sum(target)*dx_target == sum(source)*dx_source (dose conservation).
   static void projectIntegralPreserving(const DamageProfile &source,
                                         NumericType dxSource,
                                         std::vector<NumericType> &target,
@@ -28,7 +29,6 @@ public:
     if (source.values.empty() || target.empty())
       return;
 
-    // Nearest-neighbor / linear sample from source onto target length.
     const std::size_t ns = source.values.size();
     const std::size_t nt = target.size();
     for (std::size_t i = 0; i < nt; ++i) {
@@ -62,6 +62,37 @@ public:
                                NumericType dx) {
     return std::accumulate(C.begin(), C.end(), NumericType(0)) * dx;
   }
+
+#ifdef VIENNAPS_HAS_MFEM
+  /// Project damage onto an MFEM GridFunction and rescale to targetDose = ∫C.
+  static void projectToGridFunction(const DamageProfile &source,
+                                    mfem::GridFunction &gf,
+                                    double targetDose) {
+    if (source.values.empty() || gf.Size() == 0)
+      return;
+    const std::size_t ns = source.values.size();
+    for (int i = 0; i < gf.Size(); ++i) {
+      const double xi =
+          (gf.Size() == 1)
+              ? 0.0
+              : static_cast<double>(i) / static_cast<double>(gf.Size() - 1);
+      const double sj = xi * static_cast<double>(ns - 1);
+      const std::size_t j0 = static_cast<std::size_t>(sj);
+      const std::size_t j1 = std::min(j0 + 1, ns - 1);
+      const double f = sj - static_cast<double>(j0);
+      gf(i) = static_cast<mfem::real_t>(
+          (1.0 - f) * static_cast<double>(source.values[j0]) +
+          f * static_cast<double>(source.values[j1]));
+    }
+    mfem::ConstantCoefficient one(1.0);
+    mfem::LinearForm mass(gf.FESpace());
+    mass.AddDomainIntegrator(new mfem::DomainLFIntegrator(one));
+    mass.Assemble();
+    const double doseNow = gf * mass;
+    if (doseNow > 0.0 && targetDose > 0.0)
+      gf *= static_cast<mfem::real_t>(targetDose / doseNow);
+  }
+#endif
 };
 
 } // namespace viennaps

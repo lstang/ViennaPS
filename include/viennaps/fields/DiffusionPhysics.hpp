@@ -88,6 +88,13 @@ public:
     bcs_[sp].push_back({bnd, "dirichlet", val});
   }
 
+  /// Robin (dose-loss) BC: -D dC/dn = h * C. `value` is the transfer
+  /// coefficient h [length/time]. Engine adds ∫_Γ h u v to the weak form.
+  void addRobinBC(const std::string& sp, const std::string& bnd,
+                  NumericType h) {
+    bcs_[sp].push_back({bnd, "robin", h});
+  }
+
   /// Per-species BC list. Empty vector if species has no BCs registered.
   const std::vector<BCSpec>& boundaryConditions(const std::string& sp) const {
     static const std::vector<BCSpec> empty;
