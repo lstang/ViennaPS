@@ -117,6 +117,7 @@
 #include <fields/AdaptiveMeshRefiner.hpp>
 #include <fields/MovingMeshHandler.hpp>
 #include <fields/SolutionTransfer.hpp>
+#include <fields/models/LinearReactionDiffusion.hpp>
 #ifdef VIENNAPS_HAS_MFEM
 #include <fields/LevelSetToMesh.hpp>
 #include <fields/DiffusionEngine.hpp>

@@ -52,6 +52,23 @@ public:
     return n;
   }
 
+  /// Mark sites as diamond sublattice A (parity even) or B (parity odd).
+  /// Neighbors between A–B approximate the two FCC sublattices of diamond.
+  int sublattice(int i, int j, int k) const {
+    return ((i + j + k) & 1); // 0 = A, 1 = B
+  }
+
+  /// 1D depth profile of species count per k-plane.
+  std::vector<int> profile1D(int speciesCode) const {
+    std::vector<int> p(static_cast<std::size_t>(nz_), 0);
+    for (int k = 0; k < nz_; ++k)
+      for (int j = 0; j < ny_; ++j)
+        for (int i = 0; i < nx_; ++i)
+          if (at(i, j, k).occupied && at(i, j, k).species == speciesCode)
+            ++p[static_cast<std::size_t>(k)];
+    return p;
+  }
+
 private:
   int nx_ = 0, ny_ = 0, nz_ = 0;
   double a0_ = 5.43e-8;

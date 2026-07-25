@@ -124,6 +124,89 @@ public:
         u[sdim - 1] = lift;
     });
   }
+
+  /// Laplacian node smoothing (Jacobi average of neighbors).
+  static int laplacianSmooth(mfem::Mesh &mesh, int iterations = 2,
+                             double weight = 0.5) {
+    if (iterations <= 0)
+      return 0;
+    const int nv = mesh.GetNV();
+    const int sdim = mesh.SpaceDimension();
+    std::vector<double> x(static_cast<std::size_t>(nv * sdim));
+    std::vector<double> xnew(x.size());
+    for (int v = 0; v < nv; ++v)
+      mesh.GetNode(v, &x[static_cast<std::size_t>(v * sdim)]);
+
+    // Element-local averaging graph.
+    std::vector<std::vector<int>> adj(static_cast<std::size_t>(nv));
+    for (int el = 0; el < mesh.GetNE(); ++el) {
+      mfem::Array<int> v;
+      mesh.GetElementVertices(el, v);
+      for (int i = 0; i < v.Size(); ++i)
+        for (int j = 0; j < v.Size(); ++j)
+          if (i != j)
+            adj[static_cast<std::size_t>(v[i])].push_back(v[j]);
+    }
+    for (int it = 0; it < iterations; ++it) {
+      xnew = x;
+      for (int v = 0; v < nv; ++v) {
+        const auto &nbr = adj[static_cast<std::size_t>(v)];
+        if (nbr.empty())
+          continue;
+        std::vector<double> avg(static_cast<std::size_t>(sdim), 0.0);
+        for (int n : nbr)
+          for (int d = 0; d < sdim; ++d)
+            avg[static_cast<std::size_t>(d)] +=
+                x[static_cast<std::size_t>(n * sdim + d)];
+        for (int d = 0; d < sdim; ++d) {
+          avg[static_cast<std::size_t>(d)] /=
+              static_cast<double>(nbr.size());
+          const std::size_t id = static_cast<std::size_t>(v * sdim + d);
+          xnew[id] = (1.0 - weight) * x[id] + weight * avg[static_cast<std::size_t>(d)];
+        }
+      }
+      x.swap(xnew);
+    }
+    for (int v = 0; v < nv; ++v)
+      mesh.SetNode(v, &x[static_cast<std::size_t>(v * sdim)]);
+    mesh.NodesUpdated();
+    return iterations;
+  }
+
+  /// Max element aspect proxy: max edge / min edge over elements.
+  static double maxAspectRatio(mfem::Mesh &mesh) {
+    double worst = 1.0;
+    for (int e = 0; e < mesh.GetNE(); ++e) {
+      mfem::Array<int> v;
+      mesh.GetElementVertices(e, v);
+      if (v.Size() < 2)
+        continue;
+      double minL = 1e300, maxL = 0.0;
+      for (int i = 0; i < v.Size(); ++i) {
+        double xi[3] = {0, 0, 0}, xj[3] = {0, 0, 0};
+        mesh.GetNode(v[i], xi);
+        for (int j = i + 1; j < v.Size(); ++j) {
+          mesh.GetNode(v[j], xj);
+          double L2 = 0.0;
+          for (int d = 0; d < mesh.SpaceDimension(); ++d) {
+            const double dx = xi[d] - xj[d];
+            L2 += dx * dx;
+          }
+          const double L = std::sqrt(L2);
+          minL = std::min(minL, L);
+          maxL = std::max(maxL, L);
+        }
+      }
+      if (minL > 0.0)
+        worst = std::max(worst, maxL / minL);
+    }
+    return worst;
+  }
+
+  /// Remesh trigger: true if aspect ratio exceeds threshold (skewness proxy).
+  static bool needsRemesh(mfem::Mesh &mesh, double aspectThreshold = 5.0) {
+    return maxAspectRatio(mesh) > aspectThreshold;
+  }
 #endif
 
 private:

@@ -43,28 +43,8 @@ struct LevelSetToMeshResult {
   MeshAttributes attributes;
 };
 
-/// LevelSetToMeshConverter converts a ViennaPS level-set domain into an
-/// `mfem::Mesh` whose elements are tagged with material attributes.
-///
-/// Phase 1 scope (per ADR-0001 + task-4-brief):
-///   - 2D only. A Cartesian triangular mesh (`MakeCartesian2D`) is built over
-///     the level-set grid bounds and vertices are scaled to domain coordinates.
-///   - Element attributes are assigned by evaluating each element's centroid
-///     against the registered level sets: the material at the centroid is the
-///     material of the innermost level set that contains it. (ViennaLS
-///     convention: the level set is negative inside the material region.)
-///   - D=3 is provided as a stub that throws — `MakeCartesian3D` will be added
-///     in a later phase.
-template <class NumericType, int D> class LevelSetToMeshConverter {
-public:
-  /// Convert `domain` to `{unique_ptr<mfem::Mesh>, MeshAttributes}`.
-  /// Throws `std::runtime_error` if the domain has no level sets.
-  LevelSetToMeshResult
-  convert(const Domain<NumericType, D> &domain) const {
-    throw std::runtime_error(
-        "3D LevelSetToMeshConverter not implemented in Phase 1");
-  }
-};
+/// Primary template — only D=2 and D=3 specializations are provided.
+template <class NumericType, int D> class LevelSetToMeshConverter;
 
 /// 2D specialization: produces a triangular Cartesian MFEM mesh tagged from
 /// the domain's material map.
@@ -188,6 +168,102 @@ private:
       if (value <= NumericType(0)) {
         return static_cast<int>(i) + 1;
       }
+    }
+    return 1;
+  }
+};
+
+/// 3D specialization: Cartesian tetrahedral mesh + attribute tagging.
+/// Boundary-conforming marching-cubes remesh remains a stretch goal.
+template <class NumericType> class LevelSetToMeshConverter<NumericType, 3> {
+public:
+  LevelSetToMeshResult convert(const Domain<NumericType, 3> &domain) const {
+    const auto &levelSets = domain.getLevelSets();
+    if (levelSets.empty()) {
+      throw std::runtime_error(
+          "LevelSetToMeshConverter<3>: domain has no level sets");
+    }
+    const auto &grid = levelSets[0]->getGrid();
+    const NumericType gridDelta =
+        static_cast<NumericType>(grid.getGridDelta());
+    const auto &minIdx = grid.getMinBounds();
+    const auto &maxIdx = grid.getMaxBounds();
+    const NumericType xMin = static_cast<NumericType>(minIdx[0]) * gridDelta;
+    const NumericType xMax = static_cast<NumericType>(maxIdx[0]) * gridDelta;
+    const NumericType yMin = static_cast<NumericType>(minIdx[1]) * gridDelta;
+    const NumericType yMax = static_cast<NumericType>(maxIdx[1]) * gridDelta;
+    const NumericType zMin = static_cast<NumericType>(minIdx[2]) * gridDelta;
+    const NumericType zMax = static_cast<NumericType>(maxIdx[2]) * gridDelta;
+    const NumericType xExtent = xMax - xMin;
+    const NumericType yExtent = yMax - yMin;
+    const NumericType zExtent = zMax - zMin;
+    if (xExtent <= 0 || yExtent <= 0 || zExtent <= 0 || gridDelta <= 0) {
+      throw std::runtime_error(
+          "LevelSetToMeshConverter<3>: degenerate domain bounds");
+    }
+    const int nx = std::max(1, static_cast<int>(std::round(xExtent / gridDelta)));
+    const int ny = std::max(1, static_cast<int>(std::round(yExtent / gridDelta)));
+    const int nz = std::max(1, static_cast<int>(std::round(zExtent / gridDelta)));
+
+    auto mesh = std::make_unique<mfem::Mesh>(mfem::Mesh::MakeCartesian3D(
+        nx, ny, nz, mfem::Element::TETRAHEDRON,
+        /*sx*/ static_cast<mfem::real_t>(xExtent),
+        /*sy*/ static_cast<mfem::real_t>(yExtent),
+        /*sz*/ static_cast<mfem::real_t>(zExtent)));
+    mesh->Transform([xMin, yMin, zMin](const mfem::Vector &in,
+                                       mfem::Vector &out) {
+      out.SetSize(3);
+      out(0) = in(0) + xMin;
+      out(1) = in(1) + yMin;
+      out(2) = in(2) + zMin;
+    });
+
+    MeshAttributes attrs;
+    const auto materialMap = domain.getMaterialMap();
+    if (materialMap) {
+      for (std::size_t i = 0; i < materialMap->size(); ++i) {
+        attrs.setAttributeName(
+            static_cast<int>(i) + 1,
+            MaterialMap::toString(materialMap->getMaterialAtIdx(i)));
+      }
+    }
+    mfem::Vector center(3);
+    for (int e = 0; e < mesh->GetNE(); ++e) {
+      mesh->GetElementCenter(e, center);
+      const int attr = attributeAtPoint3(
+          levelSets, grid, gridDelta, xMin, yMin, zMin,
+          static_cast<NumericType>(center(0)),
+          static_cast<NumericType>(center(1)),
+          static_cast<NumericType>(center(2)));
+      mesh->SetAttribute(e, attr);
+    }
+    mesh->SetAttributes();
+    return {std::move(mesh), std::move(attrs)};
+  }
+
+private:
+  using LsPtr = SmartPointer<viennals::Domain<NumericType, 3>>;
+
+  static int attributeAtPoint3(const std::vector<LsPtr> &levelSets,
+                               const viennahrle::Grid<3> &grid,
+                               NumericType gridDelta, NumericType xMin,
+                               NumericType yMin, NumericType zMin,
+                               NumericType x, NumericType y, NumericType z) {
+    viennahrle::Index<3> idx;
+    idx[0] = static_cast<viennahrle::IndexType>(
+        std::round((x - xMin) / gridDelta));
+    idx[1] = static_cast<viennahrle::IndexType>(
+        std::round((y - yMin) / gridDelta));
+    idx[2] = static_cast<viennahrle::IndexType>(
+        std::round((z - zMin) / gridDelta));
+    for (int d = 0; d < 3; ++d)
+      idx[d] = std::clamp<viennahrle::IndexType>(
+          idx[d], grid.getMinBounds(d), grid.getMaxBounds(d));
+    for (std::size_t i = 0; i < levelSets.size(); ++i) {
+      viennahrle::ConstSparseIterator<viennahrle::Domain<NumericType, 3>> it(
+          levelSets[i]->getDomain(), idx);
+      if (it.getValue() <= NumericType(0))
+        return static_cast<int>(i) + 1;
     }
     return 1;
   }

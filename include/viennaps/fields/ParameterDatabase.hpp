@@ -148,6 +148,10 @@ private:
     setProperty("Si", "DoseLoss_h_Boron", NumericType(1e-4));
     // Pair diffusivity scale for TED (cm^2/s) when not taken from Arrhenius D
     setProperty("Si", "Pair_D_Boron", NumericType(1e-13));
+    // Deal–Grove oxidation (dry, 1 atm, order-of-magnitude)
+    setArrhenius("Si", "Oxidation_B", NumericType(7.72e2), NumericType(1.23));
+    setArrhenius("Si", "Oxidation_BA", NumericType(3.71e6), NumericType(2.0));
+    setProperty("Si", "Oxidation_tau", NumericType(0));
   }
 };
 

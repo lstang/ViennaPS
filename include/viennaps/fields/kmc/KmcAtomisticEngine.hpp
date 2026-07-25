@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <map>
 #include <numeric>
 #include <random>
 #include <vector>
@@ -291,19 +292,43 @@ struct KmcReport {
   int occupied = 0;
   int recombCount = 0;
   int clusterCount = 0;
+  int dissocCount = 0;
+  double supersaturationI = 0.0;
+  std::vector<int> depthProfileI;
+  std::map<int, int> clusterSizeHistogram; // size→count (size=1 free I, 2=cluster)
 
-  static KmcReport fromEngine(const KmcAtomisticEngine &eng) {
+  static KmcReport fromEngine(const KmcAtomisticEngine &eng,
+                              double C_I_eq = 1e12) {
     KmcReport r;
     r.time = eng.time();
     r.steps = eng.steps();
     r.recombCount = eng.recombCount();
     r.clusterCount = eng.clusterCount();
+    r.dissocCount = eng.dissocCount();
     r.occupied = 0;
+    int nI = 0, nCl = 0;
     for (int k = 0; k < eng.lattice().nz(); ++k)
       for (int j = 0; j < eng.lattice().ny(); ++j)
-        for (int i = 0; i < eng.lattice().nx(); ++i)
-          if (eng.lattice().at(i, j, k).occupied)
-            ++r.occupied;
+        for (int i = 0; i < eng.lattice().nx(); ++i) {
+          const auto &s = eng.lattice().at(i, j, k);
+          if (!s.occupied)
+            continue;
+          ++r.occupied;
+          if (s.species == 1)
+            ++nI;
+          if (s.species == 3)
+            ++nCl;
+        }
+    r.depthProfileI = eng.lattice().profile1D(1);
+    r.clusterSizeHistogram[1] = nI;
+    r.clusterSizeHistogram[2] = nCl;
+    // Supersaturation proxy: free-I count / (C_I_eq * volume units).
+    const double volSites =
+        static_cast<double>(eng.lattice().size());
+    r.supersaturationI =
+        (C_I_eq > 0 && volSites > 0)
+            ? static_cast<double>(nI) / (C_I_eq * volSites * 1e-24 + 1e-30)
+            : 0.0;
     return r;
   }
 };

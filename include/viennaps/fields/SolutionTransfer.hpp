@@ -2,11 +2,11 @@
 
 /// SolutionTransfer — field transfer between meshes with dose preservation.
 ///
-/// Path (MFEM):
-///  1. Project source field onto target FE space by evaluating the source
-///     GridFunction at physical points of the target mesh (FindPoints).
-///  2. Rescale so ∫C_target = ∫C_source (IntegralPreservingFunctionIC pattern;
-///     same mass dual as TedInitializer::projectToGridFunction).
+/// Paths (MFEM):
+///  A) L2 projection (preferred): build mass M on the target space, RHS
+///     b_i = ∫ source(x) φ_i dV via FindPoints-sampled coefficient, solve
+///     M x = b (MultiAppProjectionTransfer::assembleL2 pattern).
+///  B) Pointwise ProjectCoefficient fallback + integral-preserving rescale.
 ///
 /// Dose = (1, C)_L2 via DomainLFIntegrator(ConstantCoefficient(1)).
 
@@ -58,77 +58,75 @@ public:
     return vol;
   }
 
-  /// Transfer source → target (possibly different meshes). After sampling,
-  /// rescale so dose matches source when source dose > 0.
+  /// Sample source GF at a physical point (FindPoints).
+  class SourceSampleCoef : public mfem::Coefficient {
+  public:
+    SourceSampleCoef(const mfem::GridFunction *src, mfem::Mesh *smesh)
+        : src_(src), smesh_(smesh) {}
+    double Eval(mfem::ElementTransformation &T,
+                const mfem::IntegrationPoint &ip) override {
+      mfem::Vector x;
+      T.Transform(ip, x);
+      mfem::DenseMatrix pts(x.Size(), 1);
+      for (int d = 0; d < x.Size(); ++d)
+        pts(d, 0) = x(d);
+      mfem::Array<int> el(1);
+      mfem::Array<mfem::IntegrationPoint> ips(1);
+      smesh_->FindPoints(pts, el, ips, /*warn=*/false);
+      if (el[0] < 0) {
+        ++misses_;
+        return 0.0;
+      }
+      return src_->GetValue(*smesh_->GetElementTransformation(el[0]), ips[0]);
+    }
+    int misses() const { return misses_; }
+
+  private:
+    const mfem::GridFunction *src_;
+    mfem::Mesh *smesh_;
+    mutable int misses_ = 0;
+  };
+
+  /// L2 projection: solve M x = b with b_i = ∫ s(x) φ_i, then dose rescale.
   static TransferResult
-  transferIntegralPreserving(const mfem::GridFunction &source,
-                             mfem::GridFunction &target) {
+  transferL2(const mfem::GridFunction &source, mfem::GridFunction &target) {
     TransferResult r;
     r.doseSource = integrate(source);
     if (target.Size() == 0 || !target.FESpace() || !source.FESpace()) {
       r.ok = false;
       return r;
     }
-    mfem::Mesh *tmesh = target.FESpace()->GetMesh();
     mfem::Mesh *smesh = source.FESpace()->GetMesh();
-    if (!tmesh || !smesh) {
+    mfem::FiniteElementSpace *fes = target.FESpace();
+    if (!smesh || !fes) {
       r.ok = false;
       return r;
     }
 
-    // Coefficient: at each target QP, sample source via FindPoints.
-    class SourceSampleCoef : public mfem::Coefficient {
-    public:
-      SourceSampleCoef(const mfem::GridFunction *src, mfem::Mesh *smesh)
-          : src_(src), smesh_(smesh) {}
-      double Eval(mfem::ElementTransformation &T,
-                  const mfem::IntegrationPoint &ip) override {
-        mfem::Vector x;
-        T.Transform(ip, x);
-        mfem::DenseMatrix pts(x.Size(), 1);
-        for (int d = 0; d < x.Size(); ++d)
-          pts(d, 0) = x(d);
-        mfem::Array<int> el(1);
-        mfem::Array<mfem::IntegrationPoint> ips(1);
-        // Point-sampling projection (not full Mx=b L2). Fail-loud on
-        // unmapped QPs when requireMapped_ is set; otherwise count miss.
-        smesh_->FindPoints(pts, el, ips, /*warn=*/false);
-        if (el[0] < 0) {
-          ++misses_;
-          if (requireMapped_) {
-            MFEM_ABORT("SolutionTransfer: FindPoints missed a target QP "
-                       "(set requireMapped=false to allow silent zero).");
-          }
-          return 0.0;
-        }
-        return src_->GetValue(*smesh_->GetElementTransformation(el[0]), ips[0]);
-      }
-      int misses() const { return misses_; }
-      void setRequireMapped(bool on) { requireMapped_ = on; }
-
-    private:
-      const mfem::GridFunction *src_;
-      mfem::Mesh *smesh_;
-      bool requireMapped_ = false;
-      mutable int misses_ = 0;
-    };
-
-    // Prefer L2 mass-matrix path when meshes share the same FE topology
-    // (identical element count): ProjectCoefficient of GridFunctionCoefficient
-    // is exact on matching spaces; for non-matching meshes use FindPoints.
     SourceSampleCoef coef(&source, smesh);
-    // Same Cartesian domain tests: soft-fail on miss, dose rescale recovers.
-    coef.setRequireMapped(false);
-    target.ProjectCoefficient(coef);
+    mfem::ConstantCoefficient one(1.0);
+    mfem::BilinearForm M(fes);
+    M.AddDomainIntegrator(new mfem::MassIntegrator(one));
+    M.Assemble();
+    M.Finalize();
+
+    mfem::LinearForm b(fes);
+    b.AddDomainIntegrator(new mfem::DomainLFIntegrator(coef));
+    b.Assemble();
     r.unmappedQuadraturePoints = coef.misses();
 
+    mfem::SparseMatrix &Ms = M.SpMat();
+    mfem::GSSmoother prec(Ms);
+    target = 0.0;
+    mfem::CG(Ms, b, target, /*print_iter*/ 0, /*max_num_iter*/ 400,
+             /*RTOLERANCE*/ 1e-12, /*ATOLERANCE*/ 0.0);
     r.doseTargetBeforeScale = integrate(target);
     if (r.doseSource > 0.0) {
       const double now = r.doseTargetBeforeScale;
-      if (now > 0.0) {
+      if (now > 0.0)
         target *= static_cast<mfem::real_t>(r.doseSource / now);
-      } else {
-        const double vol = meshVolume(*tmesh);
+      else {
+        const double vol = meshVolume(*fes->GetMesh());
         if (vol > 0.0)
           target = static_cast<mfem::real_t>(r.doseSource / vol);
       }
@@ -137,8 +135,16 @@ public:
     const double denom = std::max(std::abs(r.doseSource), 1e-30);
     r.relativeDoseError =
         std::abs(r.doseTargetAfterScale - r.doseSource) / denom;
-    r.ok = (r.relativeDoseError <= 1e-3); // 0.1%
+    r.ok = (r.relativeDoseError <= 1e-3);
+    (void)prec;
     return r;
+  }
+
+  /// Default transfer: L2 Mx=b path with integral-preserving rescale.
+  static TransferResult
+  transferIntegralPreserving(const mfem::GridFunction &source,
+                             mfem::GridFunction &target) {
+    return transferL2(source, target);
   }
 
   /// Same-size dof copy then optional rescale (identical FE spaces).

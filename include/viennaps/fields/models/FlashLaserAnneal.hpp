@@ -7,16 +7,20 @@
 
 #include <algorithm>
 #include <cmath>
+#include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
 namespace viennaps {
 
 template <class NumericType>
-class HeatTransfer {
+class HeatTransfer : public DiffusionModel<NumericType> {
 public:
+  HeatTransfer() { this->setName("HeatTransfer"); }
   void setThermalDiffusivity(NumericType alpha) { alpha_ = alpha; }
   void setSource(NumericType q) { q_ = q; }
+  NumericType thermalDiffusivity() const { return alpha_; }
 
   /// 1D explicit heat step on T profile.
   void step(std::vector<NumericType> &T, NumericType dx, NumericType dt) const {
@@ -31,9 +35,45 @@ public:
     T.swap(n);
   }
 
+  int numSpecies() const override { return 1; }
+  std::vector<std::string> speciesNames() const override {
+    return {"Temperature"};
+  }
+
+#ifdef VIENNAPS_HAS_MFEM
+  /// FEM heat equation stiffness: α ∇T·∇v (+ optional volumetric source in R).
+  void assembleStiffness(
+      mfem::BilinearForm &K, const mfem::GridFunction & /*speciesGF*/,
+      const std::map<std::string, mfem::GridFunction *> & /*allSpecies*/,
+      const mfem::GridFunction * /*temp*/) const override {
+    stiffCoef_ = std::make_unique<mfem::ConstantCoefficient>(
+        static_cast<double>(alpha_));
+    K.AddDomainIntegrator(new mfem::DiffusionIntegrator(*stiffCoef_));
+  }
+  void assembleReaction(
+      mfem::LinearForm &R, const mfem::GridFunction & /*speciesGF*/,
+      const std::map<std::string, mfem::GridFunction *> & /*allSpecies*/,
+      const mfem::GridFunction * /*temp*/) const override {
+    if (q_ == NumericType(0))
+      return;
+    srcCoef_ = std::make_unique<mfem::ConstantCoefficient>(
+        static_cast<double>(q_));
+    R.AddDomainIntegrator(new mfem::DomainLFIntegrator(*srcCoef_));
+  }
+  void assembleMass(mfem::BilinearForm &M) const override {
+    massCoef_ = std::make_unique<mfem::ConstantCoefficient>(1.0);
+    M.AddDomainIntegrator(new mfem::MassIntegrator(*massCoef_));
+  }
+#endif
+
 private:
   NumericType alpha_ = NumericType(0.8); // cm^2/s order Si thermal
   NumericType q_ = NumericType(0);
+#ifdef VIENNAPS_HAS_MFEM
+  mutable std::unique_ptr<mfem::ConstantCoefficient> stiffCoef_;
+  mutable std::unique_ptr<mfem::ConstantCoefficient> massCoef_;
+  mutable std::unique_ptr<mfem::ConstantCoefficient> srcCoef_;
+#endif
 };
 
 template <class NumericType>

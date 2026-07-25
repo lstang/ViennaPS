@@ -24,6 +24,17 @@ public:
 
   void setTemperature(NumericType T) { T_ = T; }
 
+  /// Orientation factor: (100)=1, (110)~0.7, (111)~0.5 typical SPER ratio.
+  void setOrientation(const std::string &ori) {
+    if (ori == "110")
+      orientFactor_ = NumericType(0.7);
+    else if (ori == "111")
+      orientFactor_ = NumericType(0.5);
+    else
+      orientFactor_ = NumericType(1.0);
+  }
+  NumericType orientationFactor() const { return orientFactor_; }
+
   void setup() override {
     // v = v0 exp(-Ea/kT)  (cm/s → normalized units)
     const NumericType kB = static_cast<NumericType>(8.617333262145e-5);
@@ -41,9 +52,11 @@ public:
     } else {
       velocity_ = v0 * std::exp(-Ea / (kB * std::max(T_, NumericType(1))));
     }
+    velocity_ *= orientFactor_;
     // Normalize for demo evolve steps
     velocity_ = std::min(NumericType(1), std::max(NumericType(1e-6), velocity_ * NumericType(1e-6)));
-    std::cout << "[SPERKernel] T=" << T_ << " velocity=" << velocity_ << "\n";
+    std::cout << "[SPERKernel] T=" << T_ << " velocity=" << velocity_
+              << " orient=" << orientFactor_ << "\n";
   }
 
   void evolve(NumericType dt) override {
@@ -96,6 +109,7 @@ public:
 private:
   NumericType T_ = 873.15;
   NumericType velocity_ = NumericType(0.1);
+  NumericType orientFactor_ = NumericType(1);
   NumericType lastRegrown_ = 0;
 };
 

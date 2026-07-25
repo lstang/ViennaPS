@@ -6,13 +6,20 @@
 #include "DiffusionModel.hpp"
 #include "DiffusionPhysics.hpp"
 #include "models/ConstantDiffusion.hpp"
+#include "models/LinearReactionDiffusion.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <fstream>
 #include <map>
 #include <memory>
 #include <string>
 #include <vector>
+
+#ifdef VIENNAPS_HAS_MFEM
+#include <mfem.hpp>
+#endif
 
 namespace viennaps {
 
@@ -22,10 +29,26 @@ struct PdeIC {
 };
 
 struct PdeBC {
-  enum class Type { Dirichlet, Neumann, Robin } type = Type::Neumann;
+  enum class Type { Dirichlet, Neumann, Robin, Flux, Segregation } type =
+      Type::Neumann;
   std::string species;
   std::string boundary = "all";
   double value = 0.0;
+  /// Segregation: partner species on the other side of the interface.
+  std::string partnerSpecies;
+  double segregationM = 1.0;
+};
+
+struct FluxBC {
+  std::string species;
+  std::string boundary = "all";
+  double flux = 0.0;
+};
+
+struct SegregationBC {
+  std::string speciesA;
+  std::string speciesB;
+  double m = 1.0;
 };
 
 class PdeTerm {
@@ -82,20 +105,23 @@ public:
     return s;
   }
 
-  /// Build ConstantDiffusion models from DiffusionPdeTerm entries (Ea=0).
+  /// Build models from DiffusionPdeTerm and ReactionPdeTerm.
   template <class NumericType>
   std::vector<std::shared_ptr<DiffusionModel<NumericType>>>
   buildModels() const {
     std::vector<std::shared_ptr<DiffusionModel<NumericType>>> out;
     for (const auto &t : terms_) {
-      auto *diff = dynamic_cast<const DiffusionPdeTerm *>(t.get());
-      if (!diff)
-        continue;
-      auto m = std::make_shared<ConstantDiffusion<NumericType>>(
-          diff->targetSpecies());
-      m->setDiffusivity(static_cast<NumericType>(diff->D()),
-                        NumericType(0));
-      out.push_back(std::move(m));
+      if (auto *diff = dynamic_cast<const DiffusionPdeTerm *>(t.get())) {
+        auto m = std::make_shared<ConstantDiffusion<NumericType>>(
+            diff->targetSpecies());
+        m->setDiffusivity(static_cast<NumericType>(diff->D()),
+                          NumericType(0));
+        out.push_back(std::move(m));
+      } else if (auto *rx =
+                     dynamic_cast<const ReactionPdeTerm *>(t.get())) {
+        out.push_back(std::make_shared<LinearReactionDiffusion<NumericType>>(
+            rx->targetSpecies(), static_cast<NumericType>(rx->k())));
+      }
     }
     return out;
   }
@@ -110,6 +136,7 @@ public:
                                static_cast<NumericType>(bc.value));
         break;
       case PdeBC::Type::Neumann:
+      case PdeBC::Type::Flux:
         physics.addNeumannBC(bc.species, bc.boundary,
                              static_cast<NumericType>(bc.value));
         break;
@@ -117,8 +144,21 @@ public:
         physics.addRobinBC(bc.species, bc.boundary,
                            static_cast<NumericType>(bc.value));
         break;
+      case PdeBC::Type::Segregation:
+        // Segregation is applied as operator-split by engine when models
+        // register; BC value stores m for host tools.
+        (void)bc.segregationM;
+        break;
       }
     }
+  }
+
+  /// Return IC map species → value for engine.initializeSpecies.
+  std::map<std::string, double> initialConditions() const {
+    std::map<std::string, double> m;
+    for (const auto &ic : ics_)
+      m[ic.species] = ic.value;
+    return m;
   }
 
   /// Convenience: add species + models + BCs to physics from this equation.
@@ -129,6 +169,13 @@ public:
     for (auto &m : buildModels<NumericType>())
       physics.addModel(m);
     applyBCs(physics);
+  }
+
+  /// Apply ICs to an engine (initializeSpecies for each stored PdeIC).
+  template <class Engine>
+  void applyICs(Engine &engine) const {
+    for (const auto &ic : ics_)
+      engine.initializeSpecies(ic.species, ic.value);
   }
 
 private:
@@ -149,6 +196,45 @@ public:
         out.push_back(field[i]);
     return out;
   }
+
+#ifdef VIENNAPS_HAS_MFEM
+  /// Sample GridFunction along a line from (x0,y0) to (x1,y1) with n points.
+  static std::vector<double> cut1D(const mfem::GridFunction &gf, double x0,
+                                   double y0, double x1, double y1, int n) {
+    std::vector<double> out;
+    if (!gf.FESpace() || !gf.FESpace()->GetMesh() || n <= 0)
+      return out;
+    mfem::Mesh *mesh = gf.FESpace()->GetMesh();
+    out.resize(static_cast<std::size_t>(n), 0.0);
+    mfem::DenseMatrix pts(mesh->SpaceDimension(), n);
+    for (int i = 0; i < n; ++i) {
+      const double t = (n == 1) ? 0.0 : static_cast<double>(i) / (n - 1);
+      pts(0, i) = x0 + t * (x1 - x0);
+      if (mesh->SpaceDimension() > 1)
+        pts(1, i) = y0 + t * (y1 - y0);
+      for (int d = 2; d < mesh->SpaceDimension(); ++d)
+        pts(d, i) = 0.0;
+    }
+    mfem::Array<int> el(n);
+    mfem::Array<mfem::IntegrationPoint> ips(n);
+    mesh->FindPoints(pts, el, ips, /*warn=*/false);
+    for (int i = 0; i < n; ++i) {
+      if (el[i] < 0)
+        continue;
+      out[static_cast<std::size_t>(i)] =
+          gf.GetValue(*mesh->GetElementTransformation(el[i]), ips[i]);
+    }
+    return out;
+  }
+
+  static double dose(const mfem::GridFunction &gf) {
+    mfem::ConstantCoefficient one(1.0);
+    mfem::LinearForm mass(const_cast<mfem::FiniteElementSpace *>(gf.FESpace()));
+    mass.AddDomainIntegrator(new mfem::DomainLFIntegrator(one));
+    mass.Assemble();
+    return gf * mass;
+  }
+#endif
 
   static double dose(const std::vector<double> &field, double dx) {
     double s = 0.0;
@@ -173,6 +259,20 @@ public:
     if (d <= 0.0 || mu <= 0.0)
       return 1e300;
     return 1.0 / (mu * d);
+  }
+
+  /// Write depth profile CSV: columns depth,value.
+  static bool writeCSV(const std::string &path,
+                       const std::vector<double> &depth,
+                       const std::vector<double> &value) {
+    std::ofstream os(path);
+    if (!os)
+      return false;
+    os << "depth,value\n";
+    const std::size_t n = std::min(depth.size(), value.size());
+    for (std::size_t i = 0; i < n; ++i)
+      os << depth[i] << "," << value[i] << "\n";
+    return true;
   }
 };
 
@@ -212,7 +312,7 @@ struct CalibratedParameters {
   }
 };
 
-/// Least-squares fit of D0 from (T, D) samples with fixed Ea (log-linear).
+/// Least-squares fit utilities.
 struct FittingUtilities {
   static double fitD0FixedEa(const std::vector<double> &T,
                              const std::vector<double> &D, double Ea) {
@@ -229,6 +329,65 @@ struct FittingUtilities {
     if (den <= 0)
       return 0.0;
     return std::exp(num / den);
+  }
+
+  /// Linear fit y = a + b x → returns {a, b}.
+  static std::pair<double, double> fitLine(const std::vector<double> &x,
+                                           const std::vector<double> &y) {
+    const std::size_t n = std::min(x.size(), y.size());
+    if (n < 2)
+      return {0.0, 0.0};
+    double sx = 0, sy = 0, sxx = 0, sxy = 0;
+    for (std::size_t i = 0; i < n; ++i) {
+      sx += x[i];
+      sy += y[i];
+      sxx += x[i] * x[i];
+      sxy += x[i] * y[i];
+    }
+    const double nd = static_cast<double>(n);
+    const double den = nd * sxx - sx * sx;
+    if (std::abs(den) < 1e-30)
+      return {sy / nd, 0.0};
+    const double b = (nd * sxy - sx * sy) / den;
+    const double a = (sy - b * sx) / nd;
+    return {a, b};
+  }
+
+  /// Fit Pearson-IV moments proxy: returns {Rp, deltaRp, skew} from depth C.
+  static std::array<double, 3> fitPearson(const std::vector<double> &z,
+                                          const std::vector<double> &C) {
+    const std::size_t n = std::min(z.size(), C.size());
+    double dose = 0.0;
+    for (std::size_t i = 0; i < n; ++i)
+      dose += std::max(0.0, C[i]);
+    if (dose <= 0.0 || n < 2)
+      return {0.0, 0.0, 0.0};
+    double m1 = 0.0;
+    for (std::size_t i = 0; i < n; ++i)
+      m1 += z[i] * std::max(0.0, C[i]);
+    m1 /= dose;
+    double m2 = 0.0, m3 = 0.0;
+    for (std::size_t i = 0; i < n; ++i) {
+      const double dz = z[i] - m1;
+      const double w = std::max(0.0, C[i]);
+      m2 += w * dz * dz;
+      m3 += w * dz * dz * dz;
+    }
+    m2 /= dose;
+    m3 /= dose;
+    const double sig = std::sqrt(std::max(m2, 0.0));
+    const double skew = (sig > 0) ? m3 / (sig * sig * sig) : 0.0;
+    return {m1, sig, skew};
+  }
+
+  /// Pearson with floor: clamp C to floor before fit.
+  static std::array<double, 3> fitPearsonFloor(const std::vector<double> &z,
+                                               const std::vector<double> &C,
+                                               double floor) {
+    std::vector<double> Cf = C;
+    for (auto &v : Cf)
+      v = std::max(v, floor);
+    return fitPearson(z, Cf);
   }
 };
 

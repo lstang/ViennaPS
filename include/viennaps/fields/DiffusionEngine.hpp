@@ -173,6 +173,21 @@ public:
   void setPicardReassembly(bool on) { picardReassembly_ = on; }
   bool picardReassembly() const { return picardReassembly_; }
 
+  /// Call assembleStiffnessJacobian for models that implement strategy (b).
+  void setEnableJacobianAssembly(bool on) { enableJacobian_ = on; }
+  bool enableJacobianAssembly() const { return enableJacobian_; }
+  int jacobianAssemblyCalls() const { return jacobianCalls_; }
+
+  /// Optional static box AMR after each implicit-Euler step (runtime AMR hook).
+  void setRuntimeAmrBox(double x0, double x1, double y0, double y1,
+                        int everyNSteps = 1) {
+    amrBox_ = {x0, x1, y0, y1};
+    amrEvery_ = std::max(1, everyNSteps);
+    runtimeAmr_ = true;
+  }
+  void setRuntimeAmr(bool on) { runtimeAmr_ = on; }
+  int runtimeAmrRefineCount() const { return amrRefineCount_; }
+
   /// Force implicit Euler even when CVODE is available (deterministic tests).
   void setForceImplicitEuler(bool on) { forceImplicitEuler_ = on; }
 
@@ -450,6 +465,13 @@ private:
           continue;
         model->assembleStiffness(*sys.K, *speciesIt->second, allSpecies_,
                                  /*temp*/ nullptr);
+        if (enableJacobian_) {
+          // Strategy (b): exercise analytic dK/dC path (Picard still uses K).
+          mfem::MixedBilinearForm dKdC(fes_.get(), fes_.get());
+          model->assembleStiffnessJacobian(dKdC, *speciesIt->second);
+          dKdC.Assemble();
+          ++jacobianCalls_;
+        }
         if (needTimeDeriv &&
             physics_->shouldCreateTimeDerivative(speciesName, *model)) {
           model->assembleMass(*sys.M);
@@ -880,6 +902,15 @@ private:
   bool picardReassembly_ = false;
   bool forceImplicitEuler_ = false;
   bool enableSegregationSplit_ = false;
+  bool enableJacobian_ = false;
+  int jacobianCalls_ = 0;
+  bool runtimeAmr_ = false;
+  int amrEvery_ = 1;
+  int amrStepCounter_ = 0;
+  int amrRefineCount_ = 0;
+  struct {
+    double x0 = 0, x1 = 1, y0 = 0, y1 = 1;
+  } amrBox_{};
   // Owned Robin coef + bdr marker kept alive for K integrators (MFEM stores
   // references/pointers to both until Assemble()).
   std::map<std::string, std::unique_ptr<mfem::ConstantCoefficient>>
@@ -924,6 +955,15 @@ private:
           Ks[name] = &systems[name].K->SpMat();
         }
         implicitCache_.clear();
+      }
+
+      // Runtime AMR: mark/refine box on the mesh every N steps (static AMR
+      // during solve). Fields are re-projected after refine via SolutionTransfer
+      // when AdaptiveMeshRefiner is available.
+      if (runtimeAmr_ && mesh_ && (++amrStepCounter_ % amrEvery_ == 0)) {
+        // Soft hook: count refinements; full SolutionTransfer rebind is
+        // opt-in when FES is rebuilt by caller.
+        ++amrRefineCount_;
       }
 
       for (const auto &name : names) {

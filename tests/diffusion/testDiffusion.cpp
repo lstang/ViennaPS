@@ -46,6 +46,8 @@
 #include <fields/kmc/KmcAtomisticEngine.hpp>
 #include <fields/kmc/KmcEpitaxy.hpp>
 #include <fields/models/FlashLaserAnneal.hpp>
+#include <fields/models/IIIVDiffusion.hpp>
+#include <fields/SPERKernel.hpp>
 #include <fields/PdeApi.hpp>
 #include <fields/AdaptiveMeshRefiner.hpp>
 #include <fields/MovingMeshHandler.hpp>
@@ -605,6 +607,28 @@ void TestPhase7Kmc() {
   VC_TEST_ASSERT(engC.clusterCount() > 0);
   VC_TEST_ASSERT(engC.lattice().countSpecies(3) >= 1);
 
+  // Dissociation: cluster → 2 I when dissoc is forced.
+  KmcLattice latD;
+  latD.resize(3, 1, 1);
+  latD.at(0, 0, 0).occupied = true;
+  latD.at(0, 0, 0).species = 3; // cluster
+  KmcParameters pD;
+  pD.T = 1500.0;
+  pD.hopPreFactor = 0.0;
+  pD.clusterPreFactor = 0.0;
+  pD.dissocBarrier = 0.0;
+  pD.dissocPreFactor = 1e12;
+  KmcAtomisticEngine engD(9);
+  engD.setLattice(latD);
+  engD.setParameters(pD);
+  engD.setClusteringEnabled(true);
+  engD.setRecombinationEnabled(false);
+  engD.run(5);
+  VC_TEST_ASSERT(engD.dissocCount() > 0);
+  VC_TEST_ASSERT(engD.lattice().countSpecies(1) >= 1);
+  auto rep = KmcReport::fromEngine(engD);
+  VC_TEST_ASSERT(rep.dissocCount > 0);
+
   std::vector<double> conc(lat.size(), 1e20);
   std::mt19937 rng(1);
   KmcLattice lat2;
@@ -727,6 +751,185 @@ void TestPhase11Amr() {
 }
 
 /// MovingMeshHandler + SolutionTransfer full-depth (gap analysis wave).
+/// Parity gap closures: physics ratios, L2 transfer, PDE reaction, 3D mesh, FEM heat.
+void TestParityGapClosures() {
+#ifdef VIENNAPS_HAS_MFEM
+  // Carbon detailed balance: residual vanishes at CI = C*I/C*_I.
+  {
+    CarbonDiffusion<double> carb;
+    MeshAttributes ma;
+    carb.setup(ma, 1273.0);
+    const double Cstar = 1e14;
+    const double kf = 1e-20;
+    carb.setTrapRate(kf);
+    carb.setReverseRate(kf * Cstar);
+    std::vector<double> C(1, 1e15), I(1, 1e15),
+        CI(1, C[0] * I[0] / Cstar);
+    const double ci0 = CI[0];
+    carb.applyTrapStep(C, I, CI, 1e-4);
+    std::cout << "[parity] carbon eq residual dCI=" << (CI[0] - ci0)
+              << " ratio=" << CI[0] / (C[0] * I[0]) << "\n";
+    VC_TEST_ASSERT(std::abs(CI[0] - ci0) / ci0 < 1e-6);
+    VC_TEST_ASSERT(std::abs(CI[0] / (C[0] * I[0]) - 1.0 / Cstar) /
+                       (1.0 / Cstar) <
+                   1e-6);
+  }
+
+  // ChargedEquilibrium: extrinsic D differs from intrinsic by formula.
+  {
+    ChargedEquilibriumDiffusion<double> ceq;
+    ceq.setD0(1e-13);
+    ceq.setNi(1e10);
+    const double Din = ceq.getDiffusivity(1e10, 1273.0);
+    const double Dext = ceq.getDiffusivity(1e20, 1273.0);
+    std::cout << "[parity] charged-eq Din=" << Din << " Dext=" << Dext << "\n";
+    VC_TEST_ASSERT(std::abs(Dext - Din) / Din > 0.05);
+  }
+
+  // SiGe defect-mediated: higher C_I → higher D_inter.
+  {
+    SiGeDiffusion<double> sige;
+    sige.setDefectMediated(1e-12, 1e-13);
+    const double D1 = sige.interdiffusivity(1e12, 1e12, 1273.0);
+    const double D2 = sige.interdiffusivity(1e15, 1e12, 1273.0);
+    std::cout << "[parity] sige D1=" << D1 << " D2=" << D2 << "\n";
+    VC_TEST_ASSERT(D2 > D1);
+  }
+
+  // L2 transfer + Laplacian smooth + remesh metric.
+  {
+    auto m1 = mfem::Mesh::MakeCartesian2D(4, 4, mfem::Element::TRIANGLE);
+    auto m2 = mfem::Mesh::MakeCartesian2D(8, 8, mfem::Element::TRIANGLE);
+    mfem::H1_FECollection fec1(1, 2), fec2(1, 2);
+    mfem::FiniteElementSpace fes1(&m1, &fec1), fes2(&m2, &fec2);
+    mfem::GridFunction g1(&fes1), g2(&fes2);
+    g1 = 1e18;
+    g2 = 0.0;
+    auto tr = SolutionTransfer::transferL2(g1, g2);
+    std::cout << "[parity] L2 relErr=" << tr.relativeDoseError << "\n";
+    VC_TEST_ASSERT(tr.ok);
+    VC_TEST_ASSERT(tr.relativeDoseError <= 1e-3);
+    const int its = MovingMeshHandler::laplacianSmooth(m1, 2, 0.5);
+    VC_TEST_ASSERT(its == 2);
+    const double ar = MovingMeshHandler::maxAspectRatio(m1);
+    VC_TEST_ASSERT(ar >= 1.0);
+    VC_TEST_ASSERT(!MovingMeshHandler::needsRemesh(m1, 100.0));
+  }
+
+  // PDE reaction term drives decay via LinearReactionDiffusion.
+  {
+    MeshAttributes attrs;
+    attrs.setAttributeName(1, "Si");
+    auto mesh = std::make_unique<mfem::Mesh>(
+        mfem::Mesh::MakeCartesian2D(4, 4, mfem::Element::TRIANGLE));
+    DiffusionEngine<double, 2> engine;
+    engine.setMesh(std::move(mesh), attrs);
+    PdeEquation eq;
+    eq.addTerm(std::make_shared<DiffusionPdeTerm>("Boron", 1e-14));
+    eq.addTerm(std::make_shared<ReactionPdeTerm>("Boron", 1.0)); // strong decay
+    eq.addIC({"Boron", 1e18});
+    DiffusionPhysics<double> physics;
+    eq.applyTo(physics);
+    physics.setTemperature(1273.0);
+    engine.setPhysics(physics);
+    eq.applyICs(engine);
+    const double d0 = engine.getIntegral("Boron");
+    engine.solve(0.0, 0.5, 0.1);
+    const double d1 = engine.getIntegral("Boron");
+    std::cout << "[parity] pde-react d0=" << d0 << " d1=" << d1 << "\n";
+    VC_TEST_ASSERT(d1 < d0);
+  }
+
+  // FEM heat transfer model dose (temperature field) evolves with source.
+  {
+    MeshAttributes attrs;
+    attrs.setAttributeName(1, "Si");
+    auto mesh = std::make_unique<mfem::Mesh>(
+        mfem::Mesh::MakeCartesian2D(4, 4, mfem::Element::TRIANGLE));
+    DiffusionEngine<double, 2> engine;
+    engine.setMesh(std::move(mesh), attrs);
+    auto heat = std::make_shared<HeatTransfer<double>>();
+    heat->setThermalDiffusivity(1e-2);
+    heat->setSource(1e3);
+    DiffusionPhysics<double> physics;
+    physics.addSpecies("Temperature");
+    physics.addModel(heat);
+    physics.setTemperature(300.0);
+    engine.setPhysics(physics);
+    engine.initializeSpecies("Temperature", 300.0);
+    const double t0 = engine.getIntegral("Temperature");
+    engine.solve(0.0, 0.1, 0.05);
+    const double t1 = engine.getIntegral("Temperature");
+    std::cout << "[parity] heat t0=" << t0 << " t1=" << t1 << "\n";
+    VC_TEST_ASSERT(t1 > t0);
+  }
+
+  // Jacobian assembly path exercised.
+  {
+    MeshAttributes attrs;
+    attrs.setAttributeName(1, "Si");
+    auto mesh = std::make_unique<mfem::Mesh>(
+        mfem::Mesh::MakeCartesian2D(4, 4, mfem::Element::TRIANGLE));
+    DiffusionEngine<double, 2> engine;
+    engine.setMesh(std::move(mesh), attrs);
+    auto fermi = std::make_shared<FermiDiffusion<double>>("Boron");
+    fermi->setDiffusivity(1e-12, 1.0);
+    fermi->setIntrinsicCarrierConcentration(1e10);
+    DiffusionPhysics<double> physics;
+    physics.addSpecies("Boron");
+    physics.addModel(fermi);
+    physics.setTemperature(1273.0);
+    engine.setPhysics(physics);
+    engine.setEnableJacobianAssembly(true);
+    engine.initializeSpecies("Boron", 1e18);
+    engine.solve(0.0, 0.05, 0.05);
+    std::cout << "[parity] jacobianCalls=" << engine.jacobianAssemblyCalls()
+              << "\n";
+    VC_TEST_ASSERT(engine.jacobianAssemblyCalls() > 0);
+  }
+
+  // FitLine / FitPearson / CSV / param oxidation key.
+  {
+    auto ab = FittingUtilities::fitLine({0, 1, 2}, {1, 3, 5});
+    VC_TEST_ASSERT(std::abs(ab.second - 2.0) < 1e-9);
+    auto pear = FittingUtilities::fitPearson({0, 1, 2, 3}, {0, 1, 2, 1});
+    VC_TEST_ASSERT(pear[0] > 0.0);
+    ParameterDatabase<double> db;
+    VC_TEST_ASSERT(db.get("Si", "Oxidation_B", 1273.0) > 0.0);
+    VC_TEST_ASSERT(db.get("Si", "Cluster311_kf") > 0.0);
+  }
+
+  // III-V I/V equilibrium positive; SPER orientation factor.
+  {
+    IIIVDiffusion<double> iii("GaAs", "Si");
+    VC_TEST_ASSERT(iii.C_I_eq(1000.0) > 0.0);
+    VC_TEST_ASSERT(iii.C_V_eq(1000.0) > 0.0);
+    SPERKernel<double> sper;
+    sper.setOrientation("111");
+    VC_TEST_ASSERT(sper.orientationFactor() < 1.0);
+  }
+
+  // Epitaxy coordination + twin.
+  {
+    KmcLattice lat;
+    lat.resize(4, 4, 4);
+    for (int i = 0; i < 4; ++i)
+      for (int j = 0; j < 4; ++j) {
+        lat.at(i, j, 0).occupied = true;
+        lat.at(i, j, 0).species = 2;
+      }
+    KmcEpitaxyModel epi;
+    const int n = epi.coordinationGrow(lat, 2, 1);
+    VC_TEST_ASSERT(n > 0);
+    VC_TEST_ASSERT(epi.formTwin(lat) >= 0);
+  }
+
+  std::cout << "[parity-gap-closures] PASS\n";
+#else
+  std::cout << "[parity-gap-closures] skipped (no MFEM)\n";
+#endif
+}
+
 void TestMovingMeshSolutionTransfer() {
 #ifdef VIENNAPS_HAS_MFEM
   // --- Relabel Si(1) → SiO2(2) when progress crosses threshold.
@@ -1931,6 +2134,7 @@ int main() {
   TestPhase9Laser();
   TestPhase10PdeApi();
   TestPhase11Amr();
+  TestParityGapClosures();
   TestMovingMeshSolutionTransfer();
   TestDeepenedApis();
   TestDeepenedRobinEngine();
