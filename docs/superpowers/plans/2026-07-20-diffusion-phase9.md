@@ -4,6 +4,56 @@
 
 **Depends on:** Phase 3 (CDD)
 
+**Manual sources (verified via `iconv` UTF-16 decode of `Manual/sprocess_ug.md`):**
+- SProcess §"Flash or Laser Anneal Model", body lines **20802–24080** (TOC p.201–241)
+- Key sub-sections: §"Heat Transfer Equation" line 20926; §"Transfer Matrix Method" line 21237; §"FDTD" line 21972; §"Phase Field Method" line 20597; §"Melting Phase Field Equation" line 22575; §"Crystallinity Phase Field Equation" line 23069; §"Intensity Models for Flash Anneal" TOC p.217; §"Intensity Model for Scanning Laser" TOC p.219.
+
+## Manual Equation References (SProcess §4.201–223)
+
+**Heat transfer equation (SProcess eq. 213 at line 20928):**
+
+```
+ρ·c_P·∂T/∂t = ∇·(κ(T)·∇T) + G + ρ·L·∂φ/∂t                                 (SProcess 213)
+```
+
+- `κ` = thermal conductivity (phase-dependent: amorphous / liquid / crystalline, SProcess lines 21115–21124)
+- `ρ`, `c_P` = mass density, specific heat (also phase-dependent)
+- `G` = volumetric heat source from optical absorption (Beer–Lambert below, or TMM)
+- `L` = latent heat (SProcess Eq. 244); `∂φ/∂t` couples to the melting phase field
+
+**Beer–Lambert absorption (SProcess line 21231):**
+
+```
+G(z) = α(λ, T, material) · I₀(t) · exp(−∫₀^z α(z') dz')
+```
+
+`α` set via `pdbSet <material> Absorptivity {<expression>}` (SProcess line 21232). For multilayer / interference, replace with TMM (next).
+
+**Transfer Matrix Method (SProcess §"TMM", line 21237):** for thin-film stacks where layer thickness ≈ wavelength, Beer–Lambert fails; use Fresnel + transfer matrices. Each layer `j` has complex wave impedance `Z_j = Z_0/n_j` (refractive index). Forward/backward amplitudes related by 2×2 transfer matrices at each interface. Result: per-segment heat generation `G(x, z, t)` accounting for thin-film interference. SProcess splits 2D structures into vertical segments (`Minimum.Angle.Between.Segments`, `Minimum.Segment.Width`, line 21280).
+
+**FDTD (SProcess §"FDTD", line 21972):** for sub-wavelength features, solve Maxwell's equations on a tensor mesh (SProcess uses Sentaurus Mesh + EMW). Shares the complex refractive index with TMM. Local vs global temperature modes (line 22032).
+
+**Melting phase field (SProcess §"Melting Phase Field Equation", line 22575):** Allen-Cahn for liquid/solid order parameter `φ_m ∈ [−1, +1]`:
+
+```
+∂φ_m/∂t = −M_φ · δF/δφ_m
+F[φ_m, T] = ∫ [ (κ_φ/2)·|∇φ_m|² + (φ_m²−1)²/4 − λ·(T − T_m)·φ_m ] dV
+δF/δφ_m = −κ_φ·∇²φ_m + (φ_m³ − φ_m) − λ·(T − T_m)
+```
+
+- `M_φ` = phase-field mobility (controls interface thickness vs width)
+- `T_m` = melting point (1685 K for Si)
+- Latent heat `L·∂φ_m/∂t` feeds back into the heat equation (SProcess 213 above)
+
+**Crystallinity phase field (SProcess §"Crystallinity Phase Field Equation", line 23069):** Allen-Cahn for amorphous/crystalline `φ_c ∈ [−1, +1]`, driven by SPER velocity:
+
+```
+δF/δφ_c = −κ_φ·∇²φ_c + (φ_c³ − φ_c) − λ·v_SPER(T)·φ_c
+v_SPER(T) = v_0 · exp(−Ea_SPER / kT)                                       (SPER velocity, SProcess §4.197)
+```
+
+Coupled to heat equation (line 23159): crystallization releases latent heat too.
+
 ## File Structure
 
 | File | Responsibility |
@@ -41,6 +91,11 @@
 - `AllenCahnTerm`: bulk driving force -L*df/dη. `ACInterfaceTerm`: gradient energy L*κ*∇η·∇test. Combined: dη/dt = L*(κ∇²η - df/dη)
 - Test: double-well free energy f=(η²-1)²/4. Starting η=0.1 -> evolves to η=1. Starting η=-0.1 -> evolves to η=-1
 - Commit: `"feat: add AllenCahnTerm + ACInterfaceTerm (MOOSE ADAllenCahn + ACInterface pattern)"`
+
+**IMEX time integration with Hypre (Phase 9 solver strategy):** Allen-Cahn equations are ideal for IMEX (implicit diffusion, explicit reaction). The diffusion term is stiff and implicit; the reaction term is non-stiff and explicit.
+  - **Recommended: `mfem::ARKStepSolver` (`sundials.hpp:720`) with `Type::IMEX` (`:728`).** Wraps SUNDIALS ARKode IMEX mode. The implicit solve uses the same `SUNLinSol_SPBCGS` + `HypreBoomerAMG` preconditioner path from Phase 1.
+  - **Alternative: `mfem::IMEX_DIRK_RK3` (`ode.hpp:1079`).** Pure MFEM, no SUNDIALS dependency for the time integrator. Third-order accurate.
+  - For the multi-physics coupled solve (Task 7 FlashLaserAnneal): pack T, eta_m, eta_c, and dopant into a block system. Use `mfem::BlockOperator` + block-diagonal `HypreBoomerAMG` (one AMG per field). This mirrors the Phase 3 CDD block preconditioning approach.
 
 ### Task 4: MeltingPhaseField (Allen-Cahn Equation)
 - `MeltingPhaseField<NumericType>` - Allen-Cahn equation for liquid/solid order parameter η_m in [-1,1] (-1=solid, 1=liquid)

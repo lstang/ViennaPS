@@ -4,6 +4,40 @@
 
 **Depends on:** Phase 1 (DiffusionEngine, LevelSetToMesh)
 
+**Manual sources (verified via `iconv` UTF-16 decode of `Manual/sprocess_ug.md`):**
+- SProcess **Chapter 11 "Mesh Generation"**, body lines **80711–83862** (TOC p.723–763)
+- Key sub-sections: §"Mesh Refinement" 80783; §"Static Mesh Refinement" 80819; §"Adaptive Mesh Refinement" 81232; §"Adaptive Refinement Criteria" 81282; §"Moving Mesh and Mechanics Displacements" (TOC p.750); §"MovingMesh Algorithm" 83223.
+
+**Solver backend:** AMR uses MFEM native ThresholdRefiner (h/p refinement) - no PETSc DMForest. After each AMR cycle, field transfer uses MFEM's native prolongation/restriction operators (O(N), no solve needed) for same-mesh AMR (Case 1), or HyprePCG + HypreBoomerAMG L2 projection for cross-mesh transfer (Case 2: moving boundary remesh). The linear solve after AMR uses the same HypreBoomerAMG preconditioner from Phase 1; the AMG hierarchy is rebuilt automatically when the mesh changes.
+
+## Manual Equation References (SProcess Ch.11)
+
+SProcess does NOT use a Zienkiewicz–Zhu estimator; it uses field-based criteria on edge differences (lines 81282–81410). The plan's Task 7 cites MFEM's `MFEML2ZienkiewiczZhuIndicator` as an *additional* theoretically-grounded estimator — the SProcess criteria below are the production baseline that the plan's heuristic tasks (3–6) replicate.
+
+**Relative difference criterion (SProcess eq. 982 at line 81370):**
+
+```
+η_rel(edge) = 2·|C₁ − C₂| / (|C₁| + |C₂| + ε)                            (SProcess 982)
+```
+
+`C₁`, `C₂` = field values on the edge's two nodes. If `η_rel > Refine.Rel.Error`, the edge is split. **Note (SProcess line 81405):** only valid for fields that are always positive (else the denominator can vanish). Default `Refine.Rel.Error ≈ 0.5` (fine mesh); `≈ 1.25` (coarse). Smooth cutoff parameter `ε` prevents refinement where `|C| < ε`.
+
+**Absolute difference criterion (SProcess eq. 983 at line 81399):**
+
+```
+η_abs(edge) = |C₁ − C₂|                                                    (SProcess 983)
+```
+
+If `η_abs > Refine.Max.Difference`, the edge is split. No positivity assumption needed.
+
+**Logarithmic criterion (SProcess §"Logarithmic Difference Criteria", line 81410+):** for fields spanning many orders of magnitude (dopant profiles 1e10–1e20), the log difference `|log(C₁/C₂)|` is the correct refinement metric. This is the SProcess analog of Phase 11 Task 6 (`LogarithmicCriterion`), confirming that Task 6 is NOT a novel addition — it is the production-correct criterion that SProcess uses for dopant fields.
+
+**Moving-mesh algorithm (SProcess §"MovingMesh Algorithm", line 83223):** 3D moving-boundary handling (oxidation). Key parameters: `perp.add.dist`, `Remove.Dist`, `Remove.Dist.On.Interface` (lines 83245–83272). Geometry repair via multimaterial level-set (MLS) at line 83294; DelPSC remeshing at line 83324. `Set3DMovingMeshMode` (line 108314). This is the SProcess analog of Phase 11 Task 9 (AMR during moving boundary).
+
+**Static refinement boxes (SProcess §"Static Mesh Refinement", line 80819):** SProcess `refinebox` with types: Standard boxes (line 80867), Interface Axis-Aligned (line 80932), Interface Offsetting (line 80969), Refinement Inside a Mask (line 81041), Near Mask Edges/Corners (line 81096). These are the SProcess analogs of Phase 11 Task 1 (`RefinementBox`) plus Task 10 (interface-aligned refinement).
+
+
+
 ## File Structure
 
 | File | Responsibility |

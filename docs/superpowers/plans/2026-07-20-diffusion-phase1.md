@@ -639,7 +639,7 @@ private:
 **Key design decisions (MOOSE-inspired):**
 1. **Per-species GridFunction storage** (not packed vector): `std::map<std::string, unique_ptr<mfem::GridFunction>> species_`. Each species is a separate GridFunction on the same FES. Coupling terms read another species' GF via the `allSpecies` map. Eliminates manual offset arithmetic.
 2. **HypreBoomerAMG preconditioner** (MOOSE default for diffusion — verified `DiffusionPhysicsBase::addPreconditioning()` lines 84-96 and `MultiSpeciesDiffusionPhysicsBase` lines 109-121): `mfem::HypreBoomerAMG` instead of `DSmoother`. 10-100x fewer iterations on large 2D/3D meshes. MOOSE already wraps this as `framework/include/mfem/solvers/MFEMHypreBoomerAMG.h` with `SetupLOR(ParBilinearForm&, ess_bdr_markers)` low-order-refinement acceleration — cite as the proven integration pattern.
-3. **SUNDIALS CVODE** from day one: BDF orders 1-5, adaptive time stepping, error control. Uses existing `SundialsTimeIntegrator`. Essential for stiff systems (clustering, recombination in later phases). Falls back to implicit Euler if SUNDIALS unavailable.
+3. **SUNDIALS CVODE** from day one: BDF orders 1-5, adaptive time stepping, error control. The existing `SundialsTimeIntegrator.hpp` caps at 256 dofs with dense O(n^3) LS. This plan replaces that with `SUNLinSol_SPBCGS` (iterative BiCGStab) + `SUNLinSolSetPreconditioner()` wrapping `HypreBoomerAMG` as `PSetup`/`Psolve` callbacks via `CVodeSetPreconditioner()`. No dof cap. MFEM's `CVODESolver` wrapper uses `SUN_PREC_NONE` (`sundials.cpp:905`) so the raw SUNDIALS C API is used directly. Falls back to implicit Euler + `HypreGMRES` + `HypreBoomerAMG` if SUNDIALS unavailable.
 4. **Species-outer, terms-inner assembly loop** (MOOSE `MultiSpeciesDiffusionCG::addFEKernels()` pattern — verified). The previous draft had this backwards. MOOSE iterates species in the outer loop and, per species, picks the *most specialized* kernel/term from a fallback chain. This makes per-species BC selection and model specializaion (Phase 2+) clean.
 
 **Assembly pattern (species-outer, terms-inner — mirrors MOOSE `MultiSpeciesDiffusionCG::addFEKernels`):**
@@ -674,36 +674,68 @@ for each species s in physics_.speciesNames():
 
 **Phase 1 default: (a) Picard.** Document this in `DiffusionModel.hpp` so Phase 2 Task 3 (`FermiDCoef`) knows it must supply a `dD/dC` path (strategy b) or accept Picard convergence.
 
-**SUNDIALS integration:**
+**Serial-to-parallel bridge (HypreParMatrix from serial SparseMatrix):**
+
+The engine assembles `mfem::SparseMatrix` (serial) but `HypreBoomerAMG` requires `HypreParMatrix`. Use the constructor at `hypre.hpp:567-569` with `MPI_COMM_SELF` to wrap a serial matrix as a 1-process parallel matrix -- no `ParFiniteElementSpace` or `ParMesh` needed:
+
 ```cpp
-// Pack all species GFs into a flat vector for SUNDIALS
-// RHS callback: unpack -> for each species, compute -M^{-1}*(K*u - R) -> repack
+// Convert serial SparseMatrix to HypreParMatrix (single-process, zero-copy
+// when HYPRE_BIGINT is undefined, verified HYPRE_config.h:24).
+int glob_size = A.Height();
+int row_starts[2] = {0, glob_size};
+auto* A_hypre = new mfem::HypreParMatrix(MPI_COMM_SELF, glob_size,
+                                          row_starts, row_starts, &A);
+```
+
+*Source: MFEM `linalg/hypre.hpp:567-569`; `HYPRE_config.h:24` (HYPRE_BIGINT undef).*
+
+**SUNDIALS + Hypre integration (replaces the 256-dof dense cap):**
+
+The existing `SundialsTimeIntegrator.hpp` caps CVODE at 256 dofs with dense O(n^3) linear solve (`:167`). MFEM's `CVODESolver` wrapper uses `SUN_PREC_NONE` (`sundials.cpp:905`) -- no Hypre. The fix: use the raw SUNDIALS C API (which `SundialsTimeIntegrator.hpp` already does) with `SUNLinSol_SPBCGS` (iterative BiCGStab) + `SUNLinSolSetPreconditioner()` wrapping `HypreBoomerAMG` as the `PSetup`/`Psolve` callbacks:
+
+```cpp
 #ifdef VIENNAPS_HAS_SUNDIALS
-SundialsTimeIntegrator<NumericType> integrator;
-integrator.setUseFieldState(true);
-// Register RHS callback that assembles K, M, R and computes du/dt
-integrator.evolve(tStart, tEnd, dtMax);
+// 1. Create SPBCGS iterative solver (no dense matrix needed)
+SUNLinearSolver LS = SUNLinSol_SPBCGS(y, SUN_PREC_LEFT, 5, sunctx);
+
+// 2. Set matrix-free Jacobian-vector product via CVodeSetJacTimes
+//    (Jv = M^{-1} * K * v, computed from assembled M and K)
+CVodeSetLinearSolver(cvode_mem, LS, nullptr);  // nullptr = no SUNMatrix
+CVodeSetJacTimes(cvode_mem, nullptr, jacTimesVec);
+
+// 3. Wrap HypreBoomerAMG as SUNDIALS preconditioner callbacks
+//    PSetup: rebuild AMG from the current Jacobian approximation
+//    Psolve: apply AMG solve (one V-cycle) as preconditioner
+CVodeSetPreconditioner(cvode_mem, hyprePSetup, hyprePSolve);
+// where hyprePSetup constructs HypreBoomerAMG from A_hypre,
+// and hyprePSolve calls amg->Mult(rhs, sol).
 #else
 // Fallback: implicit Euler with HypreBoomerAMG
-mfem::HypreBoomerAMG amg(A);
-mfem::GMRESSolver solver(mesh_->GetComm());
-solver.SetOperator(A);
+mfem::HypreBoomerAMG amg(*A_hypre);
+mfem::HypreGMRES solver(MPI_COMM_SELF);
+solver.SetOperator(*A_hypre);
 solver.SetPreconditioner(amg);
+solver.SetPrintLevel(0);
+solver.Mult(B, *species_[s]);
 #endif
 ```
 
-**HypreBoomerAMG setup (always used for the linear solve within each SUNDIALS step):**
+*Source: `sundials_linearsolver.h:179` (`SUNLinSolSetPreconditioner`), `cvode_ls.h:82,97,99` (`CVodeSetLinearSolver`, `CVodeSetPreconditioner`, `CVodeSetJacTimes`), `sunlinsol_spbcgs.h:81` (`SUNLinSol_SPBCGS`), `sundials.cpp:905` (`SUN_PREC_NONE` in MFEM wrapper).*
+
+**HypreBoomerAMG setup (used in both SUNDIALS preconditioner and fallback paths):**
 ```cpp
-mfem::HypreBoomerAMG* amg = new mfem::HypreBoomerAMG(A);
+// Construct from HypreParMatrix (not serial SparseMatrix)
+auto* amg = new mfem::HypreBoomerAMG(*A_hypre);
 amg->SetPrintLevel(0);
 // For diffusion: default AMG settings work well (no special config needed)
+// For multi-species block systems (Phase 3): call SetSystemsOptions(numSpecies)
 ```
 
 - [ ] **Step 1: Write failing test** - `TestDiffusionEngineAssembly()`: create 4x4 triangular mesh, register ConstantDiffusion("Boron"), initialize to 1e18, solve 0->1s, assert `getIntegral("Boron") > 0`.
 
 - [ ] **Step 2: Run to verify failure** -> FAIL
 
-- [ ] **Step 3: Implement DiffusionEngine** - full class with per-species GridFunction storage, FEM assembly, SUNDIALS CVODE integration with HypreBoomerAMG preconditioner. Fallback to implicit Euler + HypreBoomerAMG when SUNDIALS unavailable.
+- [ ] **Step 3: Implement DiffusionEngine** - full class with per-species GridFunction storage, FEM assembly, SUNDIALS CVODE with iterative SPBCGS solver + HypreBoomerAMG preconditioner (no 256-dof cap). Fallback to implicit Euler + HypreGMRES + HypreBoomerAMG when SUNDIALS unavailable. Must construct `HypreParMatrix` from serial `SparseMatrix` via `MPI_COMM_SELF` before solver setup.
 
 - [ ] **Step 4: Run to verify pass** -> PASS
 
@@ -749,8 +781,8 @@ amg->SetPrintLevel(0);
 
 ## Self-Review Notes
 
-- **Spec coverage:** Phase 1 of spec Section 12 = "Mesh generation + Constant diffusion + SUNDIALS coupling". Tasks 1-3 cover models, Task 3.5 covers physics definition, Task 4 covers mesh, Task 5 covers engine+SUNDIALS+HypreBoomerAMG. SUNDIALS CVODE integration is included from Phase 1 (not deferred).
-- **MOOSE-inspired improvements:** (1) HypreBoomerAMG preconditioner instead of DSmoother, (2) SUNDIALS CVODE from day one instead of implicit Euler, (3) Per-species GridFunction instead of packed vector, (4) DiffusionPhysics separates physics definition from discretization.
+- **Spec coverage:** Phase 1 of spec Section 12 = "Mesh generation + Constant diffusion + SUNDIALS coupling". Tasks 1-3 cover models, Task 3.5 covers physics definition, Task 4 covers mesh, Task 5 covers engine+SUNDIALS+HypreBoomerAMG. SUNDIALS CVODE integration with iterative SPBCGS + Hypre AMG preconditioner (no 256-dof dense cap). Serial `SparseMatrix` bridged to `HypreParMatrix` via `MPI_COMM_SELF` (`hypre.hpp:567-569`).
+- **MOOSE-inspired improvements:** (1) HypreBoomerAMG preconditioner instead of DSmoother, (2) SUNDIALS CVODE with SPBCGS + Hypre AMG (no dense cap) instead of dense O(n^3), (3) Per-species GridFunction instead of packed vector, (4) DiffusionPhysics separates physics definition from discretization.
 - **No placeholders:** All steps have concrete code or specific instructions.
 - **Type consistency:** `DiffusionModel<NumericType>`, `ConstantDiffusion<NumericType>`, `DiffusionPhysics<NumericType>`, `DiffusionEngine<NumericType, D>`, `LevelSetToMeshConverter<NumericType, D>` - consistent template parameters throughout. Model assemble methods use `const mfem::GridFunction& speciesGF` + `const std::map<std::string, mfem::GridFunction*>& allSpecies` for coupling.
 - **Phases 2-11** will each get their own plan documents as implementation progresses.

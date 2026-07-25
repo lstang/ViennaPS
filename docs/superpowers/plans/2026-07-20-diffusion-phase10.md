@@ -4,6 +4,55 @@
 
 **Depends on:** Phase 2 (Fermi, IntrinsicCarrier)
 
+**Manual sources (verified via `iconv` UTF-16 decode of `Manual/sprocess_ug.md`):**
+- SProcess **Chapter 7 "Alagator"**, body lines **69515–71957** (TOC p.819–844) — PDE specification language
+- SProcess **Chapter 14 "Extracting Results"**, body lines **90238–91219** (TOC p.871–887) — 1D cuts, dose, fitting
+- SProcess §"Parameter Database" body lines **2810–2940** — `pdbSet`/`pdbGet`/Arrhenius builtin, inheritance, blend
+
+**Solver stack note:** Phases 1-9 use Hypre (via MFEM wrappers, zero build cost) for all linear solves: `HypreBoomerAMG` as preconditioner inside SUNDIALS CVODE/IDA SPBCGS, and inside MFEM `NewtonSolver` for nonlinear problems. PETSc/TAO is deferred to Phase 10 only, where `TSAdjoint` (adjoint-based D(x) inversion, Task 15) and `TAO` (optimization, Tasks 12-15) have no Hypre or MFEM equivalent. See `docs/superpowers/research/2026-07-22-hypre-deep-dive.md` for the full solver strategy.
+
+## Manual Equation References (SProcess Ch.7 + Ch.14)
+
+**Alagator PDE form (SProcess §"Basics of Specifying PDEs", line 69779; example at line 69866):**
+
+```
+pdbSetString Silicon CX Equation "ddt(CX) - [Arrhenius 0.138 1.37]*grad(CX)"
+```
+
+- `ddt(u)` = ∂u/∂t (SProcess line 69700)
+- `grad(u)` = ∇u; applied in a divergence context, `grad` auto-becomes `∇·(D∇u)` (SProcess line 69714 — "auto-divergence")
+- `[Arrhenius D0 Ea]` = `D0·exp(−Ea/kT)` builtin (SProcess line 2836)
+- Interface equations: `Equation_<mat>` form (line 69929) — distinct PDE on each material side of an interface
+- Subexpression reuse (line 70001): name a sub-term, reference it in multiple equations
+
+This is the symbolic-string PDE spec that Phase 10 Task 1 explicitly does NOT replicate (decision: C++ `std::function` lambdas instead). Cite the Alagator form as the conceptual reference; the lambda API is strictly richer (arbitrary C++ computations, not just parsed expressions).
+
+**TR-BDF2 time discretization (SProcess §"Time Integration", line 91613; default since N-2017.09):**
+
+```
+TR step (t_n → t_n+γ):    u_γ = u_n + γ·Δt/2 · (f(u_n) + f(u_γ))           (trapezoidal)
+BDF2 step (t_n → t_{n+1}): u_{n+1} = (1/(γ(2−γ)))·u_γ − ((1−γ)²/(γ(2−γ)))·u_n + (Δt·(1−γ)/(2−γ))·f(u_{n+1})
+```
+
+with `γ = 2 − √2`. Local truncation error estimated via Milne's device (SProcess line 91634) drives adaptive time stepping. SProcess uses this for all PDE time integration; ViennaPS uses SUNDIALS CVODE/BDF (Phase 1) which is mathematically equivalent (BDF orders 1–5).
+
+**Results extraction (SProcess Ch.14):**
+- `select` / `select list` (line 90308) — choose fields for output
+- `print.1d` / `plot.1d` / `slice` (line 90390, 90394, 90442) — 1D data cuts
+- `layers` (line 90529) — returns top/bottom/integral/material per layer (dose computation)
+- `interpolate` (TOC p.876) — level crossings
+- `extract` (TOC p.876) — values during diffuse step
+- `SheetResistance` (cmd ref p.1193) — R_s calculation
+- `FitArrhenius` (p.878), `FitLine` (p.878), `FitPearson` (p.879), `FitPearsonFloor` (p.879) — least-squares fitting utilities
+
+**Parameter database (SProcess §"Parameter Database", line 2810):**
+- `pdbSet <mat> <species> <param> {value}` — write (line 2815)
+- `[Arrhenius D0 Ea]` builtin (line 2836) — uses global Tcl temp var; `SetTemp` (line 2844)
+- `DiffLimit` (line 2857) — floor on diffusivity for numerical stability
+- Inheritance: SiGe inherits from Si (line 2875); "like materials" blend via interpolation (line 2940)
+
+
+
 ## File Structure
 
 | File | Responsibility |

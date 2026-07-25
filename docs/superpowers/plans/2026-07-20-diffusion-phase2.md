@@ -59,7 +59,9 @@ Same as Phase 1. All MFEM-gated. Namespace `viennaps`. LLVM style.
 - **(b1) QuadratureFunction Jacobian** — model exposes `evalDdC(trans, ip)` returning `dD/dC` evaluated at quadrature points; engine assembles the chain-rule term via `mfem::MixedGradGradIntegrator` with a `QuadratureFunctionCoefficient` updated each Newton step.
 - **(b2) Picard with frequent reassembly** — re-evaluate `FermiDCoef` from current C at each Newton iteration; converge slowly (factor 2-4 more iterations than (b1)) but trivially correct.
 
-**Phase 2 default: (b1)** — extrinsic diffusion is the regime where Picard hurts most.
+**Phase 2 default: (b1)** - extrinsic diffusion is the regime where Picard hurts most.
+
+**Hypre-backed Newton (recommended over both (a) and (b)):** MFEM's `NewtonSolver` (`solvers.hpp:780`) with `HypreBoomerAMG` as the inner linear solver eliminates hand-derived Jacobians entirely. The engine assembles the nonlinear residual `F(u) = K(u)*u - R(u)`, and Newton's method computes the Jacobian via `MatFDColoring`-style finite differences (one residual evaluation per Jacobian-vector product). `HypreBoomerAMG` (constructed from the `HypreParMatrix` bridge per Phase 1 Task 5) serves as the AMG preconditioner inside Newton's Krylov iteration. This gives quadratic convergence (vs Picard's linear) without `dD/dC` derivation. Set `NewtonSolver::SetAdaptiveLinRtol()` (`solvers.hpp:856`) for Eisenstat-Walker adaptive tolerance.
 
 - [ ] **Step 1: Write failing test** - `TestFermiDiffusion()`: create model with D_i=1e-13, alpha=1.0. At high dopant (1e20, extrinsic), assert `getDiffusivity(C=1e20, T=1273)` > `getDiffusivity(C=1e15, T=1273)` (extrinsic enhancement). **Add:** `evalDdC(C=1e20, T=1273)` returns positive value consistent with analytic `d/dC [D_i*(1+alpha*n/ni)]`.
 

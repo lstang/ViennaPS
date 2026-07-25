@@ -178,6 +178,16 @@ CddDiffusion() {
 
 - [ ] **Step 5: Commit** - `"feat: add CDD as composable KernelTerm composition"`
 
+**Block preconditioning with Hypre (CDD multi-species system):** The CDD system has 5+ coupled species (Boron, Interstitial, Vacancy, 311, BIC). Two paths:
+  - **Monolithic + `SetSystemsOptions`:** Pack all species into one `HypreParMatrix` and call `amg.SetSystemsOptions(numSpecies)` to configure BoomerAMG for block systems (nodal ordering). Simple but may struggle with strongly coupled off-diagonal blocks.
+  - **Block-diagonal:** Use `mfem::BlockOperator` + separate `HypreBoomerAMG` per species block. Each species gets its own AMG cycle. Better for loosely coupled species (dopant diffusion is weakly coupled to cluster kinetics). This is the MFEM equivalent of MOOSE's `PhysicsBase::addPreconditioning()` with field-split.
+  Prefer block-diagonal for CDD; switch to monolithic if convergence stalls.
+
+**DAE support (critical for Phase 3):** Clustering with equilibrium species (charge-state fractions from `CoupledBEEquilibriumSub` pattern, Task 0) forms an Index-1 DAE. MFEM has **no IDA wrapper** (grep of `sundials.hpp` for `ida` is empty). Two options:
+  - **(A) Raw SUNDIALS IDA C API** (recommended): use `IDACreate()` + `IDASInit()` with the same `HypreBoomerAMG` preconditioner wrapping as Phase 1 CVODE (`SUNLinSol_SPBCGS` + `IDASSetLinearSolver` + `IDASSetPreconditioner`). IDA handles the singular mass matrix natively.
+  - **(B) DAE-to-ODE reformulation:** eliminate algebraic constraints (equilibrium species) analytically, solving only primary species as ODE. Simpler but fragile when equilibrium constants change.
+  Prefer (A). The raw IDA API follows the same integration pattern as the CVODE + Hypre path from Phase 1.
+
 ### Task 11: NeutralReactDiffusion Model
 - Neutral defect reactions without charge coupling
 - Test: verify basic recombination
