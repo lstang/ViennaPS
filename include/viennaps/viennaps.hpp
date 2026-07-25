@@ -115,6 +115,8 @@
 #include <fields/models/FlashLaserAnneal.hpp>
 #include <fields/PdeApi.hpp>
 #include <fields/AdaptiveMeshRefiner.hpp>
+#include <fields/MovingMeshHandler.hpp>
+#include <fields/SolutionTransfer.hpp>
 #ifdef VIENNAPS_HAS_MFEM
 #include <fields/LevelSetToMesh.hpp>
 #include <fields/DiffusionEngine.hpp>

@@ -48,6 +48,8 @@
 #include <fields/models/FlashLaserAnneal.hpp>
 #include <fields/PdeApi.hpp>
 #include <fields/AdaptiveMeshRefiner.hpp>
+#include <fields/MovingMeshHandler.hpp>
+#include <fields/SolutionTransfer.hpp>
 #include <fields/DiffusionPhysics.hpp>
 #include <fields/ParameterDatabase.hpp>
 #include <random>
@@ -695,6 +697,102 @@ void TestPhase11Amr() {
   VC_TEST_ASSERT(!ids.empty());
 #endif
   std::cout << "[phase11] marks=" << marks.size() << "\n";
+}
+
+/// MovingMeshHandler + SolutionTransfer full-depth (gap analysis wave).
+void TestMovingMeshSolutionTransfer() {
+#ifdef VIENNAPS_HAS_MFEM
+  // --- Relabel Si(1) → SiO2(2) when progress crosses threshold.
+  {
+    auto mesh = mfem::Mesh::MakeCartesian2D(4, 4, mfem::Element::TRIANGLE);
+    for (int e = 0; e < mesh.GetNE(); ++e)
+      mesh.SetAttribute(e, 1);
+    auto none = MovingMeshHandler::relabelAttributes(mesh, 1, 2, /*progress=*/0.1,
+                                                     /*threshold=*/0.5);
+    VC_TEST_ASSERT(none.elementsRelabeled == 0);
+    auto flipped = MovingMeshHandler::relabelAttributes(
+        mesh, 1, 2, /*progress=*/0.9, /*threshold=*/0.5);
+    std::cout << "[moving-mesh] relabel flipped=" << flipped.elementsRelabeled
+              << "\n";
+    VC_TEST_ASSERT(flipped.elementsRelabeled > 0);
+    int nOx = 0;
+    for (int e = 0; e < mesh.GetNE(); ++e)
+      if (mesh.GetAttribute(e) == 2)
+        ++nOx;
+    VC_TEST_ASSERT(nOx == flipped.elementsRelabeled);
+  }
+
+  // --- Free-surface lift: nonzero displacement on top nodes.
+  {
+    auto mesh = mfem::Mesh::MakeCartesian2D(4, 4, mfem::Element::TRIANGLE);
+    auto lift =
+        MovingMeshHandler::liftFreeSurface(mesh, /*yThresh=*/0.99, /*lift=*/0.05);
+    std::cout << "[moving-mesh] lift nodes=" << lift.nodesDisplaced
+              << " maxDisp=" << lift.maxDisplacement << "\n";
+    VC_TEST_ASSERT(lift.nodesDisplaced > 0);
+    VC_TEST_ASSERT(lift.maxDisplacement > 0.0);
+  }
+
+  // --- Integral-preserving transfer: coarse → fine and coarse → coarser.
+  // Source: uniform C=1e18 on 4x4 mesh → dose = 1e18 * area(1) = 1e18.
+  auto makeUniform = [](int n, double C) {
+    auto mesh = std::make_unique<mfem::Mesh>(
+        mfem::Mesh::MakeCartesian2D(n, n, mfem::Element::TRIANGLE));
+    auto fec = std::make_unique<mfem::H1_FECollection>(1, mesh->Dimension());
+    auto fes =
+        std::make_unique<mfem::FiniteElementSpace>(mesh.get(), fec.get());
+    auto gf = std::make_unique<mfem::GridFunction>(fes.get());
+    *gf = C;
+    return std::make_tuple(std::move(mesh), std::move(fec), std::move(fes),
+                           std::move(gf));
+  };
+
+  {
+    auto [mSrc, fecSrc, fesSrc, gfSrc] = makeUniform(4, 1e18);
+    const double doseSrc = SolutionTransfer::integrate(*gfSrc);
+    VC_TEST_ASSERT(doseSrc > 0.0);
+
+    // Fine target (8x8)
+    auto [mFine, fecFine, fesFine, gfFine] = makeUniform(8, 0.0);
+    auto trFine =
+        SolutionTransfer::transferIntegralPreserving(*gfSrc, *gfFine);
+    std::cout << "[solution-transfer] fine doseSrc=" << trFine.doseSource
+              << " doseAfter=" << trFine.doseTargetAfterScale
+              << " relErr=" << trFine.relativeDoseError << "\n";
+    VC_TEST_ASSERT(trFine.ok);
+    VC_TEST_ASSERT(trFine.relativeDoseError <= 1e-3); // 0.1%
+
+    // Coarser target (2x2)
+    auto [mCoarse, fecCoarse, fesCoarse, gfCoarse] = makeUniform(2, 0.0);
+    auto trCoarse =
+        SolutionTransfer::transferIntegralPreserving(*gfSrc, *gfCoarse);
+    std::cout << "[solution-transfer] coarse doseSrc=" << trCoarse.doseSource
+              << " doseAfter=" << trCoarse.doseTargetAfterScale
+              << " relErr=" << trCoarse.relativeDoseError << "\n";
+    VC_TEST_ASSERT(trCoarse.ok);
+    VC_TEST_ASSERT(trCoarse.relativeDoseError <= 1e-3);
+  }
+
+  // --- Relabel then transfer on a mesh that changed attributes (field lives
+  // on same geometry; dose still preserved after copy path).
+  {
+    auto [m0, fec0, fes0, gf0] = makeUniform(4, 1e18);
+    auto flip = MovingMeshHandler::relabelAttributes(*m0, 1, 2, 1.0, 0.0);
+    // MakeCartesian2D default attribute is 1.
+    std::cout << "[moving-mesh+transfer] flipped=" << flip.elementsRelabeled
+              << "\n";
+    auto [m1, fec1, fes1, gf1] = makeUniform(6, 0.0);
+    auto tr = SolutionTransfer::transferIntegralPreserving(*gf0, *gf1);
+    VC_TEST_ASSERT(tr.ok);
+    VC_TEST_ASSERT(tr.relativeDoseError <= 1e-3);
+    std::cout << "[moving-mesh+transfer] relErr=" << tr.relativeDoseError
+              << "\n";
+  }
+
+  std::cout << "[moving-mesh-solution-transfer] PASS\n";
+#else
+  std::cout << "[moving-mesh-solution-transfer] skipped (no MFEM)\n";
+#endif
 }
 
 void TestDeepenedApis() {
@@ -1791,6 +1889,7 @@ int main() {
   TestPhase9Laser();
   TestPhase10PdeApi();
   TestPhase11Amr();
+  TestMovingMeshSolutionTransfer();
   TestDeepenedApis();
   TestDeepenedRobinEngine();
   TestProductionSegregationEngine();
