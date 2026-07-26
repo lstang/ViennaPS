@@ -102,18 +102,45 @@ public:
 
   const std::string &material() const { return material_; }
 
-  /// Compound-sublattice I/V equilibrium proxies (GaAs-like).
-  NumericType C_I_eq(NumericType T) const {
+  /// Compound-sublattice I/V equilibrium: Ga and As sublattices have
+  /// distinct interstitial and vacancy species (4 total). These are
+  /// registered as engine species when sublattice tracking is enabled.
+  void enableSublatticeDefects(bool on = true) {
+    sublatticeDefects_ = on;
+  }
+  bool sublatticeDefectsEnabled() const { return sublatticeDefects_; }
+
+  /// Ga-sublattice interstitial equilibrium (V_Ga mechanism for donors).
+  NumericType C_I_Ga_eq(NumericType T) const {
     const NumericType kB = static_cast<NumericType>(8.617333262145e-5);
     return NumericType(1e22) * std::exp(-NumericType(3.0) / (kB * std::max(T, NumericType(1))));
   }
-  NumericType C_V_eq(NumericType T) const {
+  /// Ga-sublattice vacancy equilibrium.
+  NumericType C_V_Ga_eq(NumericType T) const {
     const NumericType kB = static_cast<NumericType>(8.617333262145e-5);
     return NumericType(1e22) * std::exp(-NumericType(2.5) / (kB * std::max(T, NumericType(1))));
   }
+  /// As-sublattice interstitial equilibrium (I_Ga mechanism for acceptors).
+  NumericType C_I_As_eq(NumericType T) const {
+    const NumericType kB = static_cast<NumericType>(8.617333262145e-5);
+    return NumericType(1e22) * std::exp(-NumericType(3.5) / (kB * std::max(T, NumericType(1))));
+  }
+  /// As-sublattice vacancy equilibrium.
+  NumericType C_V_As_eq(NumericType T) const {
+    const NumericType kB = static_cast<NumericType>(8.617333262145e-5);
+    return NumericType(1e22) * std::exp(-NumericType(3.0) / (kB * std::max(T, NumericType(1))));
+  }
 
-  int numSpecies() const override { return 1; }
+  // Legacy proxies (kept for backward compatibility).
+  NumericType C_I_eq(NumericType T) const { return C_I_Ga_eq(T); }
+  NumericType C_V_eq(NumericType T) const { return C_V_Ga_eq(T); }
+
+  int numSpecies() const override {
+    return sublatticeDefects_ ? 5 : 1;
+  }
   std::vector<std::string> speciesNames() const override {
+    if (sublatticeDefects_)
+      return {species_, "I_Ga", "V_Ga", "I_As", "V_As"};
     return {species_};
   }
 
@@ -159,6 +186,7 @@ private:
   std::string material_;
   std::string species_;
   Mechanism mechanism_ = Mechanism::Donor;
+  bool sublatticeDefects_ = false;
   // Eq. 3-239/3-240 prefactors (loaded from MaterialPropertySystem).
   NumericType D_AV_ = NumericType(1e-15);
   NumericType D_AV2_ = NumericType(0);

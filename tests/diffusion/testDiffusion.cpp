@@ -567,6 +567,23 @@ void TestPhase6SiGe() {
   VC_TEST_ASSERT(znRatio > siRatio);
   // Zn ratio should be at least 1e4 (the quadratic enhancement dominates).
   VC_TEST_ASSERT(znRatio > 1e4);
+  // 4-sublattice I/V equilibrium: Ga and As each have I and V species.
+  IIIVDiffusion<double> gaasSub("GaAs", "Si");
+  gaasSub.enableSublatticeDefects(true);
+  VC_TEST_ASSERT(gaasSub.numSpecies() == 5);
+  auto sn = gaasSub.speciesNames();
+  VC_TEST_ASSERT(sn.size() == 5 && sn[1] == "I_Ga" && sn[3] == "I_As");
+  // Ga and As sublattice equilibria differ (different formation energies).
+  const double cIGa = gaasSub.C_I_Ga_eq(1273.0);
+  const double cIAs = gaasSub.C_I_As_eq(1273.0);
+  const double cVGa = gaasSub.C_V_Ga_eq(1273.0);
+  const double cVAs = gaasSub.C_V_As_eq(1273.0);
+  std::cout << "[phase6] sublattice C_I_Ga=" << cIGa << " C_I_As=" << cIAs
+            << " C_V_Ga=" << cVGa << " C_V_As=" << cVAs << "\n";
+  VC_TEST_ASSERT(cIGa > 0 && cIAs > 0 && cVGa > 0 && cVAs > 0);
+  // As-sublattice defects have higher formation energy -> lower equilibrium.
+  VC_TEST_ASSERT(cIAs < cIGa);
+
   std::cout << "[phase6] EgSi=" << EgSi << " EgGe=" << EgGe
             << " tedC/tedNoC=" << tedC / tedNoC << "\n";
 }
@@ -755,6 +772,76 @@ void TestPhase9Laser() {
   flash.setPulse(1600.0, 1e-3);
   VC_TEST_ASSERT(flash.peakTemperature() == 1600.0);
   std::cout << "[phase9] flash duration=" << flash.duration() << "\n";
+
+  // FEM Allen-Cahn melting phase field: register MeltFraction + Temperature.
+  // Above Tm, φ should evolve toward 1 (liquid); below Tm toward 0 (solid).
+  {
+    MeshAttributes pfAttrs;
+    pfAttrs.setAttributeName(1, "Si");
+    auto pfMesh = std::make_unique<mfem::Mesh>(
+        mfem::Mesh::MakeCartesian2D(4, 4, mfem::Element::TRIANGLE));
+    DiffusionEngine<double, 2> engine;
+    engine.setMesh(std::move(pfMesh), pfAttrs);
+    auto meltPF = std::make_shared<MeltingPhaseFieldFEM<double>>();
+    meltPF->setMobility(1.0);
+    meltPF->setGradientEnergy(1e-4);
+    meltPF->setMeltingPoint(1687.0);
+    meltPF->setCoupling(10.0);
+    meltPF->setTemperatureSpecies("Temperature");
+    // Temperature needs a trivial model.
+    auto tDiff = std::make_shared<ConstantDiffusion<double>>("Temperature");
+    tDiff->setDiffusivity(1e-20, 0.0);
+    DiffusionPhysics<double> physics;
+    physics.addSpecies("MeltFraction");
+    physics.addSpecies("Temperature");
+    physics.addModel(meltPF);
+    physics.addModel(tDiff);
+    physics.setTemperature(1800.0); // above Tm -> should melt
+    engine.setPhysics(physics);
+    engine.initializeSpecies("MeltFraction", 0.1); // slightly above solid
+    engine.initializeSpecies("Temperature", 1800.0);
+    const double phi0 = engine.getIntegral("MeltFraction");
+    engine.solve(0.0, 0.5, 0.05);
+    const double phi1 = engine.getIntegral("MeltFraction");
+    std::cout << "[phase9] allen-cahn melt phi0=" << phi0 << " phi1=" << phi1
+              << "\n";
+    // Above Tm: φ should increase toward 1 (melting).
+    VC_TEST_ASSERT(phi1 > phi0);
+  }
+
+  // FEM Allen-Cahn crystallinity phase field: SPER-driven.
+  {
+    MeshAttributes pfAttrs;
+    pfAttrs.setAttributeName(1, "Si");
+    auto pfMesh = std::make_unique<mfem::Mesh>(
+        mfem::Mesh::MakeCartesian2D(4, 4, mfem::Element::TRIANGLE));
+    DiffusionEngine<double, 2> engine;
+    engine.setMesh(std::move(pfMesh), pfAttrs);
+    auto crystPF = std::make_shared<CrystallinityPhaseFieldFEM<double>>();
+    crystPF->setMobility(1.0);
+    crystPF->setGradientEnergy(1e-4);
+    crystPF->setSperVelocity(1e-6, 2.7);
+    crystPF->setCoupling(10.0);
+    crystPF->setTemperatureSpecies("Temperature");
+    auto tDiff = std::make_shared<ConstantDiffusion<double>>("Temperature");
+    tDiff->setDiffusivity(1e-20, 0.0);
+    DiffusionPhysics<double> physics;
+    physics.addSpecies("Crystallinity");
+    physics.addSpecies("Temperature");
+    physics.addModel(crystPF);
+    physics.addModel(tDiff);
+    physics.setTemperature(1273.0);
+    engine.setPhysics(physics);
+    engine.initializeSpecies("Crystallinity", 0.1); // slightly above amorphous
+    engine.initializeSpecies("Temperature", 1273.0);
+    const double phi0 = engine.getIntegral("Crystallinity");
+    engine.solve(0.0, 0.5, 0.05);
+    const double phi1 = engine.getIntegral("Crystallinity");
+    std::cout << "[phase9] allen-cahn cryst phi0=" << phi0 << " phi1=" << phi1
+              << "\n";
+    // SPER driving force should push φ toward crystalline (increasing).
+    VC_TEST_ASSERT(phi1 > phi0);
+  }
 }
 
 /// Engine-solve tests for FEM model paths that previously shipped without

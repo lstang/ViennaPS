@@ -259,6 +259,201 @@ private:
 #endif
 };
 
+/// FEM Allen-Cahn melting phase field (SProcess eq. 22575):
+/// dφ/dt = -L * (df/dφ - κ ∇²φ),  f(φ,T) = (φ²-1)²/4 - λ(T-Tm)φ
+/// df/dφ = φ³ - φ - λ(T-Tm)
+/// Assembled as: M dφ/dt + L*κ*K*φ = -L*R(φ,T)
+/// where K is the diffusion stiffness and R is the reaction (bulk driving force).
+template <class NumericType>
+class MeltingPhaseFieldFEM : public DiffusionModel<NumericType> {
+public:
+  MeltingPhaseFieldFEM() {
+    this->setName("MeltingPhaseFieldFEM");
+  }
+  void setMobility(NumericType L) { L_ = L; }
+  void setGradientEnergy(NumericType kappa) { kappa_ = kappa; }
+  void setMeltingPoint(NumericType Tm) { Tm_ = Tm; }
+  void setCoupling(NumericType lambda) { lambda_ = lambda; }
+  void setTemperatureSpecies(std::string s) { tempSpecies_ = std::move(s); }
+
+  int numSpecies() const override { return 1; }
+  std::vector<std::string> speciesNames() const override {
+    return {"MeltFraction"};
+  }
+
+#ifdef VIENNAPS_HAS_MFEM
+  /// Stiffness: L*κ * ∇φ·∇v (gradient energy term).
+  void assembleStiffness(
+      mfem::BilinearForm &K, const mfem::GridFunction & /*speciesGF*/,
+      const std::map<std::string, mfem::GridFunction *> & /*allSpecies*/,
+      const mfem::GridFunction * /*temp*/) const override {
+    const double lk = static_cast<double>(L_ * kappa_);
+    stiffCoef_ = std::make_unique<mfem::ConstantCoefficient>(lk);
+    K.AddDomainIntegrator(new mfem::DiffusionIntegrator(*stiffCoef_));
+  }
+
+  /// Reaction: -L * (φ³ - φ - λ(T-Tm)) as a QP-local source.
+  /// Reads φ from the species GF and T from the temperature species.
+  void assembleReaction(
+      mfem::LinearForm &R, const mfem::GridFunction &speciesGF,
+      const std::map<std::string, mfem::GridFunction *> &allSpecies,
+      const mfem::GridFunction * /*temp*/) const override {
+    const mfem::GridFunction *Tgf = nullptr;
+    if (!tempSpecies_.empty()) {
+      auto it = allSpecies.find(tempSpecies_);
+      if (it != allSpecies.end())
+        Tgf = it->second;
+    }
+    reactCoef_ = std::make_unique<AllenCahnReactionCoef>(
+        &speciesGF, Tgf, static_cast<double>(L_),
+        static_cast<double>(lambda_), static_cast<double>(Tm_));
+    R.AddDomainIntegrator(new mfem::DomainLFIntegrator(*reactCoef_));
+  }
+
+  void assembleMass(mfem::BilinearForm &M) const override {
+    massCoef_ = std::make_unique<mfem::ConstantCoefficient>(1.0);
+    M.AddDomainIntegrator(new mfem::MassIntegrator(*massCoef_));
+  }
+#endif
+
+private:
+  NumericType L_ = NumericType(1.0);
+  NumericType kappa_ = NumericType(1e-4);
+  NumericType Tm_ = NumericType(1687);
+  NumericType lambda_ = NumericType(1.0);
+  std::string tempSpecies_ = "Temperature";
+#ifdef VIENNAPS_HAS_MFEM
+  class AllenCahnReactionCoef : public mfem::Coefficient {
+  public:
+    AllenCahnReactionCoef(const mfem::GridFunction *phi,
+                          const mfem::GridFunction *T, double L, double lambda,
+                          double Tm)
+        : phi_(phi), T_(T), L_(L), lambda_(lambda), Tm_(Tm) {}
+    double Eval(mfem::ElementTransformation &tr,
+                const mfem::IntegrationPoint &ip) override {
+      double p = 0.0;
+      if (phi_)
+        p = std::min(1.0, std::max(-1.0, phi_->GetValue(tr, ip)));
+      double T = Tm_;
+      if (T_)
+        T = T_->GetValue(tr, ip);
+      // df/dφ = φ³ - φ - λ(T-Tm). Reaction = -L * df/dφ.
+      return -L_ * (p * p * p - p - lambda_ * (T - Tm_));
+    }
+
+  private:
+    const mfem::GridFunction *phi_;
+    const mfem::GridFunction *T_;
+    double L_, lambda_, Tm_;
+  };
+  mutable std::unique_ptr<mfem::ConstantCoefficient> stiffCoef_;
+  mutable std::unique_ptr<AllenCahnReactionCoef> reactCoef_;
+  mutable std::unique_ptr<mfem::ConstantCoefficient> massCoef_;
+#endif
+};
+
+/// FEM Allen-Cahn crystallinity phase field (SProcess eq. 23069):
+/// df/dφ = φ³ - φ - λ*v_SPER(T)*φ, driven by SPER velocity.
+template <class NumericType>
+class CrystallinityPhaseFieldFEM : public DiffusionModel<NumericType> {
+public:
+  CrystallinityPhaseFieldFEM() {
+    this->setName("CrystallinityPhaseFieldFEM");
+  }
+  void setMobility(NumericType L) { L_ = L; }
+  void setGradientEnergy(NumericType kappa) { kappa_ = kappa; }
+  void setSperVelocity(NumericType v0, NumericType Ea) {
+    v0_ = v0;
+    Ea_ = Ea;
+  }
+  void setCoupling(NumericType lambda) { lambda_ = lambda; }
+  void setTemperatureSpecies(std::string s) { tempSpecies_ = std::move(s); }
+
+  NumericType sperVelocity(NumericType T) const {
+    const NumericType kB = static_cast<NumericType>(8.617333262145e-5);
+    if (T <= 0)
+      return v0_;
+    return v0_ * std::exp(-Ea_ / (kB * T));
+  }
+
+  int numSpecies() const override { return 1; }
+  std::vector<std::string> speciesNames() const override {
+    return {"Crystallinity"};
+  }
+
+#ifdef VIENNAPS_HAS_MFEM
+  void assembleStiffness(
+      mfem::BilinearForm &K, const mfem::GridFunction & /*speciesGF*/,
+      const std::map<std::string, mfem::GridFunction *> & /*allSpecies*/,
+      const mfem::GridFunction * /*temp*/) const override {
+    const double lk = static_cast<double>(L_ * kappa_);
+    stiffCoef_ = std::make_unique<mfem::ConstantCoefficient>(lk);
+    K.AddDomainIntegrator(new mfem::DiffusionIntegrator(*stiffCoef_));
+  }
+
+  void assembleReaction(
+      mfem::LinearForm &R, const mfem::GridFunction &speciesGF,
+      const std::map<std::string, mfem::GridFunction *> &allSpecies,
+      const mfem::GridFunction * /*temp*/) const override {
+    const mfem::GridFunction *Tgf = nullptr;
+    if (!tempSpecies_.empty()) {
+      auto it = allSpecies.find(tempSpecies_);
+      if (it != allSpecies.end())
+        Tgf = it->second;
+    }
+    reactCoef_ = std::make_unique<CrystReactionCoef>(
+        &speciesGF, Tgf, static_cast<double>(L_),
+        static_cast<double>(lambda_), static_cast<double>(v0_),
+        static_cast<double>(Ea_));
+    R.AddDomainIntegrator(new mfem::DomainLFIntegrator(*reactCoef_));
+  }
+
+  void assembleMass(mfem::BilinearForm &M) const override {
+    massCoef_ = std::make_unique<mfem::ConstantCoefficient>(1.0);
+    M.AddDomainIntegrator(new mfem::MassIntegrator(*massCoef_));
+  }
+#endif
+
+private:
+  NumericType L_ = NumericType(1.0);
+  NumericType kappa_ = NumericType(1e-4);
+  NumericType lambda_ = NumericType(1.0);
+  NumericType v0_ = NumericType(1e-6);
+  NumericType Ea_ = NumericType(2.7);
+  std::string tempSpecies_ = "Temperature";
+#ifdef VIENNAPS_HAS_MFEM
+  class CrystReactionCoef : public mfem::Coefficient {
+  public:
+    CrystReactionCoef(const mfem::GridFunction *phi,
+                      const mfem::GridFunction *T, double L, double lambda,
+                      double v0, double Ea)
+        : phi_(phi), T_(T), L_(L), lambda_(lambda), v0_(v0), Ea_(Ea) {}
+    double Eval(mfem::ElementTransformation &tr,
+                const mfem::IntegrationPoint &ip) override {
+      double p = 0.0;
+      if (phi_)
+        p = std::min(1.0, std::max(-1.0, phi_->GetValue(tr, ip)));
+      double T = 1000.0;
+      if (T_)
+        T = T_->GetValue(tr, ip);
+      const double kB = 8.617333262145e-5;
+      const double vSper =
+          (T > 0) ? v0_ * std::exp(-Ea_ / (kB * T)) : v0_;
+      // df/dφ = φ³ - φ - λ*v_SPER(T)*φ. Reaction = -L * df/dφ.
+      return -L_ * (p * p * p - p - lambda_ * vSper * p);
+    }
+
+  private:
+    const mfem::GridFunction *phi_;
+    const mfem::GridFunction *T_;
+    double L_, lambda_, v0_, Ea_;
+  };
+  mutable std::unique_ptr<mfem::ConstantCoefficient> stiffCoef_;
+  mutable std::unique_ptr<CrystReactionCoef> reactCoef_;
+  mutable std::unique_ptr<mfem::ConstantCoefficient> massCoef_;
+#endif
+};
+
 template <class NumericType>
 class FlashLaserAnneal {
 public:

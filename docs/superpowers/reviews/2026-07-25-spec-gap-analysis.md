@@ -43,8 +43,8 @@ Legend:
 | ChargedEquilibrium, Carbon detailed balance, Copper drift | ✅ |
 | Poly isotropic/anisotropic + GB FEM segregation residual | ✅ | Anisotropic PWConst + two-sided interior-face residual via `finalizeReaction` (Wave 2.1). Tested: gi→gb mass transfer + conservation. |
 | SiGe FEM + defect-mediated; SiGeC; **GeB pairing FEM**; **strain FEM** | ✅ | FEM assembly tested in engine-solve (Wave 1): SiGeC mass conservation, GeB pairing, Strain peak-sensitive, MeltDiffusion phi-dependent. |
-| III-V FEM + I/V eq; SPER + orientation | 🟡 | FEM stiffness + carrier-dependent eq. 3-239/3-240 (donor `n/ni`, acceptor `p/ni`, mechanism-aware — Wave 3.1). GaAs/InP band data added. Test verifies Si (linear ratio=36324) vs Zn (quadratic ratio=5.5e8). 4-sublattice I/V equilibrium deferred. SPER orientation ✅. |
-| Flash **FEM heat**; **MeltDiffusion FEM** (φ-dependent D) | 🟡 | Heat FEM ✅ + latent heat `ρ·L·∂φ/∂t` coupling (Wave 2.3). MeltDiffusion φ-dependent D FEM tested (Wave 1: peak phi=0 vs phi=1). Full Allen-Cahn melting/crystallinity phase field still stretch. |
+| III-V FEM + I/V eq; SPER + orientation | ✅ | FEM stiffness + carrier-dependent eq. 3-239/3-240 (donor `n/ni`, acceptor `p/ni`, mechanism-aware). GaAs/InP band data. 4-sublattice I/V equilibrium (`I_Ga`, `V_Ga`, `I_As`, `V_As` species + distinct formation energies). Test verifies Si (linear) vs Zn (quadratic ratio 5.5e8) + sublattice equilibria differ. SPER orientation ✅. |
+| Flash **FEM heat**; **MeltDiffusion FEM** (φ-dependent D) | ✅ | Heat FEM + latent heat `ρ·L·∂φ/∂t`. MeltDiffusion φ-dependent D FEM tested. Allen-Cahn melting + crystallinity phase fields FEM (`MeltingPhaseFieldFEM` + `CrystallinityPhaseFieldFEM` with QP-local reaction terms). Tests verify φ increases above Tm (melting) and under SPER (crystallization). |
 | FDTD / full TMM / scanning laser / adjoint | ❌ | Stretch |
 
 ## Section 5: KMC — ✅ / stretch
