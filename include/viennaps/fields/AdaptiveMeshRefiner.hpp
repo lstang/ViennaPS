@@ -111,6 +111,29 @@ public:
     return n;
   }
 
+  /// Refine mesh and prolongate all GridFunctions to the new space (MFEM native).
+  /// Returns number of elements refined.
+  static int refineMarkedWithProlongation(mfem::Mesh &mesh,
+                                          mfem::FiniteElementSpace &fes,
+                                          const std::vector<int> &elemIds,
+                                          std::vector<mfem::GridFunction *> &gfs) {
+    if (elemIds.empty())
+      return 0;
+    mfem::Array<int> el_to_refine;
+    for (int id : elemIds)
+      if (id >= 0 && id < mesh.GetNE())
+        el_to_refine.Append(id);
+    if (el_to_refine.Size() == 0)
+      return 0;
+
+    mesh.GeneralRefinement(el_to_refine);
+    fes.Update(true);
+    for (auto *gf : gfs)
+      gf->Update();
+    fes.UpdatesFinished();
+    return static_cast<int>(el_to_refine.Size());
+  }
+
   /// Gradient-based marking: elements with |∇u| ≥ fraction * max|∇u|.
   static std::vector<int>
   markByGradient(mfem::Mesh &mesh, const mfem::GridFunction &u,

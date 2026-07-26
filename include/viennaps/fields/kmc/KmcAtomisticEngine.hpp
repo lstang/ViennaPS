@@ -2,9 +2,9 @@
 
 /// KmcAtomisticEngine — BKL KMC with Hop, Recombine, Cluster, Dissociate.
 ///
-/// Event selection uses prefix-sum + binary search O(log N_events) after an
-/// O(N_sites) rebuild (full incremental heap is a follow-up). Species codes:
-/// 0 empty, 1 interstitial, 2 vacancy, 3 {311}-like cluster.
+/// Event selection uses Fenwick tree over per-site total rates for O(log N)
+/// site selection, with O(1)-per-affected-site incremental rebuild after each
+/// event. Species codes: 0 empty, 1 interstitial, 2 vacancy, 3 {311}-like.
 
 #include "KmcEvent.hpp"
 #include "KmcLattice.hpp"
@@ -17,6 +17,56 @@
 #include <vector>
 
 namespace viennaps {
+
+// Fenwick Tree (Binary Indexed Tree) for O(log N) prefix sums and updates.
+template <class Real>
+class FenwickTree {
+public:
+  explicit FenwickTree(std::size_t n = 0) { init(n); }
+
+  void init(std::size_t n) {
+    n_ = n;
+    bit_.assign(n + 1, Real(0));
+  }
+
+  void add(std::size_t i, double delta) {
+    for (std::size_t idx = i + 1; idx <= n_; idx += idx & -idx)
+      bit_[idx] += delta;
+  }
+
+  double sum(std::size_t i) const {
+    double res = 0;
+    for (std::size_t idx = i + 1; idx > 0; idx -= idx & -idx)
+      res += bit_[idx];
+    return res;
+  }
+
+  double total() const { return sum(n_ - 1); }
+
+  std::size_t lower_bound(double target) const {
+    if (target <= 0)
+      return 0;
+    std::size_t idx = 0;
+    double s = 0;
+    std::size_t bit = 1;
+    while (bit << 1 <= n_)
+      bit <<= 1;
+    for (; bit > 0; bit >>= 1) {
+      std::size_t next = idx + bit;
+      if (next <= n_ && s + bit_[next] < target) {
+        idx = next;
+        s += bit_[next];
+      }
+    }
+    return std::min(idx, n_ - 1);
+  }
+
+  std::size_t size() const { return n_; }
+
+private:
+  std::size_t n_ = 0;
+  std::vector<double> bit_;
+};
 
 class KmcAtomisticEngine {
 public:
@@ -53,166 +103,43 @@ public:
   int desorbCount() const { return desorbCount_; }
   int twinCount() const { return twinCount_; }
 
-  /// Build event list, select via prefix-sum binary search, apply.
+  /// Build per-site event lists on first call; thereafter pick via Fenwick
+  /// tree and incrementally update affected neighborhoods.
   bool step() {
-    events_.clear();
-    events_.reserve(lattice_.size() * 8);
-    const double rHop = params_.hopRate();
-    const double rRec = params_.recombRate();
-    const double rCl = params_.clusterRate();
-    const double rDi = params_.dissocRate();
-
-    for (int k = 0; k < lattice_.nz(); ++k)
-      for (int j = 0; j < lattice_.ny(); ++j)
-        for (int i = 0; i < lattice_.nx(); ++i) {
-          const auto &s = lattice_.at(i, j, k);
-          if (!s.occupied)
-            continue;
-
-          // Dissociation of {311}-like cluster → free I on site + neighbor empty.
-          if (cluster_ && s.species == KmcCluster311) {
-            forEachNeighbor(i, j, k, [&](int i1, int j1, int k1) {
-              if (lattice_.at(i1, j1, k1).occupied)
-                return;
-              KmcEvent ev;
-              ev.type = KmcEventType::Dissociate;
-              ev.i0 = i;
-              ev.j0 = j;
-              ev.k0 = k;
-              ev.i1 = i1;
-              ev.j1 = j1;
-              ev.k1 = k1;
-              ev.rate = rDi;
-              events_.push_back(ev);
-            });
-          }
-
-          forEachNeighbor(i, j, k, [&](int i1, int j1, int k1) {
-            const auto &n = lattice_.at(i1, j1, k1);
-            if (!n.occupied) {
-              // Hop mobile species only (I, V; not clusters).
-              if (s.species == KmcInterstitial || s.species == KmcVacancy) {
-                KmcEvent ev;
-                ev.type = KmcEventType::Hop;
-                ev.i0 = i;
-                ev.j0 = j;
-                ev.k0 = k;
-                ev.i1 = i1;
-                ev.j1 = j1;
-                ev.k1 = k1;
-                ev.rate = rHop;
-                events_.push_back(ev);
-              }
-              return;
-            }
-            // I+V recombination (count each pair once via species order).
-            if (recomb_ && s.species == KmcInterstitial &&
-                n.species == KmcVacancy) {
-              KmcEvent ev;
-              ev.type = KmcEventType::Recombine;
-              ev.i0 = i;
-              ev.j0 = j;
-              ev.k0 = k;
-              ev.i1 = i1;
-              ev.j1 = j1;
-              ev.k1 = k1;
-              ev.rate = rRec;
-              events_.push_back(ev);
-            }
-            // I+I → {311} cluster (canonical TED sink).
-            if (cluster_ && s.species == KmcInterstitial &&
-                n.species == KmcInterstitial) {
-              // Order sites so each unordered pair is once.
-              const int a = (k * lattice_.ny() + j) * lattice_.nx() + i;
-              const int b = (k1 * lattice_.ny() + j1) * lattice_.nx() + i1;
-              if (a < b) {
-                KmcEvent ev;
-                ev.type = KmcEventType::Cluster;
-                ev.i0 = i;
-                ev.j0 = j;
-                ev.k0 = k;
-                ev.i1 = i1;
-                ev.j1 = j1;
-                ev.k1 = k1;
-                ev.rate = rCl;
-                events_.push_back(ev);
-              }
-            }
-          });
-        }
-
-    // Epitaxial surface events (Phase 8 plan): Deposit (attach) at empty
-    // surface sites, Desorb from occupied surface sites, Twin on {111}.
-    // Surface = topmost occupied site in each column; the empty site above
-    // it is the attachment candidate. All events are Arrhenius BKL rates.
-    if (epitaxy_) {
-      const double rAtt = params_.attachRate();
-      const double rDes = params_.desorbRate();
-      const double rTwin = params_.twinRate();
-      for (int i = 0; i < lattice_.nx(); ++i)
-        for (int j = 0; j < lattice_.ny(); ++j) {
-          // Find topmost occupied site in column (i,j).
-          int kTop = -1;
-          for (int k = lattice_.nz() - 1; k >= 0; --k) {
-            if (lattice_.at(i, j, k).occupied) {
-              kTop = k;
-              break;
-            }
-          }
-          if (kTop < 0)
-            continue; // empty column - no surface
-          // Deposit: fill the site above the surface (if in bounds).
-          if (kTop + 1 < lattice_.nz() && !lattice_.at(i, j, kTop + 1).occupied) {
-            KmcEvent ev;
-            ev.type = KmcEventType::Deposit;
-            ev.i0 = i; ev.j0 = j; ev.k0 = kTop + 1;
-            ev.rate = rAtt;
-            events_.push_back(ev);
-          }
-          // Desorb: remove the topmost occupied surface atom.
-          {
-            KmcEvent ev;
-            ev.type = KmcEventType::Desorb;
-            ev.i0 = i; ev.j0 = j; ev.k0 = kTop;
-            ev.rate = rDes;
-            events_.push_back(ev);
-          }
-          // Twin: mark the surface site as a twin defect (stochastic).
-          {
-            KmcEvent ev;
-            ev.type = KmcEventType::Twin;
-            ev.i0 = i; ev.j0 = j; ev.k0 = kTop;
-            ev.rate = rTwin;
-            events_.push_back(ev);
-          }
-        }
+    if (!fenwickInitialized_) {
+      buildAllSiteEvents();
+      fenwickInitialized_ = true;
     }
 
-    if (events_.empty())
-      return false;
-
-    // Prefix sums for O(log N) selection.
-    prefix_.resize(events_.size());
-    prefix_[0] = events_[0].rate;
-    for (std::size_t i = 1; i < events_.size(); ++i)
-      prefix_[i] = prefix_[i - 1] + events_[i].rate;
-    const double Rtot = prefix_.back();
-    if (Rtot <= 0.0)
+    const double totalRate = fenwick_.total();
+    if (totalRate <= 0.0)
       return false;
 
     std::uniform_real_distribution<double> U(0.0, 1.0);
     const double u1 = std::max(U(rng_), 1e-16);
     const double u2 = U(rng_);
-    time_ += -std::log(u1) / Rtot;
-    const double thresh = u2 * Rtot;
-    // lower_bound on prefix: first cumulative rate >= thresh
-    const auto it =
-        std::lower_bound(prefix_.begin(), prefix_.end(), thresh);
-    const std::size_t idx =
-        static_cast<std::size_t>(std::distance(prefix_.begin(), it));
-    const std::size_t chosen =
-        std::min(idx, events_.size() - 1);
-    apply(events_[chosen]);
+    time_ += -std::log(u1) / totalRate;
+    const double thresh = u2 * totalRate;
+    std::size_t siteIdx =
+        std::min(fenwick_.lower_bound(thresh), fenwick_.size() - 1);
+
+    const auto &siteEvents = eventsBySite_[siteIdx];
+    double r = U(rng_) * siteTotalRates_[siteIdx];
+    const KmcEvent *chosen = nullptr;
+    for (const auto &ev : siteEvents) {
+      r -= ev.rate;
+      if (r <= 0.0) {
+        chosen = &ev;
+        break;
+      }
+    }
+    if (!chosen && !siteEvents.empty())
+      chosen = &siteEvents.back();
+
+    if (chosen) {
+      apply(*chosen);
+      rebuildAffectedSites(*chosen);
+    }
     ++steps_;
     return true;
   }
@@ -228,7 +155,7 @@ private:
   template <class Fn>
   void forEachNeighbor(int i, int j, int k, Fn &&fn) const {
     if (diamond_) {
-      // Diamond A–B only: neighbors are opposite sublattice via body diagonals
+      // Diamond A-B only: neighbors are opposite sublattice via body diagonals
       // (2-FCC approximation on a cubic grid).
       static const int diag[4][3] = {
           {1, 1, 1}, {1, -1, -1}, {-1, 1, -1}, {-1, -1, 1}};
@@ -251,6 +178,151 @@ private:
   bool inBounds(int i, int j, int k) const {
     return i >= 0 && j >= 0 && k >= 0 && i < lattice_.nx() &&
            j < lattice_.ny() && k < lattice_.nz();
+  }
+
+  std::size_t linearIndex(int i, int j, int k) const {
+    return static_cast<std::size_t>(
+        (k * lattice_.ny() + j) * lattice_.nx() + i);
+  }
+
+  void buildAllSiteEvents() {
+    const std::size_t n = static_cast<std::size_t>(lattice_.size());
+    eventsBySite_.assign(n, std::vector<KmcEvent>());
+    siteTotalRates_.assign(n, 0.0);
+    fenwick_.init(n);
+    for (std::size_t idx = 0; idx < n; ++idx)
+      buildSiteEvents(idx);
+  }
+
+  void buildSiteEvents(std::size_t siteIdx) {
+    const int nx = lattice_.nx(), ny = lattice_.ny(), nz = lattice_.nz();
+    const int k = static_cast<int>(siteIdx / (ny * nx));
+    const int j = static_cast<int>((siteIdx % (ny * nx)) / nx);
+    const int i = static_cast<int>(siteIdx % nx);
+    const auto &s = lattice_.at(i, j, k);
+
+    double totalRate = 0.0;
+    auto &evList = eventsBySite_[siteIdx];
+    evList.clear();
+
+    const double rHop = params_.hopRate();
+    const double rRec = params_.recombRate();
+    const double rCl = params_.clusterRate();
+    const double rDi = params_.dissocRate();
+
+    if (s.occupied) {
+      if (cluster_ && s.species == KmcCluster311) {
+        forEachNeighbor(i, j, k, [&](int i1, int j1, int k1) {
+          if (lattice_.at(i1, j1, k1).occupied)
+            return;
+          KmcEvent ev;
+          ev.type = KmcEventType::Dissociate;
+          ev.i0 = i;  ev.j0 = j;  ev.k0 = k;
+          ev.i1 = i1; ev.j1 = j1; ev.k1 = k1;
+          ev.rate = rDi;
+          evList.push_back(ev);
+          totalRate += rDi;
+        });
+      }
+
+      forEachNeighbor(i, j, k, [&](int i1, int j1, int k1) {
+        const auto &n = lattice_.at(i1, j1, k1);
+        if (!n.occupied) {
+          if (s.species == KmcInterstitial || s.species == KmcVacancy) {
+            KmcEvent ev;
+            ev.type = KmcEventType::Hop;
+            ev.i0 = i;  ev.j0 = j;  ev.k0 = k;
+            ev.i1 = i1; ev.j1 = j1; ev.k1 = k1;
+            ev.rate = rHop;
+            evList.push_back(ev);
+            totalRate += rHop;
+          }
+          return;
+        }
+        if (recomb_ && s.species == KmcInterstitial &&
+            n.species == KmcVacancy) {
+          KmcEvent ev;
+          ev.type = KmcEventType::Recombine;
+          ev.i0 = i;  ev.j0 = j;  ev.k0 = k;
+          ev.i1 = i1; ev.j1 = j1; ev.k1 = k1;
+          ev.rate = rRec;
+          evList.push_back(ev);
+          totalRate += rRec;
+        }
+        if (cluster_ && s.species == KmcInterstitial &&
+            n.species == KmcInterstitial) {
+          const int a = static_cast<int>(siteIdx);
+          const int b = (k1 * ny + j1) * nx + i1;
+          if (a < b) {
+            KmcEvent ev;
+            ev.type = KmcEventType::Cluster;
+            ev.i0 = i;  ev.j0 = j;  ev.k0 = k;
+            ev.i1 = i1; ev.j1 = j1; ev.k1 = k1;
+            ev.rate = rCl;
+            evList.push_back(ev);
+            totalRate += rCl;
+          }
+        }
+      });
+    }
+
+    if (epitaxy_) {
+      int kTop = -1;
+      for (int kk = nz - 1; kk >= 0; --kk) {
+        if (lattice_.at(i, j, kk).occupied) {
+          kTop = kk;
+          break;
+        }
+      }
+      if (kTop >= 0 && k == kTop + 1 && kTop + 1 < nz &&
+          !lattice_.at(i, j, kTop + 1).occupied) {
+        KmcEvent ev;
+        ev.type = KmcEventType::Deposit;
+        ev.i0 = i;     ev.j0 = j;     ev.k0 = kTop + 1;
+        ev.rate = params_.attachRate();
+        evList.push_back(ev);
+        totalRate += ev.rate;
+      }
+      if (k == kTop && s.occupied) {
+        KmcEvent ev;
+        ev.type = KmcEventType::Desorb;
+        ev.i0 = i;  ev.j0 = j;  ev.k0 = kTop;
+        ev.rate = params_.desorbRate();
+        evList.push_back(ev);
+        totalRate += ev.rate;
+        KmcEvent ev2;
+        ev2.type = KmcEventType::Twin;
+        ev2.i0 = i;  ev2.j0 = j;  ev2.k0 = kTop;
+        ev2.rate = params_.twinRate();
+        evList.push_back(ev2);
+        totalRate += ev2.rate;
+      }
+    }
+
+    double oldTotal = siteTotalRates_[siteIdx];
+    siteTotalRates_[siteIdx] = totalRate;
+    fenwick_.add(siteIdx, totalRate - oldTotal);
+  }
+
+  void rebuildAffectedSites(const KmcEvent &e) {
+    std::vector<std::size_t> sites;
+    const std::size_t idx0 = linearIndex(e.i0, e.j0, e.k0);
+    const std::size_t idx1 = linearIndex(e.i1, e.j1, e.k1);
+    sites.push_back(idx0);
+    if (idx1 != idx0)
+      sites.push_back(idx1);
+    auto addNeighbors = [&](int ci, int cj, int ck) {
+      forEachNeighbor(ci, cj, ck, [&](int ni, int nj, int nk) {
+        sites.push_back(linearIndex(ni, nj, nk));
+      });
+    };
+    addNeighbors(e.i0, e.j0, e.k0);
+    if (idx1 != idx0)
+      addNeighbors(e.i1, e.j1, e.k1);
+    std::sort(sites.begin(), sites.end());
+    sites.erase(std::unique(sites.begin(), sites.end()), sites.end());
+    for (auto idx : sites)
+      buildSiteEvents(idx);
   }
 
   void apply(const KmcEvent &e) {
@@ -308,8 +380,10 @@ private:
 
   KmcLattice lattice_;
   KmcParameters params_;
-  std::vector<KmcEvent> events_;
-  std::vector<double> prefix_;
+  std::vector<std::vector<KmcEvent>> eventsBySite_;
+  std::vector<double> siteTotalRates_;
+  FenwickTree<double> fenwick_;
+  bool fenwickInitialized_ = false;
   double time_ = 0.0;
   int steps_ = 0;
   int recombCount_ = 0;

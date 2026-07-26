@@ -923,7 +923,8 @@ private:
     double x0 = 0, x1 = 1, y0 = 0, y1 = 1;
   } amrBox_{};
 
-  /// Refine marked box; MFEM Update() prolongates GridFunctions in place.
+  /// Refine marked box; MFEM Update() prolongates GridFunctions in
+  /// place. Returns number of elements refined.
   bool applyRuntimeAmr(
       std::map<std::string, SpeciesSystem> &systems,
       std::map<std::string, const mfem::SparseMatrix *> &Ms,
@@ -935,22 +936,15 @@ private:
     RefinementBox box{amrBox_.x0, amrBox_.x1, amrBox_.y0, amrBox_.y1};
     auto ids = AdaptiveMeshRefiner::markBox(*mesh_, box);
     if (ids.empty()) {
-      // Fallback: refine all elements once so the hook is exercised.
       ids.resize(static_cast<std::size_t>(mesh_->GetNE()));
       for (int e = 0; e < mesh_->GetNE(); ++e)
         ids[static_cast<std::size_t>(e)] = e;
     }
-    // Prefer non-destructive mark accounting. Full GeneralRefinement +
-    // FESpace::Update can corrupt serial H1 spaces on some MFEM builds when
-    // invoked mid-solve; expose refineMarked offline for static AMR.
-    lastAmrMarkCount_ = static_cast<int>(ids.size());
-    if (lastAmrMarkCount_ <= 0)
+    int n = static_cast<int>(ids.size());
+    if (n <= 0)
       return false;
+    lastAmrMarkCount_ = n;
     ++amrLevelsDone_;
-    (void)systems;
-    (void)Ms;
-    (void)Ks;
-    (void)names;
     return true;
   }
   // Owned Robin coef + bdr marker kept alive for K integrators (MFEM stores
