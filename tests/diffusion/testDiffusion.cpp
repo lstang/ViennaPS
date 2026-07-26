@@ -854,6 +854,60 @@ void TestFemClosures() {
   // Liquid (fast D) redistributes more -> lower peak than solid.
   VC_TEST_ASSERT(peakLiquid < peakSolid);
 
+  // --- HeatTransfer latent-heat coupling (Wave 2.3, SProcess eq. 213 term
+  // ρ·L·∂φ/∂t). With a rising melt fraction (melting), the latent-heat term
+  // absorbs energy, so Temperature must rise LESS than without the coupling.
+  auto runHeat = [&attrs, &baseMesh](bool withLatentHeat) {
+    DiffusionEngine<double, 2> engine;
+    engine.setMesh(baseMesh(), attrs);
+    auto heat = std::make_shared<HeatTransfer<double>>();
+    heat->setThermalDiffusivity(1e-3);
+    heat->setSource(1e3); // volumetric heat source
+    if (withLatentHeat) {
+      heat->setLatentHeat(/*rhoL*/ 1e6); // large latent heat
+      heat->setMeltSpecies("MeltFraction");
+      heat->setDt(0.1);
+    }
+    // MeltFraction needs a (trivial) model so its K matrix is non-empty.
+    auto mfDiff = std::make_shared<ConstantDiffusion<double>>("MeltFraction");
+    mfDiff->setDiffusivity(1e-20, 0.0);
+    DiffusionPhysics<double> physics;
+    physics.addSpecies("Temperature");
+    physics.addSpecies("MeltFraction");
+    physics.addModel(heat);
+    physics.addModel(mfDiff);
+    physics.setTemperature(1273.0);
+    engine.setPhysics(physics);
+    engine.initializeSpecies("Temperature", 300.0);
+    // Melt fraction rises from 0 to 1 (melting in progress).
+    engine.initializeSpecies("MeltFraction", 0.0);
+    if (withLatentHeat) {
+      // Set previous phi to 0 so ∂φ/∂t = (1 - 0)/dt > 0 (melting).
+      // We approximate by setting MeltFraction high now; the previousPhi
+      // pointer is set to a zero GF via a throwaway.
+      mfem::GridFunction &mfGf =
+          const_cast<mfem::GridFunction &>(engine.getSolution("MeltFraction"));
+      mfGf = 1.0; // current phi = 1 (fully melted)
+      // Create a zero previous-phi GF on the same space.
+      auto &fes = *mfGf.FESpace();
+      auto prevPhi = std::make_shared<mfem::GridFunction>(&fes);
+      *prevPhi = 0.0;
+      heat->setPreviousPhi(prevPhi.get());
+      // Keep prevPhi alive by storing on the engine via a static (test hack;
+      // production: the orchestrator owns the previous-step state).
+      static std::shared_ptr<mfem::GridFunction> sPrevPhi;
+      sPrevPhi = prevPhi;
+    }
+    engine.solve(0.0, 0.1, 0.1);
+    return engine.getIntegral("Temperature");
+  };
+  const double tempNoLatent = runHeat(false);
+  const double tempWithLatent = runHeat(true);
+  std::cout << "[fem-closure] heat tempNoLatent=" << tempNoLatent
+            << " tempWithLatent=" << tempWithLatent << "\n";
+  // With latent heat absorption (melting), T rises less than without.
+  VC_TEST_ASSERT(tempWithLatent < tempNoLatent);
+
   // --- PolysiliconDiffusion FEM anisotropic PWConst: exercises the
   // assembleStiffness PWConst path on a 2-attribute mesh (interior/boundary).
   // (The GB segregation face-residual path is tested in Wave 2.1 after the
@@ -897,6 +951,61 @@ void TestFemClosures() {
     // Closed domain: dose conserved; PWConst stiffness ran.
     VC_TEST_ASSERT(std::abs(d1 - d0) / std::max(d0, 1.0) < 0.05);
   }
+
+  // --- PolysiliconDiffusion GB segregation face residual (Wave 2.1 fix).
+  // enableGbSegregationSpecies + finalizeReaction now walks Poly_GI:Poly_GB
+  // faces (two-sided interior-face residual, was previously a domain
+  // integrator). Register Boron (GI) + Boron_GB species on a 2-attr mesh;
+  // assert mass transfers from GI to GB and total is conserved.
+  {
+    MeshAttributes polyAttrs;
+    polyAttrs.setAttributeName(1, "GrainInterior");
+    polyAttrs.setAttributeName(2, "GrainBoundary");
+    auto polyMesh = std::make_unique<mfem::Mesh>(
+        mfem::Mesh::MakeCartesian2D(8, 4, mfem::Element::TRIANGLE));
+    for (int e = 0; e < polyMesh->GetNE(); ++e) {
+      mfem::Array<int> verts;
+      polyMesh->GetElementVertices(e, verts);
+      double cx = 0.0;
+      for (int v : verts) {
+        double *p = polyMesh->GetVertex(v);
+        cx += p[0];
+      }
+      cx /= verts.Size();
+      polyMesh->SetAttribute(e, (cx < 0.5) ? 1 : 2);
+    }
+    DiffusionEngine<double, 2> engine;
+    engine.setMesh(std::move(polyMesh), polyAttrs);
+    auto poly = std::make_shared<PolysiliconDiffusion<double>>("Boron");
+    poly->setMode(PolysiliconDiffusion<double>::Mode::Anisotropic);
+    poly->setAttributes(/*interior*/ 1, /*boundary*/ 2);
+    poly->setDiffusivities(/*D_bulk*/ 1e-14, /*D_gb*/ 1e-12);
+    poly->enableGbSegregationSpecies("Boron_GB");
+    poly->setSegregationCoefficient(/*m*/ 10.0);
+    poly->setFemSegregationRate(/*k0*/ 1e-3);
+    DiffusionPhysics<double> physics;
+    physics.addSpecies("Boron");
+    physics.addSpecies("Boron_GB");
+    physics.addModel(poly);
+    physics.setTemperature(1273.0);
+    engine.setPhysics(physics);
+    engine.initializeSpecies("Boron", 1e18);
+    engine.initializeSpecies("Boron_GB", 0.0);
+    const double gi0 = engine.getIntegral("Boron");
+    const double gb0 = engine.getIntegral("Boron_GB");
+    const double inv0 = gi0 + gb0;
+    engine.solve(0.0, 0.5, 0.01);
+    const double gi1 = engine.getIntegral("Boron");
+    const double gb1 = engine.getIntegral("Boron_GB");
+    const double inv1 = gi1 + gb1;
+    std::cout << "[fem-closure] poly-gb gi0=" << gi0 << " gi1=" << gi1
+              << " gb0=" << gb0 << " gb1=" << gb1 << " inv0=" << inv0
+              << " inv1=" << inv1 << "\n";
+    // GB segregation (m=10 > 1) transfers mass from GI to GB.
+    VC_TEST_ASSERT(gb1 > gb0);
+    // Total mass GI + GB conserved to 5% (face residual is mass-conserving).
+    VC_TEST_ASSERT(std::abs(inv1 - inv0) / std::max(inv0, 1.0) < 0.05);
+  }
 }
 
 void TestPhase10PdeApi() {
@@ -931,17 +1040,22 @@ void TestPhase10PdeApi() {
     PdeEquation eqEng;
     eqEng.addTerm(std::make_shared<DiffusionPdeTerm>("Boron", 1e-12));
     eqEng.addBC({PdeBC::Type::Neumann, "Boron", "all", 0.0});
+    eqEng.addIC({"Boron", 1e18}); // IC stored on the equation
     DiffusionPhysics<double> physics;
-    eqEng.applyTo(physics);
+    // 2-arg applyTo: wires species+models+BCs AND applies ICs to the engine
+    // (Wave 2.2 fix - previously the user had to call applyICs separately).
+    eqEng.applyTo(physics, &engine);
     physics.setTemperature(1273.0);
     engine.setPhysics(physics);
-    engine.initializeSpecies("Boron", 1e18);
+    // No manual initializeSpecies needed - applyTo(physics, &engine) did it.
     const double b0 = engine.getIntegral("Boron");
     engine.solve(0.0, 0.2, 0.05);
     const double b1 = engine.getIntegral("Boron");
     std::cout << "[p10-full] pde-api engine dose rel="
               << std::abs(b1 - b0) / std::max(b0, 1.0) << "\n";
     VC_TEST_ASSERT(std::abs(b1 - b0) / std::max(b0, 1.0) < 0.05);
+    // IC was applied via applyTo: dose matches the stored IC value.
+    VC_TEST_ASSERT(std::abs(b0 - 1e18) / 1e18 < 0.01);
   }
 
   std::cout << "[phase10] dose=" << d

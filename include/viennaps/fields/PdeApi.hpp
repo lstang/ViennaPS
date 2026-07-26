@@ -171,6 +171,17 @@ public:
     applyBCs(physics);
   }
 
+  /// Convenience overload: also apply ICs to the engine when provided.
+  /// Solves the prior review's M1 finding ("applyTo does not call applyICs;
+  /// user must remember separately"). The 1-arg overload above remains for
+  /// backward compatibility.
+  template <class NumericType, class Engine>
+  void applyTo(DiffusionPhysics<NumericType> &physics, Engine *engine) const {
+    applyTo(physics);
+    if (engine)
+      applyICs(*engine);
+  }
+
   /// Apply ICs to an engine (initializeSpecies for each stored PdeIC).
   template <class Engine>
   void applyICs(Engine &engine) const {

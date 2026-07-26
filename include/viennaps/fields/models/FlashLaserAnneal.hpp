@@ -22,6 +22,16 @@ public:
   void setSource(NumericType q) { q_ = q; }
   NumericType thermalDiffusivity() const { return alpha_; }
 
+  /// Latent-heat coupling (SProcess eq. 213 term ρ·L·∂φ/∂t). The melt
+  /// fraction φ is read from a registered species GridFunction named
+  /// `meltSpecies_` (default "MeltFraction", matching MeltDiffusion's
+  /// convention). `previousPhi_` is updated by the orchestrator between
+  /// steps via `setPreviousPhi()`. When φ is rising (melting), the term
+  /// is negative (absorbs heat); when falling (solidifying), positive.
+  void setMeltSpecies(std::string s) { meltSpecies_ = std::move(s); }
+  void setLatentHeat(NumericType rhoL) { rhoL_ = rhoL; }
+  void setPreviousPhi(const mfem::GridFunction *prev) { previousPhi_ = prev; }
+
   /// 1D explicit heat step on T profile.
   void step(std::vector<NumericType> &T, NumericType dx, NumericType dt) const {
     if (T.size() < 3)
@@ -52,27 +62,70 @@ public:
   }
   void assembleReaction(
       mfem::LinearForm &R, const mfem::GridFunction & /*speciesGF*/,
-      const std::map<std::string, mfem::GridFunction *> & /*allSpecies*/,
+      const std::map<std::string, mfem::GridFunction *> &allSpecies,
       const mfem::GridFunction * /*temp*/) const override {
-    if (q_ == NumericType(0))
-      return;
-    srcCoef_ = std::make_unique<mfem::ConstantCoefficient>(
-        static_cast<double>(q_));
-    R.AddDomainIntegrator(new mfem::DomainLFIntegrator(*srcCoef_));
+    // Volumetric heat source Q (constant).
+    if (q_ != NumericType(0)) {
+      srcCoef_ = std::make_unique<mfem::ConstantCoefficient>(
+          static_cast<double>(q_));
+      R.AddDomainIntegrator(new mfem::DomainLFIntegrator(*srcCoef_));
+    }
+    // Latent-heat coupling ρ·L·∂φ/∂t (SProcess eq. 213). Read current φ
+    // from the registered MeltFraction species; ∂φ/∂t ≈ (φ_curr - φ_prev)/dt.
+    // The previous-step φ pointer is set by the orchestrator via
+    // setPreviousPhi(); dt is set via setDt(). When φ is rising (melting),
+    // ∂φ/∂t > 0 and the term is negative (absorbs latent heat).
+    if (rhoL_ != NumericType(0) && dt_ > NumericType(0) && previousPhi_) {
+      auto it = allSpecies.find(meltSpecies_);
+      if (it != allSpecies.end() && it->second) {
+        latentCoef_ = std::make_unique<LatentHeatCoef>(
+            it->second, previousPhi_, static_cast<double>(rhoL_),
+            static_cast<double>(dt_));
+        R.AddDomainIntegrator(new mfem::DomainLFIntegrator(*latentCoef_));
+      }
+    }
   }
   void assembleMass(mfem::BilinearForm &M) const override {
     massCoef_ = std::make_unique<mfem::ConstantCoefficient>(1.0);
     M.AddDomainIntegrator(new mfem::MassIntegrator(*massCoef_));
   }
+  /// Set the current time step (for ∂φ/∂t finite difference).
+  void setDt(NumericType dt) { dt_ = dt; }
 #endif
 
 private:
   NumericType alpha_ = NumericType(0.8); // cm^2/s order Si thermal
   NumericType q_ = NumericType(0);
+  NumericType rhoL_ = NumericType(0); // latent heat coefficient ρ·L
+  NumericType dt_ = NumericType(0);   // current dt for ∂φ/∂t
+  std::string meltSpecies_ = "MeltFraction";
+  const mfem::GridFunction *previousPhi_ = nullptr;
 #ifdef VIENNAPS_HAS_MFEM
+  class LatentHeatCoef : public mfem::Coefficient {
+  public:
+    LatentHeatCoef(const mfem::GridFunction *phiCurr,
+                   const mfem::GridFunction *phiPrev, double rhoL, double dt)
+        : phiCurr_(phiCurr), phiPrev_(phiPrev), rhoL_(rhoL), dt_(dt) {}
+    double Eval(mfem::ElementTransformation &T,
+                const mfem::IntegrationPoint &ip) override {
+      if (!phiCurr_ || !phiPrev_ || dt_ <= 0.0)
+        return 0.0;
+      const double cur = phiCurr_->GetValue(T, ip);
+      const double prev = phiPrev_->GetValue(T, ip);
+      const double dphiDt = (cur - prev) / dt_;
+      // ∂φ/∂t > 0 (melting) -> term is negative (absorbs heat).
+      return -rhoL_ * dphiDt;
+    }
+
+  private:
+    const mfem::GridFunction *phiCurr_;
+    const mfem::GridFunction *phiPrev_;
+    double rhoL_, dt_;
+  };
   mutable std::unique_ptr<mfem::ConstantCoefficient> stiffCoef_;
   mutable std::unique_ptr<mfem::ConstantCoefficient> massCoef_;
   mutable std::unique_ptr<mfem::ConstantCoefficient> srcCoef_;
+  mutable std::unique_ptr<LatentHeatCoef> latentCoef_;
 #endif
 };
 

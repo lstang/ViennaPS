@@ -6,6 +6,7 @@
 #include "../DiffusionModel.hpp"
 #include "../GrainBoundaryMesh.hpp"
 #include "../GrainModel.hpp"
+#include "Segregation.hpp"
 
 #include <algorithm>
 #include <map>
@@ -111,31 +112,37 @@ public:
     M.AddDomainIntegrator(new mfem::MassIntegrator(*massCoef_));
   }
 
-  /// FEM residual for GI↔GB exchange when dual species are registered.
-  void assembleReaction(
+  /// FEM residual for GI↔GB exchange: two-sided interior-face residual at
+  /// Poly_GI:Poly_GB faces (Phase 5 plan; MOOSE InterfaceReaction pattern,
+  /// reusing SegregationCondition::assembleInterfaceResidual). Registered
+  /// via finalizeReaction (post-Assemble direct R[id] writes) so the face
+  /// walk survives LinearForm::Assemble()'s zeroing.
+  void finalizeReaction(
       mfem::LinearForm &R, const mfem::GridFunction &speciesGF,
       const std::map<std::string, mfem::GridFunction *> &allSpecies,
       const mfem::GridFunction * /*temp*/) const override {
-    if (gbSpecies_.empty())
+    if (gbSpecies_.empty() || !this->mesh())
       return;
     auto itI = allSpecies.find(species_);
     auto itG = allSpecies.find(gbSpecies_);
     if (itI == allSpecies.end() || itG == allSpecies.end() || !itI->second ||
         !itG->second)
       return;
-    double scale = 0.0;
-    if (&speciesGF == itG->second)
-      scale = 1.0;
-    else if (&speciesGF == itI->second)
-      scale = -1.0;
+    // Only act when finalizing one of the two coupled species.
+    int side = 0;
+    if (&speciesGF == itI->second)
+      side = 1;
+    else if (&speciesGF == itG->second)
+      side = 2;
     else
       return;
-    const double kf = static_cast<double>(m_seg_ * k0_fem_);
-    const double kb = static_cast<double>(k0_fem_);
-    segCoefs_.clear();
-    segCoefs_.push_back(std::make_unique<SegCoef>(
-        *itI->second, *itG->second, kf, kb, scale));
-    R.AddDomainIntegrator(new mfem::DomainLFIntegrator(*segCoefs_.back()));
+    // Build the segregation condition (kf = m*k0, kb = k0).
+    SegregationCondition<NumericType> cond;
+    cond.setSegregationCoefficient(m_seg_, k0_fem_);
+    // Walk faces between interiorAttr_ and boundaryAttr_, writing the
+    // mass-conserving residual directly into R for this side.
+    cond.assembleInterfaceResidual(R, *itI->second, *itG->second, *this->mesh(),
+                                   interiorAttr_, boundaryAttr_, side);
   }
 #endif
 
@@ -154,26 +161,10 @@ private:
   int boundaryAttr_ = 2;
   GrainModel<NumericType> grains_;
 #ifdef VIENNAPS_HAS_MFEM
-  class SegCoef : public mfem::Coefficient {
-  public:
-    SegCoef(const mfem::GridFunction &gi, const mfem::GridFunction &gb,
-            double kf, double kb, double scale)
-        : gi_(&gi), gb_(&gb), kf_(kf), kb_(kb), scale_(scale) {}
-    double Eval(mfem::ElementTransformation &T,
-                const mfem::IntegrationPoint &ip) override {
-      return scale_ * (kf_ * gi_->GetValue(T, ip) - kb_ * gb_->GetValue(T, ip));
-    }
-
-  private:
-    const mfem::GridFunction *gi_;
-    const mfem::GridFunction *gb_;
-    double kf_, kb_, scale_;
-  };
   mutable std::unique_ptr<mfem::ConstantCoefficient> stiffCoef_;
   mutable std::unique_ptr<mfem::ConstantCoefficient> massCoef_;
   mutable std::unique_ptr<mfem::PWConstCoefficient> pwCoef_;
   mutable std::vector<double> pwValues_;
-  mutable std::vector<std::unique_ptr<SegCoef>> segCoefs_;
 #endif
 };
 
