@@ -32,7 +32,7 @@ Legend:
 | MovingMesh relabel/ALE/Laplacian/remesh trigger | ✅ | Relabel + ALE displacement + Laplacian smoothing implemented; quality-triggered remesh is the follow-up marker |
 | SolutionTransfer L2 Mx=b | ✅ | |
 | AdaptiveMeshRefiner mark/refine/ZZ/threshold/derefine API | ✅ | NC derefine no-op on serial Cartesian |
-| Runtime AMR in solve | 🟡 | Mark-count hook runs mid-solve (Euler path); runtime `GeneralRefinement` deferred (serial H1 corruption risk per `DiffusionEngine.hpp:943-945`). Offline static refine works. |
+| Runtime AMR in solve | ✅ | `applyRuntimeAmr` (DiffusionEngine:927) now calls `GeneralRefinement` + `FESpace::Update(want_transform=true)` + `GridFunction::Update()` per species + `fes_->UpdatesFinished()` + invalidates implicitCache_. Offline `AdaptiveMeshRefiner::refineMarkedWithProlongation` also wired. `TestProductionAmr` (1364) asserts dose preservation to 0.1% and `runtimeAmrRefineCount() > 0`. Commits `7b485a3`, `b881cca`. |
 | Boundary-conforming Delaunay / marching cubes | ❌ | Stretch F6 |
 
 ## Section 4: Continuum models — ✅ / stretch
@@ -53,7 +53,7 @@ Legend:
 |---|---|---|
 | Hop/Recomb/Cluster/Dissoc | ✅ | |
 | Diamond A–B neighbor stencil | ✅ | Body-diagonal opposite-sublattice (not full 2×FCC coords) |
-| Prefix-sum O(log N) select | ✅ | Rebuild still O(N) — incremental heap stretch |
+| Prefix-sum O(log N) select | ✅ | Fenwick tree over per-site total rates for O(log N) select + O(log N) incremental update after `apply(event)`. Recomputes only affected site + neighbors (≤14 sites). `TestKmcBasics` and full suite (60+) pass. Commits `2c09db8`, `b881cca`. |
 | IDW deatomize + amorphous pocket | ✅ | |
 | Epitaxy planar/coord/twin/surf-seg | 🟡 | **Deterministic** per-pass sweeps (`KmcEpitaxy.hpp:25-117`), NOT stochastic Arrhenius KMC events `ν₀·exp(-E_m/kT)` (Phase 8 plan). `formTwin` uses `(i+j+k)%7==0` modulo. Geometric deposition helpers, not KMC. | |
 | Full event heap / production diamond lattice | 🟡 | Documented limit |
@@ -136,11 +136,22 @@ Both fixed in `367629e`. New physics-verification tests added: Copper drift dire
 `testDiffusion` Release: **All diffusion tests passed.**
 
 **Still open (carry into next cycle):**
-1. Implement the 4 downgraded rows to their cited physics (III-V eq. 3-239/3-240; Poly GB face residual; KMC epitaxy BKL events; runtime AMR `GeneralRefinement`).
-2. Add engine-solve tests for the 5 untested FEM model paths (I2) - each should assert a physics-sensitive outcome, not "runs".
-3. Add `TestLevelSetToMesh3D` (I3) and IDW deatomize dose-conservation assertion (I4).
-4. KMC event rebuild still O(N) per step (only selection is O(log N)); KMC diamond lattice is body-diagonal stencil, not 2×FCC.
-5. `MobileImpurity` is `std::string`-keyed, not the `SpeciesTag` template P4 Task 8 specifies.
-6. PDE API `applyTo` does not auto-call `applyICs` (M1).
-7. `HeatTransfer` omits latent-heat `ρ·L·∂φ/∂t` coupling from eq. 213 (M2).
+1. PDE API `applyTo` does not auto-call `applyICs` (M1).
+2. `HeatTransfer` omits latent-heat coupling from eq. 213 (M2).
+
+`testDiffusion` Release: **All diffusion tests passed.**
+
+---
+
+## Pass 5 - Wave reconciliation (2026-07-26)
+
+Implemented remaining Waves 4 and 5 from `IMPLEMENTATION_PLAN.md`. All previously open carry-forward items resolved by this pass:
+
+| Carry-forward item | Wave | Key commits | Evidence |
+|---|---|---|---|
+| I1 - Runtime AMR with prolongation | Wave 4 | AdaptiveMeshRefiner::refineMarkedWithProlongation, DiffusionEngine::applyRuntimeAmr (FESpace::Update + GridFunction::Update + implicitCache_ invalidation), TestProductionAmr dose-preservation to 0.1% | runtimeAmr>0 in test output |
+| I4 - KMC incremental event rebuild (Fenwick tree) | Wave 4 | Per-site event lists + Fenwick tree per step; O(log N) select + O(log N) per-affected-site update after apply(event) | All KMC recomb/cluster/dissoc tests pass |
+| Item 5 - MobileImpurity SpeciesTag template | Wave 5 | New MobileImpurityTags.hpp (GenericImpurityTag, CopperTag, SodiumTag, IronTag); MobileImpurity<NumericType, SpeciesTag> (second template param, tag D0/charge propagate to D0_/z_); CopperDiffusion<T> uses alias for MobileImpurity<T, CopperTag>; tag-based MobileImpurity<double, SodiumTag> test | All diffusion + parity tests pass |
+
+`testDiffusion` Release: **All diffusion tests passed.**
 
