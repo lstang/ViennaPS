@@ -38,11 +38,20 @@ public:
   void setClusteringEnabled(bool on) { cluster_ = on; }
   bool clusteringEnabled() const { return cluster_; }
 
+  /// Enable epitaxial surface events (Deposit/Desorb/Twin) as BKL events.
+  void setEpitaxyEnabled(bool on) { epitaxy_ = on; }
+  bool epitaxyEnabled() const { return epitaxy_; }
+  /// Set the growth species code for Deposit events (default KmcSi=4).
+  void setGrowthSpecies(int code) { growthSpecies_ = code; }
+
   double time() const { return time_; }
   int steps() const { return steps_; }
   int recombCount() const { return recombCount_; }
   int clusterCount() const { return clusterCount_; }
   int dissocCount() const { return dissocCount_; }
+  int depositCount() const { return depositCount_; }
+  int desorbCount() const { return desorbCount_; }
+  int twinCount() const { return twinCount_; }
 
   /// Build event list, select via prefix-sum binary search, apply.
   bool step() {
@@ -131,6 +140,53 @@ public:
             }
           });
         }
+
+    // Epitaxial surface events (Phase 8 plan): Deposit (attach) at empty
+    // surface sites, Desorb from occupied surface sites, Twin on {111}.
+    // Surface = topmost occupied site in each column; the empty site above
+    // it is the attachment candidate. All events are Arrhenius BKL rates.
+    if (epitaxy_) {
+      const double rAtt = params_.attachRate();
+      const double rDes = params_.desorbRate();
+      const double rTwin = params_.twinRate();
+      for (int i = 0; i < lattice_.nx(); ++i)
+        for (int j = 0; j < lattice_.ny(); ++j) {
+          // Find topmost occupied site in column (i,j).
+          int kTop = -1;
+          for (int k = lattice_.nz() - 1; k >= 0; --k) {
+            if (lattice_.at(i, j, k).occupied) {
+              kTop = k;
+              break;
+            }
+          }
+          if (kTop < 0)
+            continue; // empty column - no surface
+          // Deposit: fill the site above the surface (if in bounds).
+          if (kTop + 1 < lattice_.nz() && !lattice_.at(i, j, kTop + 1).occupied) {
+            KmcEvent ev;
+            ev.type = KmcEventType::Deposit;
+            ev.i0 = i; ev.j0 = j; ev.k0 = kTop + 1;
+            ev.rate = rAtt;
+            events_.push_back(ev);
+          }
+          // Desorb: remove the topmost occupied surface atom.
+          {
+            KmcEvent ev;
+            ev.type = KmcEventType::Desorb;
+            ev.i0 = i; ev.j0 = j; ev.k0 = kTop;
+            ev.rate = rDes;
+            events_.push_back(ev);
+          }
+          // Twin: mark the surface site as a twin defect (stochastic).
+          {
+            KmcEvent ev;
+            ev.type = KmcEventType::Twin;
+            ev.i0 = i; ev.j0 = j; ev.k0 = kTop;
+            ev.rate = rTwin;
+            events_.push_back(ev);
+          }
+        }
+    }
 
     if (events_.empty())
       return false;
@@ -230,6 +286,23 @@ private:
       b.species = KmcInterstitial;
       b.occupied = true;
       ++dissocCount_;
+    } else if (e.type == KmcEventType::Deposit) {
+      // Epitaxial surface attachment: fill the empty site with growth species.
+      auto &a = lattice_.at(e.i0, e.j0, e.k0);
+      a.occupied = true;
+      a.species = growthSpecies_;
+      ++depositCount_;
+    } else if (e.type == KmcEventType::Desorb) {
+      // Surface desorption: remove the surface atom.
+      auto &a = lattice_.at(e.i0, e.j0, e.k0);
+      a.occupied = false;
+      a.species = 0;
+      ++desorbCount_;
+    } else if (e.type == KmcEventType::Twin) {
+      // Twin-defect formation: mark the surface site as a twin (stacking fault).
+      auto &a = lattice_.at(e.i0, e.j0, e.k0);
+      a.species = KmcTwin;
+      ++twinCount_;
     }
   }
 
@@ -242,9 +315,14 @@ private:
   int recombCount_ = 0;
   int clusterCount_ = 0;
   int dissocCount_ = 0;
+  int depositCount_ = 0;
+  int desorbCount_ = 0;
+  int twinCount_ = 0;
   bool diamond_ = false;
   bool recomb_ = true;
   bool cluster_ = true;
+  bool epitaxy_ = false;
+  int growthSpecies_ = KmcSi;
   std::mt19937 rng_;
 };
 
