@@ -149,6 +149,29 @@ private:
     setProperty("Si", "Nv", NumericType(1.04e19));
     setProperty("Si", "Eg", NumericType(1.12));
 
+    // III-V compound semiconductors (300K band-structure for IntrinsicCarrier).
+    // GaAs: Nc=4.7e17, Nv=7.0e18, Eg=1.424 eV (ni ~ 2e6 cm^-3).
+    // InP:  Nc=5.7e17, Nv=1.1e19, Eg=1.344 eV.
+    // Source: ATHENA Table 3-2 / SProcess III-V Ch.; values are the standard
+    // 300K constants (T-dependence can be added later if needed).
+    setProperty("GaAs", "Nc", NumericType(4.7e17));
+    setProperty("GaAs", "Nv", NumericType(7.0e18));
+    setProperty("GaAs", "Eg", NumericType(1.424));
+    setProperty("InP", "Nc", NumericType(5.7e17));
+    setProperty("InP", "Nv", NumericType(1.1e19));
+    setProperty("InP", "Eg", NumericType(1.344));
+    // III-V dopant diffusivity prefactors (ATHENA eq. 3-239/3-240).
+    // D_donor = D_AV*(n/ni) + D_AV^2*(n/ni)^2  (Ga-sublattice vacancy, V_Ga)
+    // D_acceptor = D_AI*(p/ni) + D_AI^2*(p/ni)^2  (Ga-sublattice interstitial, I_Ga)
+    // Si and Se in GaAs are concentration-independent (D_AV^2 ~ 0).
+    // Zn in GaAs is strongly concentration-dependent ((p/ni)^2 dominant).
+    setProperty("GaAs", "Si_D_AV", NumericType(2.0e-14));
+    setProperty("GaAs", "Si_D_AV2", NumericType(0.0));
+    setProperty("GaAs", "Se_D_AV", NumericType(3.0e-14));
+    setProperty("GaAs", "Se_D_AV2", NumericType(0.0));
+    setProperty("GaAs", "Zn_D_AI", NumericType(7.0e-15));
+    setProperty("GaAs", "Zn_D_AI2", NumericType(5.0e-15));
+
     // Oxide
     setArrhenius("SiO2", "Boron_D",  3.0e-3, 3.5);
     setArrhenius("SiO2", "Interstitial_D",  0.05, 2.0);

@@ -537,8 +537,26 @@ void TestPhase6SiGe() {
   MaterialConverter::convert(attrs, 1, "GaAs");
   VC_TEST_ASSERT(attrs.materialName(1) == "GaAs");
 
-  IIIVDiffusion<double> gaas("GaAs", "Si");
-  VC_TEST_ASSERT(gaas.getDiffusivity(1273.0) > 0.0);
+  IIIVDiffusion<double> gaasSi("GaAs", "Si");
+  // Si in GaAs is a donor (V_Ga mechanism, eq. 3-239). D_AV^2 = 0 ->
+  // only the linear (n/ni) term is present (no quadratic). D still depends
+  // on n/ni, but the quadratic enhancement is absent.
+  const double DsiLow = gaasSi.getDiffusivity(1e15, 1273.0);
+  const double DsiHigh = gaasSi.getDiffusivity(1e20, 1273.0);
+  std::cout << "[phase6] GaAs:Si D(1e15)=" << DsiLow << " D(1e20)=" << DsiHigh
+            << " ratio=" << DsiHigh / std::max(DsiLow, 1e-30) << "\n";
+  VC_TEST_ASSERT(DsiLow > 0.0);
+  VC_TEST_ASSERT(DsiHigh > 0.0);
+
+  // Zn in GaAs is an acceptor (I_Ga mechanism, eq. 3-240) with D_AI^2 > 0 ->
+  // strongly concentration-dependent: D(C=1e20) >> D(C=1e15) due to the
+  // quadratic (p/ni)^2 term.
+  IIIVDiffusion<double> gaasZn("GaAs", "Zn");
+  const double DznLow = gaasZn.getDiffusivity(1e15, 1273.0);
+  const double DznHigh = gaasZn.getDiffusivity(1e20, 1273.0);
+  std::cout << "[phase6] GaAs:Zn D(1e15)=" << DznLow << " D(1e20)=" << DznHigh
+            << " ratio=" << DznHigh / std::max(DznLow, 1e-30) << "\n";
+  VC_TEST_ASSERT(DznHigh > DznLow);
   std::cout << "[phase6] EgSi=" << EgSi << " EgGe=" << EgGe
             << " tedC/tedNoC=" << tedC / tedNoC << "\n";
 }
