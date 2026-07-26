@@ -81,12 +81,13 @@ public:
   ///   R_mat1 gets -r * w * phi,  R_mat2 gets +r * w * phi  on the face.
   /// side=1 assembles into R for mat1 species; side=2 for mat2.
   void assembleInterfaceResidual(
-      mfem::LinearForm &R, const mfem::GridFunction &C1,
-      const mfem::GridFunction &C2, mfem::Mesh &mesh, int attr1, int attr2,
+      mfem::ParLinearForm &R, const mfem::ParGridFunction &C1,
+      const mfem::ParGridFunction &C2, mfem::ParMesh &mesh, int attr1, int attr2,
       int side) const {
     // MFEM FESpace() is const; face/vdof APIs need non-const Mesh/FES.
-    mfem::FiniteElementSpace *fes =
-        const_cast<mfem::FiniteElementSpace *>(C1.FESpace());
+    mfem::ParFiniteElementSpace *fes =
+        dynamic_cast<mfem::ParFiniteElementSpace *>(
+            const_cast<mfem::FiniteElementSpace *>(C1.FESpace()));
     if (!fes || C2.FESpace() != C1.FESpace())
       return;
 
@@ -213,7 +214,7 @@ public:
   const std::string &speciesMat2() const { return sp2_; }
 
 #ifdef VIENNAPS_HAS_MFEM
-  void assembleMass(mfem::BilinearForm &M) const override {
+  void assembleMass(mfem::ParBilinearForm &M) const override {
     massCoef_ = std::make_unique<mfem::ConstantCoefficient>(1.0);
     M.AddDomainIntegrator(new mfem::MassIntegrator(*massCoef_));
   }
@@ -222,7 +223,7 @@ public:
   /// Well-mixed two-compartment model with analytic exponential relaxation
   /// toward C2/C1 = m, conserving total dose M = ∫C1 + ∫C2.
   void applyOperatorSplitStep(
-      mfem::GridFunction &C1, mfem::GridFunction &C2, mfem::Mesh &mesh,
+      mfem::ParGridFunction &C1, mfem::ParGridFunction &C2, mfem::ParMesh &mesh,
       double dose1, double dose2, double dt) const {
     if (dt <= 0.0)
       return;
@@ -291,8 +292,9 @@ public:
     // Restrict each species to its material: zero elsewhere, uniform on-side.
     C1 = 0.0;
     C2 = 0.0;
-    mfem::FiniteElementSpace *fes =
-        const_cast<mfem::FiniteElementSpace *>(C1.FESpace());
+    mfem::ParFiniteElementSpace *fes =
+        dynamic_cast<mfem::ParFiniteElementSpace *>(
+            const_cast<mfem::FiniteElementSpace *>(C1.FESpace()));
     mfem::Array<int> vdofs;
     for (int e = 0; e < mesh.GetNE(); ++e) {
       fes->GetElementVDofs(e, vdofs);
@@ -310,8 +312,8 @@ public:
     // Rescale so FE ∫C1+∫C2 equals conserved M (H1 projection can inflate).
     {
       mfem::ConstantCoefficient one(1.0);
-      auto feIntegral = [&](mfem::GridFunction &gf) {
-        mfem::LinearForm mass(fes);
+      auto feIntegral = [&](mfem::ParGridFunction &gf) {
+        mfem::ParLinearForm mass(fes);
         mass.AddDomainIntegrator(new mfem::DomainLFIntegrator(one));
         mass.Assemble();
         return gf * mass;

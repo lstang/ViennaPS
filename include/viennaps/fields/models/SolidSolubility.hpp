@@ -84,11 +84,11 @@ public:
   ///   active  residual:  -excess/tau
   ///   cluster residual:  +excess/tau
   void assembleReaction(
-      mfem::LinearForm &R, const mfem::GridFunction &speciesGF,
-      const std::map<std::string, mfem::GridFunction *> &allSpecies,
-      const mfem::GridFunction * /*temp*/) const override {
+      mfem::ParLinearForm &R, const mfem::ParGridFunction &speciesGF,
+      const std::map<std::string, mfem::ParGridFunction *> &allSpecies,
+      const mfem::ParGridFunction * /*temp*/) const override {
     const auto activeIt = allSpecies.find(species_);
-    const mfem::GridFunction *activeGF =
+    const mfem::ParGridFunction *activeGF =
         (activeIt != allSpecies.end() && activeIt->second)
             ? activeIt->second
             : &speciesGF;
@@ -117,7 +117,7 @@ private:
   /// Coefficient: value = sign * max(0, C - Css) / tau at qp.
   class ExcessCoef : public mfem::Coefficient {
   public:
-    ExcessCoef(const mfem::GridFunction &c, double Css, double scale)
+    ExcessCoef(const mfem::ParGridFunction &c, double Css, double scale)
         : conc_(&c), Css_(Css), scale_(scale) {}
 
     double Eval(mfem::ElementTransformation &T,
@@ -128,7 +128,7 @@ private:
     }
 
   private:
-    const mfem::GridFunction *conc_;
+    const mfem::ParGridFunction *conc_;
     double Css_;
     double scale_;
   };

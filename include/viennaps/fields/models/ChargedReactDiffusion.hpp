@@ -66,16 +66,16 @@ public:
 
 #ifdef VIENNAPS_HAS_MFEM
   void assembleReaction(
-      mfem::LinearForm &R, const mfem::GridFunction &speciesGF,
-      const std::map<std::string, mfem::GridFunction *> &allSpecies,
-      const mfem::GridFunction * /*temp*/) const override {
+      mfem::ParLinearForm &R, const mfem::ParGridFunction &speciesGF,
+      const std::map<std::string, mfem::ParGridFunction *> &allSpecies,
+      const mfem::ParGridFunction * /*temp*/) const override {
     auto itI = allSpecies.find(this->interstitialName());
     auto itV = allSpecies.find(this->vacancyName());
     if (itI == allSpecies.end() || itV == allSpecies.end() || !itI->second ||
         !itV->second)
       return;
 
-    const mfem::GridFunction *dopantGF = nullptr;
+    const mfem::ParGridFunction *dopantGF = nullptr;
     if (!dopantSpecies_.empty()) {
       auto itD = allSpecies.find(dopantSpecies_);
       if (itD != allSpecies.end())
@@ -97,8 +97,8 @@ private:
   /// R = -k_eff(n) * C_I * C_V at each QP.
   class ChargedProductCoef : public mfem::Coefficient {
   public:
-    ChargedProductCoef(const mfem::GridFunction &I, const mfem::GridFunction &V,
-                       const mfem::GridFunction *dopant,
+    ChargedProductCoef(const mfem::ParGridFunction &I, const mfem::ParGridFunction &V,
+                       const mfem::ParGridFunction *dopant,
                        const ChargedReactDiffusion *model, double T)
         : I_(&I), V_(&V), dopant_(dopant), model_(model), T_(T) {}
 
@@ -115,9 +115,9 @@ private:
     }
 
   private:
-    const mfem::GridFunction *I_;
-    const mfem::GridFunction *V_;
-    const mfem::GridFunction *dopant_;
+    const mfem::ParGridFunction *I_;
+    const mfem::ParGridFunction *V_;
+    const mfem::ParGridFunction *dopant_;
     const ChargedReactDiffusion *model_;
     double T_;
   };

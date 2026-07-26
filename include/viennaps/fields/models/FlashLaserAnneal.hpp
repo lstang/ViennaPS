@@ -30,7 +30,7 @@ public:
   /// is negative (absorbs heat); when falling (solidifying), positive.
   void setMeltSpecies(std::string s) { meltSpecies_ = std::move(s); }
   void setLatentHeat(NumericType rhoL) { rhoL_ = rhoL; }
-  void setPreviousPhi(const mfem::GridFunction *prev) { previousPhi_ = prev; }
+  void setPreviousPhi(const mfem::ParGridFunction *prev) { previousPhi_ = prev; }
 
   /// 1D explicit heat step on T profile.
   void step(std::vector<NumericType> &T, NumericType dx, NumericType dt) const {
@@ -53,17 +53,17 @@ public:
 #ifdef VIENNAPS_HAS_MFEM
   /// FEM heat equation stiffness: α ∇T·∇v (+ optional volumetric source in R).
   void assembleStiffness(
-      mfem::BilinearForm &K, const mfem::GridFunction & /*speciesGF*/,
-      const std::map<std::string, mfem::GridFunction *> & /*allSpecies*/,
-      const mfem::GridFunction * /*temp*/) const override {
+      mfem::ParBilinearForm &K, const mfem::ParGridFunction & /*speciesGF*/,
+      const std::map<std::string, mfem::ParGridFunction *> & /*allSpecies*/,
+      const mfem::ParGridFunction * /*temp*/) const override {
     stiffCoef_ = std::make_unique<mfem::ConstantCoefficient>(
         static_cast<double>(alpha_));
     K.AddDomainIntegrator(new mfem::DiffusionIntegrator(*stiffCoef_));
   }
   void assembleReaction(
-      mfem::LinearForm &R, const mfem::GridFunction & /*speciesGF*/,
-      const std::map<std::string, mfem::GridFunction *> &allSpecies,
-      const mfem::GridFunction * /*temp*/) const override {
+      mfem::ParLinearForm &R, const mfem::ParGridFunction & /*speciesGF*/,
+      const std::map<std::string, mfem::ParGridFunction *> &allSpecies,
+      const mfem::ParGridFunction * /*temp*/) const override {
     // Volumetric heat source Q (constant).
     if (q_ != NumericType(0)) {
       srcCoef_ = std::make_unique<mfem::ConstantCoefficient>(
@@ -85,7 +85,7 @@ public:
       }
     }
   }
-  void assembleMass(mfem::BilinearForm &M) const override {
+  void assembleMass(mfem::ParBilinearForm &M) const override {
     massCoef_ = std::make_unique<mfem::ConstantCoefficient>(1.0);
     M.AddDomainIntegrator(new mfem::MassIntegrator(*massCoef_));
   }
@@ -99,12 +99,12 @@ private:
   NumericType rhoL_ = NumericType(0); // latent heat coefficient ρ·L
   NumericType dt_ = NumericType(0);   // current dt for ∂φ/∂t
   std::string meltSpecies_ = "MeltFraction";
-  const mfem::GridFunction *previousPhi_ = nullptr;
+  const mfem::ParGridFunction *previousPhi_ = nullptr;
 #ifdef VIENNAPS_HAS_MFEM
   class LatentHeatCoef : public mfem::Coefficient {
   public:
-    LatentHeatCoef(const mfem::GridFunction *phiCurr,
-                   const mfem::GridFunction *phiPrev, double rhoL, double dt)
+    LatentHeatCoef(const mfem::ParGridFunction *phiCurr,
+                   const mfem::ParGridFunction *phiPrev, double rhoL, double dt)
         : phiCurr_(phiCurr), phiPrev_(phiPrev), rhoL_(rhoL), dt_(dt) {}
     double Eval(mfem::ElementTransformation &T,
                 const mfem::IntegrationPoint &ip) override {
@@ -118,8 +118,8 @@ private:
     }
 
   private:
-    const mfem::GridFunction *phiCurr_;
-    const mfem::GridFunction *phiPrev_;
+    const mfem::ParGridFunction *phiCurr_;
+    const mfem::ParGridFunction *phiPrev_;
     double rhoL_, dt_;
   };
   mutable std::unique_ptr<mfem::ConstantCoefficient> stiffCoef_;
@@ -215,7 +215,7 @@ public:
 #ifdef VIENNAPS_HAS_MFEM
   class MeltDCoef : public mfem::Coefficient {
   public:
-    MeltDCoef(const MeltDiffusion *m, const mfem::GridFunction *phi)
+    MeltDCoef(const MeltDiffusion *m, const mfem::ParGridFunction *phi)
         : m_(m), phi_(phi) {}
     double Eval(mfem::ElementTransformation &T,
                 const mfem::IntegrationPoint &ip) override {
@@ -232,17 +232,17 @@ public:
   };
 
   void assembleStiffness(
-      mfem::BilinearForm &K, const mfem::GridFunction & /*speciesGF*/,
-      const std::map<std::string, mfem::GridFunction *> &allSpecies,
-      const mfem::GridFunction * /*temp*/) const override {
-    const mfem::GridFunction *phi = nullptr;
+      mfem::ParBilinearForm &K, const mfem::ParGridFunction & /*speciesGF*/,
+      const std::map<std::string, mfem::ParGridFunction *> &allSpecies,
+      const mfem::ParGridFunction * /*temp*/) const override {
+    const mfem::ParGridFunction *phi = nullptr;
     auto it = allSpecies.find(melt_);
     if (it != allSpecies.end())
       phi = it->second;
     meltCoef_ = std::make_unique<MeltDCoef>(this, phi);
     K.AddDomainIntegrator(new mfem::DiffusionIntegrator(*meltCoef_));
   }
-  void assembleMass(mfem::BilinearForm &M) const override {
+  void assembleMass(mfem::ParBilinearForm &M) const override {
     massCoef_ = std::make_unique<mfem::ConstantCoefficient>(1.0);
     M.AddDomainIntegrator(new mfem::MassIntegrator(*massCoef_));
   }
@@ -284,9 +284,9 @@ public:
 #ifdef VIENNAPS_HAS_MFEM
   /// Stiffness: L*κ * ∇φ·∇v (gradient energy term).
   void assembleStiffness(
-      mfem::BilinearForm &K, const mfem::GridFunction & /*speciesGF*/,
-      const std::map<std::string, mfem::GridFunction *> & /*allSpecies*/,
-      const mfem::GridFunction * /*temp*/) const override {
+      mfem::ParBilinearForm &K, const mfem::ParGridFunction & /*speciesGF*/,
+      const std::map<std::string, mfem::ParGridFunction *> & /*allSpecies*/,
+      const mfem::ParGridFunction * /*temp*/) const override {
     const double lk = static_cast<double>(L_ * kappa_);
     stiffCoef_ = std::make_unique<mfem::ConstantCoefficient>(lk);
     K.AddDomainIntegrator(new mfem::DiffusionIntegrator(*stiffCoef_));
@@ -295,10 +295,10 @@ public:
   /// Reaction: -L * (φ³ - φ - λ(T-Tm)) as a QP-local source.
   /// Reads φ from the species GF and T from the temperature species.
   void assembleReaction(
-      mfem::LinearForm &R, const mfem::GridFunction &speciesGF,
-      const std::map<std::string, mfem::GridFunction *> &allSpecies,
-      const mfem::GridFunction * /*temp*/) const override {
-    const mfem::GridFunction *Tgf = nullptr;
+      mfem::ParLinearForm &R, const mfem::ParGridFunction &speciesGF,
+      const std::map<std::string, mfem::ParGridFunction *> &allSpecies,
+      const mfem::ParGridFunction * /*temp*/) const override {
+    const mfem::ParGridFunction *Tgf = nullptr;
     if (!tempSpecies_.empty()) {
       auto it = allSpecies.find(tempSpecies_);
       if (it != allSpecies.end())
@@ -310,7 +310,7 @@ public:
     R.AddDomainIntegrator(new mfem::DomainLFIntegrator(*reactCoef_));
   }
 
-  void assembleMass(mfem::BilinearForm &M) const override {
+  void assembleMass(mfem::ParBilinearForm &M) const override {
     massCoef_ = std::make_unique<mfem::ConstantCoefficient>(1.0);
     M.AddDomainIntegrator(new mfem::MassIntegrator(*massCoef_));
   }
@@ -325,8 +325,8 @@ private:
 #ifdef VIENNAPS_HAS_MFEM
   class AllenCahnReactionCoef : public mfem::Coefficient {
   public:
-    AllenCahnReactionCoef(const mfem::GridFunction *phi,
-                          const mfem::GridFunction *T, double L, double lambda,
+    AllenCahnReactionCoef(const mfem::ParGridFunction *phi,
+                          const mfem::ParGridFunction *T, double L, double lambda,
                           double Tm)
         : phi_(phi), T_(T), L_(L), lambda_(lambda), Tm_(Tm) {}
     double Eval(mfem::ElementTransformation &tr,
@@ -342,8 +342,8 @@ private:
     }
 
   private:
-    const mfem::GridFunction *phi_;
-    const mfem::GridFunction *T_;
+    const mfem::ParGridFunction *phi_;
+    const mfem::ParGridFunction *T_;
     double L_, lambda_, Tm_;
   };
   mutable std::unique_ptr<mfem::ConstantCoefficient> stiffCoef_;
@@ -383,19 +383,19 @@ public:
 
 #ifdef VIENNAPS_HAS_MFEM
   void assembleStiffness(
-      mfem::BilinearForm &K, const mfem::GridFunction & /*speciesGF*/,
-      const std::map<std::string, mfem::GridFunction *> & /*allSpecies*/,
-      const mfem::GridFunction * /*temp*/) const override {
+      mfem::ParBilinearForm &K, const mfem::ParGridFunction & /*speciesGF*/,
+      const std::map<std::string, mfem::ParGridFunction *> & /*allSpecies*/,
+      const mfem::ParGridFunction * /*temp*/) const override {
     const double lk = static_cast<double>(L_ * kappa_);
     stiffCoef_ = std::make_unique<mfem::ConstantCoefficient>(lk);
     K.AddDomainIntegrator(new mfem::DiffusionIntegrator(*stiffCoef_));
   }
 
   void assembleReaction(
-      mfem::LinearForm &R, const mfem::GridFunction &speciesGF,
-      const std::map<std::string, mfem::GridFunction *> &allSpecies,
-      const mfem::GridFunction * /*temp*/) const override {
-    const mfem::GridFunction *Tgf = nullptr;
+      mfem::ParLinearForm &R, const mfem::ParGridFunction &speciesGF,
+      const std::map<std::string, mfem::ParGridFunction *> &allSpecies,
+      const mfem::ParGridFunction * /*temp*/) const override {
+    const mfem::ParGridFunction *Tgf = nullptr;
     if (!tempSpecies_.empty()) {
       auto it = allSpecies.find(tempSpecies_);
       if (it != allSpecies.end())
@@ -408,7 +408,7 @@ public:
     R.AddDomainIntegrator(new mfem::DomainLFIntegrator(*reactCoef_));
   }
 
-  void assembleMass(mfem::BilinearForm &M) const override {
+  void assembleMass(mfem::ParBilinearForm &M) const override {
     massCoef_ = std::make_unique<mfem::ConstantCoefficient>(1.0);
     M.AddDomainIntegrator(new mfem::MassIntegrator(*massCoef_));
   }
@@ -424,8 +424,8 @@ private:
 #ifdef VIENNAPS_HAS_MFEM
   class CrystReactionCoef : public mfem::Coefficient {
   public:
-    CrystReactionCoef(const mfem::GridFunction *phi,
-                      const mfem::GridFunction *T, double L, double lambda,
+    CrystReactionCoef(const mfem::ParGridFunction *phi,
+                      const mfem::ParGridFunction *T, double L, double lambda,
                       double v0, double Ea)
         : phi_(phi), T_(T), L_(L), lambda_(lambda), v0_(v0), Ea_(Ea) {}
     double Eval(mfem::ElementTransformation &tr,
@@ -444,8 +444,8 @@ private:
     }
 
   private:
-    const mfem::GridFunction *phi_;
-    const mfem::GridFunction *T_;
+    const mfem::ParGridFunction *phi_;
+    const mfem::ParGridFunction *T_;
     double L_, lambda_, v0_, Ea_;
   };
   mutable std::unique_ptr<mfem::ConstantCoefficient> stiffCoef_;

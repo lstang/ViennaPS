@@ -58,9 +58,9 @@ public:
 
 #ifdef VIENNAPS_HAS_MFEM
   void assembleReaction(
-      mfem::LinearForm &R, const mfem::GridFunction &speciesGF,
-      const std::map<std::string, mfem::GridFunction *> &allSpecies,
-      const mfem::GridFunction * /*temp*/) const override {
+      mfem::ParLinearForm &R, const mfem::ParGridFunction &speciesGF,
+      const std::map<std::string, mfem::ParGridFunction *> &allSpecies,
+      const mfem::ParGridFunction * /*temp*/) const override {
     auto itI = allSpecies.find(I_);
     auto itC = allSpecies.find(cluster_);
     if (itI == allSpecies.end() || itC == allSpecies.end() || !itI->second ||
@@ -84,7 +84,7 @@ public:
     R.AddDomainIntegrator(new mfem::DomainLFIntegrator(*coefs_.back()));
   }
 
-  void assembleMass(mfem::BilinearForm &M) const override {
+  void assembleMass(mfem::ParBilinearForm &M) const override {
     massCoef_ = std::make_unique<mfem::ConstantCoefficient>(1.0);
     M.AddDomainIntegrator(new mfem::MassIntegrator(*massCoef_));
   }
@@ -94,7 +94,7 @@ private:
 #ifdef VIENNAPS_HAS_MFEM
   class ClusterRateCoef : public mfem::Coefficient {
   public:
-    ClusterRateCoef(const mfem::GridFunction &I, const mfem::GridFunction &C311,
+    ClusterRateCoef(const mfem::ParGridFunction &I, const mfem::ParGridFunction &C311,
                     double kf, double kr, int n, double scale)
         : I_(&I), C311_(&C311), kf_(kf), kr_(kr), n_(n), scale_(scale) {}
     double Eval(mfem::ElementTransformation &T,
@@ -106,8 +106,8 @@ private:
     }
 
   private:
-    const mfem::GridFunction *I_;
-    const mfem::GridFunction *C311_;
+    const mfem::ParGridFunction *I_;
+    const mfem::ParGridFunction *C311_;
     double kf_, kr_;
     int n_;
     double scale_;

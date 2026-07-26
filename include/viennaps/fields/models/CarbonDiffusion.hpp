@@ -68,9 +68,9 @@ public:
 
 #ifdef VIENNAPS_HAS_MFEM
   void assembleStiffness(
-      mfem::BilinearForm &K, const mfem::GridFunction &speciesGF,
-      const std::map<std::string, mfem::GridFunction *> &allSpecies,
-      const mfem::GridFunction * /*temp*/) const override {
+      mfem::ParBilinearForm &K, const mfem::ParGridFunction &speciesGF,
+      const std::map<std::string, mfem::ParGridFunction *> &allSpecies,
+      const mfem::ParGridFunction * /*temp*/) const override {
     double D = 0.0;
     auto itC = allSpecies.find(C_);
     auto itI = allSpecies.find(I_);
@@ -88,9 +88,9 @@ public:
   }
 
   void assembleReaction(
-      mfem::LinearForm &R, const mfem::GridFunction &speciesGF,
-      const std::map<std::string, mfem::GridFunction *> &allSpecies,
-      const mfem::GridFunction * /*temp*/) const override {
+      mfem::ParLinearForm &R, const mfem::ParGridFunction &speciesGF,
+      const std::map<std::string, mfem::ParGridFunction *> &allSpecies,
+      const mfem::ParGridFunction * /*temp*/) const override {
     auto itC = allSpecies.find(C_);
     auto itI = allSpecies.find(I_);
     auto itCI = allSpecies.find(CI_);
@@ -115,7 +115,7 @@ public:
     R.AddDomainIntegrator(new mfem::DomainLFIntegrator(*coefs_.back()));
   }
 
-  void assembleMass(mfem::BilinearForm &M) const override {
+  void assembleMass(mfem::ParBilinearForm &M) const override {
     massCoef_ = std::make_unique<mfem::ConstantCoefficient>(1.0);
     M.AddDomainIntegrator(new mfem::MassIntegrator(*massCoef_));
   }
@@ -125,8 +125,8 @@ private:
 #ifdef VIENNAPS_HAS_MFEM
   class TrapCoef : public mfem::Coefficient {
   public:
-    TrapCoef(const mfem::GridFunction &C, const mfem::GridFunction &I,
-             const mfem::GridFunction &CI, double kf, double kr, double scale)
+    TrapCoef(const mfem::ParGridFunction &C, const mfem::ParGridFunction &I,
+             const mfem::ParGridFunction &CI, double kf, double kr, double scale)
         : C_(&C), I_(&I), CI_(&CI), kf_(kf), kr_(kr), scale_(scale) {}
     double Eval(mfem::ElementTransformation &T,
                 const mfem::IntegrationPoint &ip) override {
@@ -137,9 +137,9 @@ private:
     }
 
   private:
-    const mfem::GridFunction *C_;
-    const mfem::GridFunction *I_;
-    const mfem::GridFunction *CI_;
+    const mfem::ParGridFunction *C_;
+    const mfem::ParGridFunction *I_;
+    const mfem::ParGridFunction *CI_;
     double kf_, kr_, scale_;
   };
   mutable std::vector<std::unique_ptr<TrapCoef>> coefs_;

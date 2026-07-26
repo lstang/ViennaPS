@@ -59,44 +59,44 @@ public:
 
 #ifdef VIENNAPS_HAS_MFEM
   /// Optional mesh pointer for interface / face assembly (segregation).
-  virtual void setMesh(mfem::Mesh *mesh) { mesh_ = mesh; }
-  mfem::Mesh *mesh() const { return mesh_; }
+  virtual void setMesh(mfem::ParMesh *mesh) { mesh_ = mesh; }
+  mfem::ParMesh *mesh() const { return mesh_; }
 
   /// Contribute to stiffness matrix K for this species.
   /// speciesGF: this species' GridFunction (for concentration-dependent D)
   /// allSpecies: map of all species GridFunctions (for coupled models)
   virtual void assembleStiffness(
-      mfem::BilinearForm& K,
-      const mfem::GridFunction& speciesGF,
-      const std::map<std::string, mfem::GridFunction*>& allSpecies,
-      const mfem::GridFunction* temp) const {}
+      mfem::ParBilinearForm& K,
+      const mfem::ParGridFunction& speciesGF,
+      const std::map<std::string, mfem::ParGridFunction*>& allSpecies,
+      const mfem::ParGridFunction* temp) const {}
 
   /// Optional analytic Jacobian contribution dK/dC for strategy (b).
   /// Default: no-op (engine uses Picard lag of assembleStiffness).
   /// Models that opt into (b1) override this and document the choice.
   virtual void assembleStiffnessJacobian(
       mfem::MixedBilinearForm& /*dKdC*/,
-      const mfem::GridFunction& /*speciesGF*/) const {}
+      const mfem::ParGridFunction& /*speciesGF*/) const {}
 
   /// Contribute to nonlinear reaction RHS R for this species.
   /// Integrators registered here are applied during LinearForm::Assemble().
   virtual void assembleReaction(
-      mfem::LinearForm& R,
-      const mfem::GridFunction& speciesGF,
-      const std::map<std::string, mfem::GridFunction*>& allSpecies,
-      const mfem::GridFunction* temp) const {}
+      mfem::ParLinearForm& R,
+      const mfem::ParGridFunction& speciesGF,
+      const std::map<std::string, mfem::ParGridFunction*>& allSpecies,
+      const mfem::ParGridFunction* temp) const {}
 
   /// Post-Assemble reaction contributions that write residual DOFs directly
   /// (e.g. interior-face segregation). Called AFTER LinearForm::Assemble()
   /// so entries are not zeroed.
   virtual void finalizeReaction(
-      mfem::LinearForm& /*R*/,
-      const mfem::GridFunction& /*speciesGF*/,
-      const std::map<std::string, mfem::GridFunction*>& /*allSpecies*/,
-      const mfem::GridFunction* /*temp*/) const {}
+      mfem::ParLinearForm& /*R*/,
+      const mfem::ParGridFunction& /*speciesGF*/,
+      const std::map<std::string, mfem::ParGridFunction*>& /*allSpecies*/,
+      const mfem::ParGridFunction* /*temp*/) const {}
 
   /// Contribute to mass matrix M.
-  virtual void assembleMass(mfem::BilinearForm& M) const {}
+  virtual void assembleMass(mfem::ParBilinearForm& M) const {}
 #endif
 
   virtual int numSpecies() const = 0;
@@ -111,7 +111,7 @@ protected:
   NumericType T_ = NumericType(1273.15);
   std::string name_;
 #ifdef VIENNAPS_HAS_MFEM
-  mfem::Mesh *mesh_ = nullptr;
+  mfem::ParMesh *mesh_ = nullptr;
 #endif
 };
 

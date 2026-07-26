@@ -50,7 +50,7 @@ public:
   /// Coefficient: D(x) = D_pair * C_I(x) / C_I_eq evaluated at QPs.
   class PairDCoef : public mfem::Coefficient {
   public:
-    PairDCoef(const mfem::GridFunction *CI, double Dpair, double Ceq)
+    PairDCoef(const mfem::ParGridFunction *CI, double Dpair, double Ceq)
         : CI_(CI), Dpair_(Dpair), Ceq_(std::max(Ceq, 1.0)) {}
     double Eval(mfem::ElementTransformation &T,
                 const mfem::IntegrationPoint &ip) override {
@@ -61,15 +61,15 @@ public:
     }
 
   private:
-    const mfem::GridFunction *CI_;
+    const mfem::ParGridFunction *CI_;
     double Dpair_, Ceq_;
   };
 
   void assembleStiffness(
-      mfem::BilinearForm &K, const mfem::GridFunction & /*speciesGF*/,
-      const std::map<std::string, mfem::GridFunction *> &allSpecies,
-      const mfem::GridFunction * /*temp*/) const override {
-    const mfem::GridFunction *CI = nullptr;
+      mfem::ParBilinearForm &K, const mfem::ParGridFunction & /*speciesGF*/,
+      const std::map<std::string, mfem::ParGridFunction *> &allSpecies,
+      const mfem::ParGridFunction * /*temp*/) const override {
+    const mfem::ParGridFunction *CI = nullptr;
     auto it = allSpecies.find(I_);
     if (it != allSpecies.end())
       CI = it->second;
@@ -95,7 +95,7 @@ public:
     }
   }
 
-  void assembleMass(mfem::BilinearForm &M) const override {
+  void assembleMass(mfem::ParBilinearForm &M) const override {
     massCoef_ = std::make_unique<mfem::ConstantCoefficient>(1.0);
     M.AddDomainIntegrator(new mfem::MassIntegrator(*massCoef_));
   }

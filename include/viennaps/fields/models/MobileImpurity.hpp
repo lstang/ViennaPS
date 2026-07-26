@@ -87,7 +87,7 @@ public:
 #ifdef VIENNAPS_HAS_MFEM
   class ImpDCoef : public mfem::Coefficient {
   public:
-    ImpDCoef(const MobileImpurity *m, double T, const mfem::GridFunction *dop,
+    ImpDCoef(const MobileImpurity *m, double T, const mfem::ParGridFunction *dop,
              double Cconst)
         : m_(m), T_(T), dop_(dop), Cconst_(Cconst) {}
     double Eval(mfem::ElementTransformation &T,
@@ -103,14 +103,14 @@ public:
   private:
     const MobileImpurity *m_;
     double T_;
-    const mfem::GridFunction *dop_;
+    const mfem::ParGridFunction *dop_;
     double Cconst_;
   };
 
   void assembleStiffness(
-      mfem::BilinearForm &K, const mfem::GridFunction &speciesGF,
-      const std::map<std::string, mfem::GridFunction *> &allSpecies,
-      const mfem::GridFunction * /*temp*/) const override {
+      mfem::ParBilinearForm &K, const mfem::ParGridFunction &speciesGF,
+      const std::map<std::string, mfem::ParGridFunction *> &allSpecies,
+      const mfem::ParGridFunction * /*temp*/) const override {
     // Immobile pair species: no diffusion/drift.
     if (!pairSpecies_.empty()) {
       auto itP = allSpecies.find(pairSpecies_);
@@ -121,7 +121,7 @@ public:
       }
     }
 
-    const mfem::GridFunction *dop = nullptr;
+    const mfem::ParGridFunction *dop = nullptr;
     if (!dopantSpecies_.empty()) {
       auto it = allSpecies.find(dopantSpecies_);
       if (it != allSpecies.end())
@@ -167,9 +167,9 @@ public:
   }
 
   void assembleReaction(
-      mfem::LinearForm &R, const mfem::GridFunction &speciesGF,
-      const std::map<std::string, mfem::GridFunction *> &allSpecies,
-      const mfem::GridFunction * /*temp*/) const override {
+      mfem::ParLinearForm &R, const mfem::ParGridFunction &speciesGF,
+      const std::map<std::string, mfem::ParGridFunction *> &allSpecies,
+      const mfem::ParGridFunction * /*temp*/) const override {
     if (pairSpecies_.empty() || kPair_ == NumericType(0))
       return;
     auto itM = allSpecies.find(species_);
@@ -177,7 +177,7 @@ public:
     if (itM == allSpecies.end() || itP == allSpecies.end() || !itM->second ||
         !itP->second)
       return;
-    const mfem::GridFunction *acc = nullptr;
+    const mfem::ParGridFunction *acc = nullptr;
     if (!acceptorSpecies_.empty()) {
       auto itA = allSpecies.find(acceptorSpecies_);
       if (itA != allSpecies.end())
@@ -197,7 +197,7 @@ public:
     R.AddDomainIntegrator(new mfem::DomainLFIntegrator(*pairCoefs_.back()));
   }
 
-  void assembleMass(mfem::BilinearForm &M) const override {
+  void assembleMass(mfem::ParBilinearForm &M) const override {
     massCoef_ = std::make_unique<mfem::ConstantCoefficient>(1.0);
     M.AddDomainIntegrator(new mfem::MassIntegrator(*massCoef_));
   }
@@ -223,8 +223,8 @@ protected:
 #ifdef VIENNAPS_HAS_MFEM
   class PairRateCoef : public mfem::Coefficient {
   public:
-    PairRateCoef(const mfem::GridFunction &mob, const mfem::GridFunction &pair,
-                 const mfem::GridFunction *acc, double kf, double kr,
+    PairRateCoef(const mfem::ParGridFunction &mob, const mfem::ParGridFunction &pair,
+                 const mfem::ParGridFunction *acc, double kf, double kr,
                  double scale)
         : mob_(&mob), pair_(&pair), acc_(acc), kf_(kf), kr_(kr),
           scale_(scale) {}
@@ -237,9 +237,9 @@ protected:
     }
 
   private:
-    const mfem::GridFunction *mob_;
-    const mfem::GridFunction *pair_;
-    const mfem::GridFunction *acc_;
+    const mfem::ParGridFunction *mob_;
+    const mfem::ParGridFunction *pair_;
+    const mfem::ParGridFunction *acc_;
     double kf_, kr_, scale_;
   };
   mutable std::unique_ptr<ImpDCoef> dCoef_;

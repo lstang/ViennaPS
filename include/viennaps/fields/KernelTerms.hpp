@@ -25,14 +25,14 @@ public:
   std::string targetSpecies() const override { return species_; }
 
   void assembleStiffness(
-      mfem::BilinearForm &K,
-      const std::map<std::string, mfem::GridFunction *> & /*species*/,
-      const mfem::GridFunction * /*temp*/) const override {
+      mfem::ParBilinearForm &K,
+      const std::map<std::string, mfem::ParGridFunction *> & /*species*/,
+      const mfem::ParGridFunction * /*temp*/) const override {
     coef_ = std::make_unique<mfem::ConstantCoefficient>(D_);
     K.AddDomainIntegrator(new mfem::DiffusionIntegrator(*coef_));
   }
 
-  void assembleMass(mfem::BilinearForm &M) const override {
+  void assembleMass(mfem::ParBilinearForm &M) const override {
     massCoef_ = std::make_unique<mfem::ConstantCoefficient>(1.0);
     M.AddDomainIntegrator(new mfem::MassIntegrator(*massCoef_));
   }
@@ -60,9 +60,9 @@ public:
   std::string targetSpecies() const override { return species_; }
 
   void assembleResidual(
-      mfem::LinearForm &R,
-      const std::map<std::string, mfem::GridFunction *> &species,
-      const mfem::GridFunction * /*temp*/) const override {
+      mfem::ParLinearForm &R,
+      const std::map<std::string, mfem::ParGridFunction *> &species,
+      const mfem::ParGridFunction * /*temp*/) const override {
     auto it = species.find(species_);
     if (it == species.end() || !it->second)
       return;
@@ -78,7 +78,7 @@ public:
 private:
   class ScaledGFCoef : public mfem::Coefficient {
   public:
-    ScaledGFCoef(const mfem::GridFunction &gf, double s)
+    ScaledGFCoef(const mfem::ParGridFunction &gf, double s)
         : gf_(&gf), s_(s) {}
     double Eval(mfem::ElementTransformation &T,
                 const mfem::IntegrationPoint &ip) override {
@@ -86,7 +86,7 @@ private:
     }
 
   private:
-    const mfem::GridFunction *gf_;
+    const mfem::ParGridFunction *gf_;
     double s_;
   };
 
@@ -108,9 +108,9 @@ public:
   std::string targetSpecies() const override { return target_; }
 
   void assembleResidual(
-      mfem::LinearForm &R,
-      const std::map<std::string, mfem::GridFunction *> &species,
-      const mfem::GridFunction * /*temp*/) const override {
+      mfem::ParLinearForm &R,
+      const std::map<std::string, mfem::ParGridFunction *> &species,
+      const mfem::ParGridFunction * /*temp*/) const override {
     auto it = species.find(coupled_);
     if (it == species.end() || !it->second)
       return;
@@ -127,7 +127,7 @@ public:
 private:
   class ScaledGFCoef : public mfem::Coefficient {
   public:
-    ScaledGFCoef(const mfem::GridFunction &gf, double s)
+    ScaledGFCoef(const mfem::ParGridFunction &gf, double s)
         : gf_(&gf), s_(s) {}
     double Eval(mfem::ElementTransformation &T,
                 const mfem::IntegrationPoint &ip) override {
@@ -135,7 +135,7 @@ private:
     }
 
   private:
-    const mfem::GridFunction *gf_;
+    const mfem::ParGridFunction *gf_;
     double s_;
   };
 
@@ -156,9 +156,9 @@ public:
   std::string targetSpecies() const override { return species_; }
 
   void assembleResidual(
-      mfem::LinearForm &R,
-      const std::map<std::string, mfem::GridFunction *> & /*species*/,
-      const mfem::GridFunction * /*temp*/) const override {
+      mfem::ParLinearForm &R,
+      const std::map<std::string, mfem::ParGridFunction *> & /*species*/,
+      const mfem::ParGridFunction * /*temp*/) const override {
     coef_ = std::make_unique<mfem::ConstantCoefficient>(f_);
     R.AddDomainIntegrator(new mfem::DomainLFIntegrator(*coef_));
   }
@@ -181,7 +181,7 @@ public:
 
   std::string targetSpecies() const override { return species_; }
 
-  void assembleMass(mfem::BilinearForm &M) const override {
+  void assembleMass(mfem::ParBilinearForm &M) const override {
     coef_ = std::make_unique<mfem::ConstantCoefficient>(1.0);
     M.AddDomainIntegrator(new mfem::MassIntegrator(*coef_));
   }
@@ -214,9 +214,9 @@ public:
   }
 
   void assembleStiffness(
-      mfem::BilinearForm &K,
-      const std::map<std::string, mfem::GridFunction *> & /*species*/,
-      const mfem::GridFunction * /*temp*/) const override {
+      mfem::ParBilinearForm &K,
+      const std::map<std::string, mfem::ParGridFunction *> & /*species*/,
+      const mfem::ParGridFunction * /*temp*/) const override {
     const double t = tau();
     if (t <= 0.0)
       return;

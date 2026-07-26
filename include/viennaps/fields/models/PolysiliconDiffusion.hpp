@@ -80,9 +80,9 @@ public:
 #ifdef VIENNAPS_HAS_MFEM
   /// PWConst coefficient: D_bulk on interior attr, D_gb on boundary attr.
   void assembleStiffness(
-      mfem::BilinearForm &K, const mfem::GridFunction & /*speciesGF*/,
-      const std::map<std::string, mfem::GridFunction *> & /*allSpecies*/,
-      const mfem::GridFunction * /*temp*/) const override {
+      mfem::ParBilinearForm &K, const mfem::ParGridFunction & /*speciesGF*/,
+      const std::map<std::string, mfem::ParGridFunction *> & /*allSpecies*/,
+      const mfem::ParGridFunction * /*temp*/) const override {
     if (mode_ == Mode::Isotropic) {
       stiffCoef_ = std::make_unique<mfem::ConstantCoefficient>(
           static_cast<double>(getIsotropicDiffusivity()));
@@ -107,7 +107,7 @@ public:
     K.AddDomainIntegrator(new mfem::DiffusionIntegrator(*pwCoef_));
   }
 
-  void assembleMass(mfem::BilinearForm &M) const override {
+  void assembleMass(mfem::ParBilinearForm &M) const override {
     massCoef_ = std::make_unique<mfem::ConstantCoefficient>(1.0);
     M.AddDomainIntegrator(new mfem::MassIntegrator(*massCoef_));
   }
@@ -118,9 +118,9 @@ public:
   /// via finalizeReaction (post-Assemble direct R[id] writes) so the face
   /// walk survives LinearForm::Assemble()'s zeroing.
   void finalizeReaction(
-      mfem::LinearForm &R, const mfem::GridFunction &speciesGF,
-      const std::map<std::string, mfem::GridFunction *> &allSpecies,
-      const mfem::GridFunction * /*temp*/) const override {
+      mfem::ParLinearForm &R, const mfem::ParGridFunction &speciesGF,
+      const std::map<std::string, mfem::ParGridFunction *> &allSpecies,
+      const mfem::ParGridFunction * /*temp*/) const override {
     if (gbSpecies_.empty() || !this->mesh())
       return;
     auto itI = allSpecies.find(species_);

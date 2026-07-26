@@ -61,9 +61,9 @@ public:
 
 #ifdef VIENNAPS_HAS_MFEM
   void assembleReaction(
-      mfem::LinearForm &R, const mfem::GridFunction &speciesGF,
-      const std::map<std::string, mfem::GridFunction *> &allSpecies,
-      const mfem::GridFunction * /*temp*/) const override {
+      mfem::ParLinearForm &R, const mfem::ParGridFunction &speciesGF,
+      const std::map<std::string, mfem::ParGridFunction *> &allSpecies,
+      const mfem::ParGridFunction * /*temp*/) const override {
     auto itB = allSpecies.find(B_);
     auto itG = allSpecies.find(Ge_);
     auto itP = allSpecies.find(P_);
@@ -83,7 +83,7 @@ public:
         static_cast<double>(kr_), scale));
     R.AddDomainIntegrator(new mfem::DomainLFIntegrator(*coefs_.back()));
   }
-  void assembleMass(mfem::BilinearForm &M) const override {
+  void assembleMass(mfem::ParBilinearForm &M) const override {
     massCoef_ = std::make_unique<mfem::ConstantCoefficient>(1.0);
     M.AddDomainIntegrator(new mfem::MassIntegrator(*massCoef_));
   }
@@ -93,8 +93,8 @@ private:
 #ifdef VIENNAPS_HAS_MFEM
   class PairCoef : public mfem::Coefficient {
   public:
-    PairCoef(const mfem::GridFunction &B, const mfem::GridFunction &G,
-             const mfem::GridFunction &P, double kf, double kr, double scale)
+    PairCoef(const mfem::ParGridFunction &B, const mfem::ParGridFunction &G,
+             const mfem::ParGridFunction &P, double kf, double kr, double scale)
         : B_(&B), G_(&G), P_(&P), kf_(kf), kr_(kr), scale_(scale) {}
     double Eval(mfem::ElementTransformation &T,
                 const mfem::IntegrationPoint &ip) override {
@@ -103,7 +103,7 @@ private:
     }
 
   private:
-    const mfem::GridFunction *B_, *G_, *P_;
+    const mfem::ParGridFunction *B_, *G_, *P_;
     double kf_, kr_, scale_;
   };
   mutable std::vector<std::unique_ptr<PairCoef>> coefs_;
@@ -140,14 +140,14 @@ public:
 
 #ifdef VIENNAPS_HAS_MFEM
   void assembleStiffness(
-      mfem::BilinearForm &K, const mfem::GridFunction & /*speciesGF*/,
-      const std::map<std::string, mfem::GridFunction *> & /*allSpecies*/,
-      const mfem::GridFunction * /*temp*/) const override {
+      mfem::ParBilinearForm &K, const mfem::ParGridFunction & /*speciesGF*/,
+      const std::map<std::string, mfem::ParGridFunction *> & /*allSpecies*/,
+      const mfem::ParGridFunction * /*temp*/) const override {
     stiffCoef_ = std::make_unique<mfem::ConstantCoefficient>(
         static_cast<double>(getDiffusivity(this->T_)));
     K.AddDomainIntegrator(new mfem::DiffusionIntegrator(*stiffCoef_));
   }
-  void assembleMass(mfem::BilinearForm &M) const override {
+  void assembleMass(mfem::ParBilinearForm &M) const override {
     massCoef_ = std::make_unique<mfem::ConstantCoefficient>(1.0);
     M.AddDomainIntegrator(new mfem::MassIntegrator(*massCoef_));
   }

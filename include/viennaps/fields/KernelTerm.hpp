@@ -22,24 +22,24 @@ public:
 
 #ifdef VIENNAPS_HAS_MFEM
   virtual void
-  assembleResidual(mfem::LinearForm &R,
-                   const std::map<std::string, mfem::GridFunction *> &species,
-                   const mfem::GridFunction *temp) const {
+  assembleResidual(mfem::ParLinearForm &R,
+                   const std::map<std::string, mfem::ParGridFunction *> &species,
+                   const mfem::ParGridFunction *temp) const {
     (void)R;
     (void)species;
     (void)temp;
   }
 
   virtual void
-  assembleStiffness(mfem::BilinearForm &K,
-                    const std::map<std::string, mfem::GridFunction *> &species,
-                    const mfem::GridFunction *temp) const {
+  assembleStiffness(mfem::ParBilinearForm &K,
+                    const std::map<std::string, mfem::ParGridFunction *> &species,
+                    const mfem::ParGridFunction *temp) const {
     (void)K;
     (void)species;
     (void)temp;
   }
 
-  virtual void assembleMass(mfem::BilinearForm &M) const { (void)M; }
+  virtual void assembleMass(mfem::ParBilinearForm &M) const { (void)M; }
 #endif
 
   /// Species whose residual/stiffness this term contributes to.

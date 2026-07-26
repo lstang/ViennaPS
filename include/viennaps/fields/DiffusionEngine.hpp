@@ -376,10 +376,8 @@ private:
   // TimeDependentOperator and ImplicitEuler paths read/write these through
   // the `allSpecies_` map built in `rebuildAllSpecies()`.
   std::map<std::string, std::unique_ptr<mfem::ParGridFunction>> species_;
-  // Non-owning base-class view of species_ for model hooks.
-  // Model hooks take map<string, GridFunction*>, so we store GridFunction*
-  // even though the actual objects are ParGridFunction.
-  std::map<std::string, mfem::GridFunction *> allSpecies_;
+  // Non-owning view of species_ for model hooks.
+  std::map<std::string, mfem::ParGridFunction *> allSpecies_;
 
   // ---- Helpers --------------------------------------------------------
 

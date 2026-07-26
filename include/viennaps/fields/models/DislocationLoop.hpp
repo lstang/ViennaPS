@@ -57,9 +57,9 @@ public:
 
 #ifdef VIENNAPS_HAS_MFEM
   void assembleReaction(
-      mfem::LinearForm &R, const mfem::GridFunction &speciesGF,
-      const std::map<std::string, mfem::GridFunction *> &allSpecies,
-      const mfem::GridFunction * /*temp*/) const override {
+      mfem::ParLinearForm &R, const mfem::ParGridFunction &speciesGF,
+      const std::map<std::string, mfem::ParGridFunction *> &allSpecies,
+      const mfem::ParGridFunction * /*temp*/) const override {
     auto itI = allSpecies.find(I_);
     auto itL = allSpecies.find(loop_);
     if (itI == allSpecies.end() || itL == allSpecies.end() || !itI->second ||
@@ -87,7 +87,7 @@ public:
     R.AddDomainIntegrator(new mfem::DomainLFIntegrator(*coefs_.back()));
   }
 
-  void assembleMass(mfem::BilinearForm &M) const override {
+  void assembleMass(mfem::ParBilinearForm &M) const override {
     massCoef_ = std::make_unique<mfem::ConstantCoefficient>(1.0);
     M.AddDomainIntegrator(new mfem::MassIntegrator(*massCoef_));
   }
@@ -97,7 +97,7 @@ private:
 #ifdef VIENNAPS_HAS_MFEM
   class LoopRateCoef : public mfem::Coefficient {
   public:
-    LoopRateCoef(const mfem::GridFunction &I, double k, double p, double Ceq,
+    LoopRateCoef(const mfem::ParGridFunction &I, double k, double p, double Ceq,
                  double scale)
         : I_(&I), k_(k), p_(p), Ceq_(std::max(Ceq, 1.0)), scale_(scale) {}
     double Eval(mfem::ElementTransformation &T,
@@ -108,7 +108,7 @@ private:
     }
 
   private:
-    const mfem::GridFunction *I_;
+    const mfem::ParGridFunction *I_;
     double k_, p_, Ceq_, scale_;
   };
   mutable std::vector<std::unique_ptr<LoopRateCoef>> coefs_;

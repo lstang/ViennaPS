@@ -52,9 +52,9 @@ public:
   void setApplicableAttributes(std::vector<int> a) { attrs_ = std::move(a); }
 
 #ifdef VIENNAPS_HAS_MFEM
-  void assembleStiffness(mfem::BilinearForm& K, const mfem::GridFunction& speciesGF,
-                         const std::map<std::string, mfem::GridFunction*>& allSpecies,
-                         const mfem::GridFunction* temp) const override {
+  void assembleStiffness(mfem::ParBilinearForm& K, const mfem::ParGridFunction& speciesGF,
+                         const std::map<std::string, mfem::ParGridFunction*>& allSpecies,
+                         const mfem::ParGridFunction* temp) const override {
     // Refresh the cached coefficient so it reflects the current D (which
     // depends on T set via setup()). The coefficient must outlive the
     // integrator: MFEM's DiffusionIntegrator stores a Coefficient& and
@@ -68,7 +68,7 @@ public:
     K.AddDomainIntegrator(new mfem::DiffusionIntegrator(*stiffCoef_));
   }
 
-  void assembleMass(mfem::BilinearForm& M) const override {
+  void assembleMass(mfem::ParBilinearForm& M) const override {
     // Same lifetime consideration as assembleStiffness: BilinearForm::
     // Assemble() reads the coefficient after this method returns, so the
     // coefficient must persist. Mass integrator uses constant 1.

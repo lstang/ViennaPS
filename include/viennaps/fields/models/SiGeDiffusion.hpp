@@ -84,8 +84,8 @@ public:
 #ifdef VIENNAPS_HAS_MFEM
   class DefectDCoef : public mfem::Coefficient {
   public:
-    DefectDCoef(const SiGeDiffusion *m, double T, const mfem::GridFunction *CI,
-                const mfem::GridFunction *CV)
+    DefectDCoef(const SiGeDiffusion *m, double T, const mfem::ParGridFunction *CI,
+                const mfem::ParGridFunction *CV)
         : m_(m), T_(T), CI_(CI), CV_(CV) {}
     double Eval(mfem::ElementTransformation &T,
                 const mfem::IntegrationPoint &ip) override {
@@ -111,16 +111,16 @@ public:
   private:
     const SiGeDiffusion *m_;
     double T_;
-    const mfem::GridFunction *CI_;
-    const mfem::GridFunction *CV_;
+    const mfem::ParGridFunction *CI_;
+    const mfem::ParGridFunction *CV_;
   };
 
   void assembleStiffness(
-      mfem::BilinearForm &K, const mfem::GridFunction & /*speciesGF*/,
-      const std::map<std::string, mfem::GridFunction *> &allSpecies,
-      const mfem::GridFunction * /*temp*/) const override {
-    const mfem::GridFunction *CI = nullptr;
-    const mfem::GridFunction *CV = nullptr;
+      mfem::ParBilinearForm &K, const mfem::ParGridFunction & /*speciesGF*/,
+      const std::map<std::string, mfem::ParGridFunction *> &allSpecies,
+      const mfem::ParGridFunction * /*temp*/) const override {
+    const mfem::ParGridFunction *CI = nullptr;
+    const mfem::ParGridFunction *CV = nullptr;
     auto itI = allSpecies.find(I_);
     auto itV = allSpecies.find(V_);
     if (itI != allSpecies.end())
@@ -151,7 +151,7 @@ public:
     }
   }
 
-  void assembleMass(mfem::BilinearForm &M) const override {
+  void assembleMass(mfem::ParBilinearForm &M) const override {
     massCoef_ = std::make_unique<mfem::ConstantCoefficient>(1.0);
     M.AddDomainIntegrator(new mfem::MassIntegrator(*massCoef_));
   }

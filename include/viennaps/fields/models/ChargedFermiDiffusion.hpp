@@ -116,7 +116,7 @@ public:
     ChargedFermiDCoef(const ChargedFermiDiffusion *model, double T)
         : model_(model), T_(T), conc_(nullptr) {}
 
-    void SetConcentrationField(const mfem::GridFunction *c) { conc_ = c; }
+    void SetConcentrationField(const mfem::ParGridFunction *c) { conc_ = c; }
 
     double Eval(mfem::ElementTransformation &T,
                 const mfem::IntegrationPoint &ip) override {
@@ -131,13 +131,13 @@ public:
   private:
     const ChargedFermiDiffusion *model_;
     double T_;
-    const mfem::GridFunction *conc_;
+    const mfem::ParGridFunction *conc_;
   };
 
   void assembleStiffness(
-      mfem::BilinearForm &K, const mfem::GridFunction &speciesGF,
-      const std::map<std::string, mfem::GridFunction *> & /*allSpecies*/,
-      const mfem::GridFunction * /*temp*/) const override {
+      mfem::ParBilinearForm &K, const mfem::ParGridFunction &speciesGF,
+      const std::map<std::string, mfem::ParGridFunction *> & /*allSpecies*/,
+      const mfem::ParGridFunction * /*temp*/) const override {
     // QP-local D(C(x)): lags concentration field (Picard) but evaluates at
     // every integration point — required for steep profiles (gap analysis).
     stiffCoef_ = std::make_unique<ChargedFermiDCoef>(
@@ -146,7 +146,7 @@ public:
     K.AddDomainIntegrator(new mfem::DiffusionIntegrator(*stiffCoef_));
   }
 
-  void assembleMass(mfem::BilinearForm &M) const override {
+  void assembleMass(mfem::ParBilinearForm &M) const override {
     massCoef_ = std::make_unique<mfem::ConstantCoefficient>(1.0);
     M.AddDomainIntegrator(new mfem::MassIntegrator(*massCoef_));
   }

@@ -151,7 +151,7 @@ public:
   public:
     IIIVDCoef(const IIIVDiffusion *m, double T)
         : m_(m), T_(T), conc_(nullptr) {}
-    void SetField(const mfem::GridFunction *c) { conc_ = c; }
+    void SetField(const mfem::ParGridFunction *c) { conc_ = c; }
     double Eval(mfem::ElementTransformation &T,
                 const mfem::IntegrationPoint &ip) override {
       double C = 0.0;
@@ -165,18 +165,18 @@ public:
   private:
     const IIIVDiffusion *m_;
     double T_;
-    const mfem::GridFunction *conc_;
+    const mfem::ParGridFunction *conc_;
   };
 
   void assembleStiffness(
-      mfem::BilinearForm &K, const mfem::GridFunction &speciesGF,
-      const std::map<std::string, mfem::GridFunction *> & /*allSpecies*/,
-      const mfem::GridFunction * /*temp*/) const override {
+      mfem::ParBilinearForm &K, const mfem::ParGridFunction &speciesGF,
+      const std::map<std::string, mfem::ParGridFunction *> & /*allSpecies*/,
+      const mfem::ParGridFunction * /*temp*/) const override {
     stiffCoef_ = std::make_unique<IIIVDCoef>(this, static_cast<double>(this->T_));
     stiffCoef_->SetField(&speciesGF);
     K.AddDomainIntegrator(new mfem::DiffusionIntegrator(*stiffCoef_));
   }
-  void assembleMass(mfem::BilinearForm &M) const override {
+  void assembleMass(mfem::ParBilinearForm &M) const override {
     massCoef_ = std::make_unique<mfem::ConstantCoefficient>(1.0);
     M.AddDomainIntegrator(new mfem::MassIntegrator(*massCoef_));
   }

@@ -76,9 +76,9 @@ public:
 
 #ifdef VIENNAPS_HAS_MFEM
   void assembleStiffness(
-      mfem::BilinearForm &K, const mfem::GridFunction &speciesGF,
-      const std::map<std::string, mfem::GridFunction *> & /*allSpecies*/,
-      const mfem::GridFunction * /*temp*/) const override {
+      mfem::ParBilinearForm &K, const mfem::ParGridFunction &speciesGF,
+      const std::map<std::string, mfem::ParGridFunction *> & /*allSpecies*/,
+      const mfem::ParGridFunction * /*temp*/) const override {
     // Owned coefficient: DiffusionIntegrator holds Coefficient& across
     // Assemble() (same lifetime pattern as ConstantDiffusion).
     stiffCoef_ = std::make_unique<FermiDCoef>(
@@ -90,7 +90,7 @@ public:
 
   void assembleStiffnessJacobian(
       mfem::MixedBilinearForm &dKdC,
-      const mfem::GridFunction &speciesGF) const override {
+      const mfem::ParGridFunction &speciesGF) const override {
     ddcCoef_ = std::make_unique<FermiDdCCoef>(static_cast<double>(D_i_),
                                               static_cast<double>(alpha_),
                                               static_cast<double>(ni_));
@@ -98,7 +98,7 @@ public:
     dKdC.AddDomainIntegrator(new mfem::MixedGradGradIntegrator(*ddcCoef_));
   }
 
-  void assembleMass(mfem::BilinearForm &M) const override {
+  void assembleMass(mfem::ParBilinearForm &M) const override {
     massCoef_ = std::make_unique<mfem::ConstantCoefficient>(1.0);
     M.AddDomainIntegrator(new mfem::MassIntegrator(*massCoef_));
   }

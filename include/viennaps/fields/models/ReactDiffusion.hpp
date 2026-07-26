@@ -52,9 +52,9 @@ public:
 
 #ifdef VIENNAPS_HAS_MFEM
   void assembleStiffness(
-      mfem::BilinearForm &K, const mfem::GridFunction &speciesGF,
-      const std::map<std::string, mfem::GridFunction *> &allSpecies,
-      const mfem::GridFunction * /*temp*/) const override {
+      mfem::ParBilinearForm &K, const mfem::ParGridFunction &speciesGF,
+      const std::map<std::string, mfem::ParGridFunction *> &allSpecies,
+      const mfem::ParGridFunction * /*temp*/) const override {
     // Detect which species residual is open by pointer identity.
     double D = static_cast<double>(D_I_);
     auto itI = allSpecies.find(I_);
@@ -69,9 +69,9 @@ public:
   }
 
   void assembleReaction(
-      mfem::LinearForm &R, const mfem::GridFunction &speciesGF,
-      const std::map<std::string, mfem::GridFunction *> &allSpecies,
-      const mfem::GridFunction * /*temp*/) const override {
+      mfem::ParLinearForm &R, const mfem::ParGridFunction &speciesGF,
+      const std::map<std::string, mfem::ParGridFunction *> &allSpecies,
+      const mfem::ParGridFunction * /*temp*/) const override {
     auto itI = allSpecies.find(I_);
     auto itV = allSpecies.find(V_);
     if (itI == allSpecies.end() || itV == allSpecies.end() || !itI->second ||
@@ -88,7 +88,7 @@ public:
     (void)speciesGF;
   }
 
-  void assembleMass(mfem::BilinearForm &M) const override {
+  void assembleMass(mfem::ParBilinearForm &M) const override {
     massCoef_ = std::make_unique<mfem::ConstantCoefficient>(1.0);
     M.AddDomainIntegrator(new mfem::MassIntegrator(*massCoef_));
   }
@@ -101,7 +101,7 @@ protected:
 #ifdef VIENNAPS_HAS_MFEM
   class ProductCoef : public mfem::Coefficient {
   public:
-    ProductCoef(const mfem::GridFunction &a, const mfem::GridFunction &b,
+    ProductCoef(const mfem::ParGridFunction &a, const mfem::ParGridFunction &b,
                 double scale)
         : a_(&a), b_(&b), scale_(scale) {}
     double Eval(mfem::ElementTransformation &T,
@@ -110,8 +110,8 @@ protected:
     }
 
   private:
-    const mfem::GridFunction *a_;
-    const mfem::GridFunction *b_;
+    const mfem::ParGridFunction *a_;
+    const mfem::ParGridFunction *b_;
     double scale_;
   };
   mutable std::unique_ptr<mfem::ConstantCoefficient> stiffCoef_;

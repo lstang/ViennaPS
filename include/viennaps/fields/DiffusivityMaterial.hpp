@@ -50,7 +50,7 @@ public:
   FermiDCoef(double D_i, double alpha, double ni, double /*T*/ = 0.0)
       : D_i_(D_i), alpha_(alpha), ni_(ni), conc_(nullptr) {}
 
-  void SetConcentrationField(const mfem::GridFunction *c) { conc_ = c; }
+  void SetConcentrationField(const mfem::ParGridFunction *c) { conc_ = c; }
 
   double Eval(mfem::ElementTransformation &T,
               const mfem::IntegrationPoint &ip) override {
@@ -65,7 +65,7 @@ public:
 
 private:
   double D_i_, alpha_, ni_;
-  const mfem::GridFunction *conc_;
+  const mfem::ParGridFunction *conc_;
 };
 
 /// dD/dC coefficient for Jacobian chain-rule term (strategy b1).
@@ -74,7 +74,7 @@ public:
   FermiDdCCoef(double D_i, double alpha, double ni)
       : D_i_(D_i), alpha_(alpha), ni_(ni), conc_(nullptr) {}
 
-  void SetConcentrationField(const mfem::GridFunction *c) { conc_ = c; }
+  void SetConcentrationField(const mfem::ParGridFunction *c) { conc_ = c; }
 
   double Eval(mfem::ElementTransformation &T,
               const mfem::IntegrationPoint &ip) override {
@@ -91,7 +91,7 @@ public:
 
 private:
   double D_i_, alpha_, ni_;
-  const mfem::GridFunction *conc_;
+  const mfem::ParGridFunction *conc_;
 };
 #endif // VIENNAPS_HAS_MFEM
 

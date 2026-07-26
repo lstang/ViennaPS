@@ -81,9 +81,9 @@ public:
   /// R += Γ_I as a uniform DomainLFIntegrator (unit test / 1D-like path).
   /// Production path prefers registerWith() Neumann on the moving boundary.
   void assembleReaction(
-      mfem::LinearForm &R, const mfem::GridFunction & /*speciesGF*/,
-      const std::map<std::string, mfem::GridFunction *> & /*allSpecies*/,
-      const mfem::GridFunction * /*temp*/) const override {
+      mfem::ParLinearForm &R, const mfem::ParGridFunction & /*speciesGF*/,
+      const std::map<std::string, mfem::ParGridFunction *> & /*allSpecies*/,
+      const mfem::ParGridFunction * /*temp*/) const override {
     const double flux = static_cast<double>(injectionFlux());
     if (flux == 0.0)
       return;
@@ -91,7 +91,7 @@ public:
     R.AddDomainIntegrator(new mfem::DomainLFIntegrator(*srcCoef_));
   }
 
-  void assembleMass(mfem::BilinearForm &M) const override {
+  void assembleMass(mfem::ParBilinearForm &M) const override {
     massCoef_ = std::make_unique<mfem::ConstantCoefficient>(1.0);
     M.AddDomainIntegrator(new mfem::MassIntegrator(*massCoef_));
   }

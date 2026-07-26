@@ -27,14 +27,14 @@ public:
 
 #ifdef VIENNAPS_HAS_MFEM
   void assembleReaction(
-      mfem::LinearForm &R, const mfem::GridFunction &speciesGF,
-      const std::map<std::string, mfem::GridFunction *> & /*allSpecies*/,
-      const mfem::GridFunction * /*temp*/) const override {
+      mfem::ParLinearForm &R, const mfem::ParGridFunction &speciesGF,
+      const std::map<std::string, mfem::ParGridFunction *> & /*allSpecies*/,
+      const mfem::ParGridFunction * /*temp*/) const override {
     coef_ = std::make_unique<ScaledGF>(speciesGF, -static_cast<double>(k_));
     R.AddDomainIntegrator(new mfem::DomainLFIntegrator(*coef_));
   }
 
-  void assembleMass(mfem::BilinearForm &M) const override {
+  void assembleMass(mfem::ParBilinearForm &M) const override {
     massCoef_ = std::make_unique<mfem::ConstantCoefficient>(1.0);
     M.AddDomainIntegrator(new mfem::MassIntegrator(*massCoef_));
   }
@@ -46,14 +46,14 @@ private:
 #ifdef VIENNAPS_HAS_MFEM
   class ScaledGF : public mfem::Coefficient {
   public:
-    ScaledGF(const mfem::GridFunction &gf, double s) : gf_(&gf), s_(s) {}
+    ScaledGF(const mfem::ParGridFunction &gf, double s) : gf_(&gf), s_(s) {}
     double Eval(mfem::ElementTransformation &T,
                 const mfem::IntegrationPoint &ip) override {
       return s_ * gf_->GetValue(T, ip);
     }
 
   private:
-    const mfem::GridFunction *gf_;
+    const mfem::ParGridFunction *gf_;
     double s_;
   };
   mutable std::unique_ptr<ScaledGF> coef_;

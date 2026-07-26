@@ -46,8 +46,8 @@ public:
 #ifdef VIENNAPS_HAS_MFEM
   class ChargedPairDCoef : public mfem::Coefficient {
   public:
-    ChargedPairDCoef(const mfem::GridFunction *CI,
-                     const mfem::GridFunction *Cdop, double Dpair, double Ceq,
+    ChargedPairDCoef(const mfem::ParGridFunction *CI,
+                     const mfem::ParGridFunction *Cdop, double Dpair, double Ceq,
                      double alpha, double ni)
         : CI_(CI), Cdop_(Cdop), Dpair_(Dpair), Ceq_(std::max(Ceq, 1.0)),
           alpha_(alpha), ni_(std::max(ni, 1.0)) {}
@@ -66,16 +66,16 @@ public:
     }
 
   private:
-    const mfem::GridFunction *CI_;
-    const mfem::GridFunction *Cdop_;
+    const mfem::ParGridFunction *CI_;
+    const mfem::ParGridFunction *Cdop_;
     double Dpair_, Ceq_, alpha_, ni_;
   };
 
   void assembleStiffness(
-      mfem::BilinearForm &K, const mfem::GridFunction &speciesGF,
-      const std::map<std::string, mfem::GridFunction *> &allSpecies,
-      const mfem::GridFunction * /*temp*/) const override {
-    const mfem::GridFunction *CI = nullptr;
+      mfem::ParBilinearForm &K, const mfem::ParGridFunction &speciesGF,
+      const std::map<std::string, mfem::ParGridFunction *> &allSpecies,
+      const mfem::ParGridFunction * /*temp*/) const override {
+    const mfem::ParGridFunction *CI = nullptr;
     auto it = allSpecies.find(this->interstitialName());
     if (it != allSpecies.end())
       CI = it->second;
@@ -108,7 +108,7 @@ public:
     }
   }
 
-  void assembleMass(mfem::BilinearForm &M) const override {
+  void assembleMass(mfem::ParBilinearForm &M) const override {
     PairDiffusion<NumericType>::assembleMass(M);
   }
 #endif
