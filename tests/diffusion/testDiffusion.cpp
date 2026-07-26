@@ -547,6 +547,9 @@ void TestPhase6SiGe() {
             << " ratio=" << DsiHigh / std::max(DsiLow, 1e-30) << "\n";
   VC_TEST_ASSERT(DsiLow > 0.0);
   VC_TEST_ASSERT(DsiHigh > 0.0);
+  // Si (donor, linear n/ni only): D ratio should match the n/ni ratio.
+  // D_AV^2 = 0 so the quadratic term is absent.
+  const double siRatio = DsiHigh / std::max(DsiLow, 1e-30);
 
   // Zn in GaAs is an acceptor (I_Ga mechanism, eq. 3-240) with D_AI^2 > 0 ->
   // strongly concentration-dependent: D(C=1e20) >> D(C=1e15) due to the
@@ -554,9 +557,16 @@ void TestPhase6SiGe() {
   IIIVDiffusion<double> gaasZn("GaAs", "Zn");
   const double DznLow = gaasZn.getDiffusivity(1e15, 1273.0);
   const double DznHigh = gaasZn.getDiffusivity(1e20, 1273.0);
+  const double znRatio = DznHigh / std::max(DznLow, 1e-30);
+  std::cout << "[phase6] GaAs:Si D(1e15)=" << DsiLow << " D(1e20)=" << DsiHigh
+            << " ratio=" << siRatio << "\n";
   std::cout << "[phase6] GaAs:Zn D(1e15)=" << DznLow << " D(1e20)=" << DznHigh
-            << " ratio=" << DznHigh / std::max(DznLow, 1e-30) << "\n";
-  VC_TEST_ASSERT(DznHigh > DznLow);
+            << " ratio=" << znRatio << "\n";
+  // Zn (acceptor, quadratic) ratio must be MUCH larger than Si (donor, linear).
+  // The quadratic (p/ni)^2 term makes Zn ratio ~ (n/ni)^2 / (n/ni) >> 1.
+  VC_TEST_ASSERT(znRatio > siRatio);
+  // Zn ratio should be at least 1e4 (the quadratic enhancement dominates).
+  VC_TEST_ASSERT(znRatio > 1e4);
   std::cout << "[phase6] EgSi=" << EgSi << " EgGe=" << EgGe
             << " tedC/tedNoC=" << tedC / tedNoC << "\n";
 }
@@ -673,6 +683,52 @@ void TestPhase8Epitaxy() {
   VC_TEST_ASSERT(epi.geGrowthFactor() < 1.0);
   VC_TEST_ASSERT(KmcVisibility::isVisible(lat, 0, 0, 3));
   std::cout << "[phase8] deposited=" << n << "\n";
+
+  // BKL epitaxy events: enable Deposit/Desorb/Twin via the KMC engine.
+  // Seed a substrate (fill k=0 plane with Si), enable epitaxy, run steps.
+  // Assert depositCount > 0 (growth occurs).
+  {
+    KmcLattice latBkl;
+    latBkl.resize(4, 4, 4);
+    for (int i = 0; i < 4; ++i)
+      for (int j = 0; j < 4; ++j) {
+        latBkl.at(i, j, 0).occupied = true;
+        latBkl.at(i, j, 0).species = KmcSi;
+      }
+    KmcParameters p;
+    p.T = 1000.0; // high T -> fast attach rate
+    p.attachPreFactor = 1e12;
+    p.attachBarrier = 0.1;
+    p.desorbPreFactor = 0; // disable desorb so growth dominates
+    p.twinPreFactor = 1e8;
+    p.twinBarrier = 0.5;
+    p.hopPreFactor = 0; // disable hop so only surface events fire
+    p.recombPreFactor = 0;
+    p.clusterPreFactor = 0;
+    p.dissocPreFactor = 0;
+    KmcAtomisticEngine eng(99);
+    eng.setLattice(latBkl);
+    eng.setParameters(p);
+    eng.setEpitaxyEnabled(true);
+    eng.setRecombinationEnabled(false);
+    eng.setClusteringEnabled(false);
+    eng.run(200);
+    std::cout << "[phase8-bkl] deposit=" << eng.depositCount()
+              << " twin=" << eng.twinCount()
+              << " steps=" << eng.steps() << "\n";
+    VC_TEST_ASSERT(eng.depositCount() > 0);
+    // Growth occurred: some Si atoms deposited above the substrate.
+    // Read from the engine's lattice (setLattice copies by value).
+    int siCount = 0;
+    for (int k = 1; k < 4; ++k)
+      for (int j = 0; j < 4; ++j)
+        for (int i = 0; i < 4; ++i) {
+          const auto &s = eng.lattice().at(i, j, k);
+          if (s.occupied && s.species == KmcSi)
+            ++siCount;
+        }
+    VC_TEST_ASSERT(siCount > 0);
+  }
 }
 
 void TestPhase9Laser() {
@@ -798,24 +854,53 @@ void TestFemClosures() {
       DiffusionEngine<double, 2> engine;
       engine.setMesh(baseMesh(), attrs);
       auto m = std::make_shared<StrainDiffusionModel<double>>("Boron");
-      m->setD0(1e-13);
+      m->setD0(1e-3); // large D so diffusion is visible
       m->setStrain(eps);
+      m->setAlpha(5.0); // strong strain dependence
       DiffusionPhysics<double> physics;
       physics.addSpecies("Boron");
       physics.addModel(m);
       physics.setTemperature(1273.0);
       engine.setPhysics(physics);
-      engine.initializeSpecies("Boron", 1e18);
+      // Non-uniform IC: spike on left half so diffusion spreads it.
+      engine.initializeSpecies("Boron", 0.0);
+      mfem::GridFunction &gf =
+          const_cast<mfem::GridFunction &>(engine.getSolution("Boron"));
+      mfem::Mesh *mesh = gf.FESpace()->GetMesh();
+      double xMin = std::numeric_limits<double>::max();
+      double xMax = std::numeric_limits<double>::lowest();
+      for (int i = 0; i < mesh->GetNV(); ++i) {
+        xMin = std::min(xMin, mesh->GetVertex(i)[0]);
+        xMax = std::max(xMax, mesh->GetVertex(i)[0]);
+      }
+      const double dx = (xMax - xMin) / 4.0;
+      for (int i = 0; i < gf.Size(); ++i) {
+        double xv[2] = {0.0, 0.0};
+        gf.FESpace()->GetMesh()->GetNode(i, xv);
+        if (xv[0] <= xMin + dx)
+          gf[i] = 1e18;
+      }
       engine.solve(0.0, 0.5, 0.05);
-      return engine.getIntegral("Boron");
+      // Return peak concentration as a redistribution proxy.
+      double peak = 0.0;
+      for (int i = 0; i < gf.Size(); ++i)
+        peak = std::max(peak, gf(i));
+      return peak;
     };
-    const double doseUnstrained = runStrain(0.0);
-    const double doseStrained = runStrain(0.02);
-    std::cout << "[fem-closure] strain dose(eps=0)=" << doseUnstrained
-              << " dose(eps=0.02)=" << doseStrained << "\n";
-    // Both conserved (closed domain) but the FEM path ran for both.
-    VC_TEST_ASSERT(doseUnstrained > 0.0);
-    VC_TEST_ASSERT(doseStrained > 0.0);
+    const double peakUnstrained = runStrain(0.0);
+    const double peakStrained = runStrain(0.02);
+    std::cout << "[fem-closure] strain peak(eps=0)=" << peakUnstrained
+              << " peak(eps=0.02)=" << peakStrained << "\n";
+    // Different D -> different redistribution -> different peak.
+    // eps=0.02 with alpha=5, T=1273: D_strained/D_unstrained = exp(5*0.02/(kB*1273))
+    // kB*1273 ~ 0.11, so exp(0.1/0.11) = exp(~0.9) ~ 2.5x -> visibly different peak.
+    VC_TEST_ASSERT(peakUnstrained > 0.0);
+    VC_TEST_ASSERT(peakStrained > 0.0);
+    // The strain modifies D, which changes how much the spike spreads,
+    // giving a different peak. Assert relative difference > 0.5%.
+    VC_TEST_ASSERT(std::abs(peakStrained - peakUnstrained) /
+                           std::max(peakUnstrained, 1e-30) >
+                       0.005);
   }
 
   // --- MeltDiffusion FEM (phi-dependent D): register Boron + MeltFraction.

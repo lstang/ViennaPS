@@ -32,7 +32,7 @@ Legend:
 | MovingMesh relabel/ALE/Laplacian/remesh trigger | ✅ | Relabel + ALE displacement + Laplacian smoothing implemented; quality-triggered remesh is the follow-up marker |
 | SolutionTransfer L2 Mx=b | ✅ | |
 | AdaptiveMeshRefiner mark/refine/ZZ/threshold/derefine API | ✅ | NC derefine no-op on serial Cartesian |
-| Runtime AMR in solve | ✅ | `applyRuntimeAmr` (DiffusionEngine:927) now calls `GeneralRefinement` + `FESpace::Update(want_transform=true)` + `GridFunction::Update()` per species + `fes_->UpdatesFinished()` + invalidates implicitCache_. Offline `AdaptiveMeshRefiner::refineMarkedWithProlongation` also wired. `TestProductionAmr` (1364) asserts dose preservation to 0.1% and `runtimeAmrRefineCount() > 0`. Commits `7b485a3`, `b881cca`. |
+| Runtime AMR in solve | 🟡 | Mark-count hook runs mid-solve (Euler path) but `GeneralRefinement` + prolongation causes segfault on serial H1 (MFEM `Update()` issue). Offline `refineMarked` works. `refineMarkedWithProlongation` helper exists but is dead code (never called at runtime). Needs MFEM-side fix or workaround (e.g. between-step refine). |
 | Boundary-conforming Delaunay / marching cubes | ❌ | Stretch F6 |
 
 ## Section 4: Continuum models — ✅ / stretch
@@ -80,11 +80,11 @@ Legend:
 
 1. ✅ Moving mesh + remesh trigger + Laplacian  
 2. ✅ L2 solution transfer  
-3. ✅ Runtime AMR mark hook (Euler) + offline refine  
+3. 🟡 Runtime AMR: mark hook works; runtime GeneralRefinement+prolongation causes segfault (deferred)
 4. ✅ Jacobian strategy (b) path  
 5. ✅ 3D LevelSetToMesh Cartesian  
 6. ✅ PDE reaction + IC  
-7. 🟡 Poly GB segregation FEM residual (domain integrator proxy, not cited face-local residual; untested)  
+7. ✅ Poly GB segregation FEM face residual (Wave 2.1: finalizeReaction + assembleInterfaceResidual)
 8. ✅ Sub-cycling  
 9. 🟡 Multi-material InterfaceSubmesh (attribute tagging only)  
 
