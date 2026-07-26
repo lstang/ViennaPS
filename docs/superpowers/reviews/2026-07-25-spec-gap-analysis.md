@@ -41,8 +41,8 @@ Legend:
 |---|---|
 | Constant, Fermi, ChargedFermi, Pair, React, CDD, clusters, SolidSolubility | ✅ |
 | ChargedEquilibrium, Carbon detailed balance, Copper drift | ✅ |
-| Poly isotropic/anisotropic + GB FEM segregation residual | 🟡 | Anisotropic PWConst diffusivity + domain-integrated exchange proxy in `assembleReaction`; **NOT** the cited two-sided interior-face residual at `Poly_GI:Poly_GB` faces (Phase 5 plan requires MOOSE `InterfaceReaction` pattern). `enableGbSegregationSpecies` never called in tests. |
-| SiGe FEM + defect-mediated; SiGeC; **GeB pairing FEM**; **strain FEM** | 🟡 | Code-correct FEM assembly exists (`SiGeCDiffusion`, `GeBPairingModel`, `StrainDiffusionModel`); **none instantiated in any engine-solve test** - tests use the OLD 1D `applyStep`/`modifyD` paths. Regression-breaking the FEM paths would not be caught. |
+| Poly isotropic/anisotropic + GB FEM segregation residual | ✅ | Anisotropic PWConst + two-sided interior-face residual via `finalizeReaction` (Wave 2.1). Tested: gi→gb mass transfer + conservation. |
+| SiGe FEM + defect-mediated; SiGeC; **GeB pairing FEM**; **strain FEM** | ✅ | FEM assembly tested in engine-solve (Wave 1): SiGeC mass conservation, GeB pairing, Strain peak-sensitive, MeltDiffusion phi-dependent. |
 | III-V FEM + I/V eq; SPER + orientation | 🟡 | FEM stiffness + carrier-dependent eq. 3-239/3-240 (donor `n/ni`, acceptor `p/ni`, mechanism-aware — Wave 3.1). GaAs/InP band data added. Test verifies Si (linear ratio=36324) vs Zn (quadratic ratio=5.5e8). 4-sublattice I/V equilibrium deferred. SPER orientation ✅. |
 | Flash **FEM heat**; **MeltDiffusion FEM** (φ-dependent D) | 🟡 | Heat FEM ✅ + latent heat `ρ·L·∂φ/∂t` coupling (Wave 2.3). MeltDiffusion φ-dependent D FEM tested (Wave 1: peak phi=0 vs phi=1). Full Allen-Cahn melting/crystallinity phase field still stretch. |
 | FDTD / full TMM / scanning laser / adjoint | ❌ | Stretch |
@@ -80,7 +80,7 @@ Legend:
 
 1. ✅ Moving mesh + remesh trigger + Laplacian  
 2. ✅ L2 solution transfer  
-3. 🟡 Runtime AMR: mark hook works; runtime GeneralRefinement+prolongation causes segfault (deferred)
+3. 🟡 Runtime AMR: mark hook works; between-step `refineBetweenSteps()` implemented but MFEM serial-H1 crash on `GeneralRefinement` (mesh Nodes GF tied to dead FESpace). Offline `refineMarked` + `setMesh` rebuild works. Needs MFEM parallel mesh or between-solve full re-setup.
 4. ✅ Jacobian strategy (b) path  
 5. ✅ 3D LevelSetToMesh Cartesian  
 6. ✅ PDE reaction + IC  

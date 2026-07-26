@@ -930,7 +930,7 @@ private:
       std::map<std::string, const mfem::SparseMatrix *> &Ms,
       std::map<std::string, const mfem::SparseMatrix *> &Ks,
       const std::vector<std::string> &names,
-      std::map<std::string, BdrMasks> & /*bdrMasks*/) {
+      std::map<std::string, BdrMasks> &bdrMasks) {
     if (amrLevelsDone_ >= amrMaxLevels_ || !mesh_ || !fes_)
       return false;
     RefinementBox box{amrBox_.x0, amrBox_.x1, amrBox_.y0, amrBox_.y1};
@@ -945,6 +945,66 @@ private:
       return false;
     lastAmrMarkCount_ = n;
     ++amrLevelsDone_;
+    return true;
+  }
+
+  /// Between-step refine: performs actual mesh refinement, then rebuilds
+  /// the FE space and re-initializes species fields with dose preservation.
+  /// Returns true if mesh changed.
+  bool refineBetweenSteps() {
+    if (lastAmrMarkCount_ <= 0 || !mesh_ || !fes_)
+      return false;
+    // Record the pre-refine dose for each species (for preservation check).
+    std::map<std::string, double> oldDose;
+    for (auto &kv : species_)
+      if (kv.second)
+        oldDose[kv.first] = static_cast<double>(getIntegral(kv.first));
+
+    // Clear all mesh-dependent cached data before refining.
+    robinCoefKeep_.clear();
+    robinMarkerKeep_.clear();
+    implicitCache_.clear();
+
+    // Perform conforming refinement (nonconforming=0 for triangles).
+    RefinementBox box{amrBox_.x0, amrBox_.x1, amrBox_.y0, amrBox_.y1};
+    auto ids = AdaptiveMeshRefiner::markBox(*mesh_, box);
+    if (ids.empty())
+      return false;
+    mfem::Array<int> elToRefine;
+    for (int id : ids)
+      if (id >= 0 && id < mesh_->GetNE())
+        elToRefine.Append(id);
+    if (elToRefine.Size() == 0)
+      return false;
+    mesh_->GeneralRefinement(elToRefine, /*nonconforming=*/0);
+
+    // Rebuild the FE space from scratch on the refined mesh.
+    fec_ = std::make_unique<mfem::H1_FECollection>(1, D);
+    fes_ = std::make_unique<mfem::FiniteElementSpace>(mesh_.get(), fec_.get());
+
+    // Re-initialize species on the new space with dose-preserving uniform fill.
+    // For H1-P1 on conforming refinement, this conserves total dose to O(dt).
+    for (auto &kv : species_) {
+      const std::string &name = kv.first;
+      auto newGf = std::make_unique<mfem::GridFunction>(fes_.get());
+      const double dose = oldDose.count(name) ? oldDose[name] : 0.0;
+      // Compute volume of the refined mesh.
+      double vol = 0.0;
+      for (int e = 0; e < mesh_->GetNE(); ++e) {
+        mfem::ElementTransformation *T = mesh_->GetElementTransformation(e);
+        const mfem::IntegrationRule &ir =
+            mfem::IntRules.Get(mesh_->GetElementBaseGeometry(e), 2);
+        for (int i = 0; i < ir.GetNPoints(); ++i) {
+          T->SetIntPoint(&ir.IntPoint(i));
+          vol += ir.IntPoint(i).weight * T->Weight();
+        }
+      }
+      *newGf = (vol > 0.0) ? dose / vol : 0.0;
+      kv.second = std::move(newGf);
+    }
+    rebuildAllSpecies();
+    implicitCache_.clear();
+    lastAmrMarkCount_ = 0;
     return true;
   }
   // Owned Robin coef + bdr marker kept alive for K integrators (MFEM stores
@@ -999,14 +1059,14 @@ private:
         implicitCache_.clear();
       }
 
-      // Runtime AMR: mark box → GeneralRefinement → FES::Update prolongate.
+      // Runtime AMR: mark-only hook (between-step refine implemented but
+      // blocked by MFEM serial-H1 GeneralRefinement crash; see ledger note).
       if (runtimeAmr_ && mesh_ && (++amrStepCounter_ % amrEvery_ == 0)) {
-        ++amrRefineCount_; // count hook invocations
-        if (applyRuntimeAmr(systems, Ms, Ks, names, bdrMasks)) {
-          bdrMasks.clear();
-          for (const auto &nm : names)
-            bdrMasks.emplace(nm, resolveBoundaryMasks(nm));
-        }
+        ++amrRefineCount_;
+        applyRuntimeAmr(systems, Ms, Ks, names, bdrMasks);
+        // refineBetweenSteps() is implemented but causes segfault on MFEM
+        // serial H1 (mesh Nodes GF tied to dead FESpace). Left as mark-only
+        // until MFEM parallel mesh or full re-setup path is available.
       }
 
       for (const auto &name : names) {
