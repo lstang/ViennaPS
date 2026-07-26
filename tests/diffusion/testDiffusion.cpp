@@ -1864,6 +1864,7 @@ void TestPhase4Models() {
   VC_TEST_ASSERT(nitro.speciesNames()[0] == "Nitrogen");
 
   CopperDiffusion<double> cu;
+  cu.setIonPairing(1.0);
   VC_TEST_ASSERT(cu.getDiffusivity(1e20, 1273.0) >
                  cu.getDiffusivity(0.0, 1273.0));
 
@@ -2034,7 +2035,8 @@ void TestPhase4FullDepthFem() {
     cu->setIonPairing(0.0);
     cu->setChargeState(0.0); // disable drift for this test
     cu->setDriftEnabled(false);
-    cu->enablePairSpecies("CopperPair", "Boron");
+    cu->setPairSpecies("CopperPair");
+    cu->setAcceptorSpecies("Boron");
     // Moderate rates + small dt so the implicit-Euler pairing step does not
     // overshoot mobile Cu below zero (the engine does not yet clip per-step
     // reaction updates to non-negative values).

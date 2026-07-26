@@ -3,10 +3,16 @@
 /// MobileImpurity — general mobile impurity with ion-pairing and optional
 /// drift (Nernst–Planck): J = −D (∇C + (q/kT) z C E).
 ///
+/// The second template parameter `SpeciesTag` provides compile-time defaults
+/// (name, D0, Ea, charge, pairRate).  `GenericImpurityTag` preserves the
+/// existing runtime-string behaviour so all existing call sites compile
+/// unchanged.  See MobileImpurityTags.hpp for the tag definitions.
+///
 /// CopperDiffusion is a thin specialization of this class (Phase 4 Task 7–8).
 
 #include "../DiffusionModel.hpp"
 #include "../IntrinsicCarrier.hpp"
+#include "MobileImpurityTags.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -20,12 +26,13 @@ namespace viennaps {
 /// Boltzmann constant (eV/K) — shared default for drift terms.
 inline constexpr double kB_eV = 8.617333262145e-5;
 
-template <class NumericType>
+template <class NumericType, class SpeciesTag = GenericImpurityTag>
 class MobileImpurity : public DiffusionModel<NumericType> {
 public:
-  explicit MobileImpurity(std::string species = "Impurity",
+  explicit MobileImpurity(std::string species = SpeciesTag::name,
                           std::string pairSpecies = "")
-      : species_(std::move(species)), pairSpecies_(std::move(pairSpecies)) {
+      : species_(std::move(species)), pairSpecies_(std::move(pairSpecies)),
+        D0_(SpeciesTag::D0), z_(SpeciesTag::charge) {
     this->setName("MobileImpurity(" + species_ + ")");
   }
 
