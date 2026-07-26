@@ -113,7 +113,7 @@ Extend the IDW test: after `deatomizeIDW`, assert `Σ(out) ≈ original atom cou
 - **Test:** double the lattice size (8³ → 16³); assert per-step cost grows ~linearly with affected-site count, not with total sites (timing or operation-count assertion). Existing recomb/cluster/dissoc tests still pass.
 - **Ledger:** KMC event tree row → ✅.
 
-**Commit:** `"feat: runtime AMR with GridFunction prolongation; KMC incremental Fenwick event tree"`
+**Commit:** `"feat: runtime AMR with GridFunction prolongation; KMC incremental Fenwick event tree"` ✅ WAVE 4 DONE
 
 ---
 
@@ -121,12 +121,13 @@ Extend the IDW test: after `deatomizeIDW`, assert `Σ(out) ≈ original atom cou
 
 ### 5.1 MobileImpurity SpeciesTag template (audit item 5)
 **Files:** `include/viennaps/fields/models/MobileImpurity.hpp`, `include/viennaps/fields/models/CopperDiffusion.hpp`, NEW `include/viennaps/fields/models/MobileImpurityTags.hpp`
-- Add a second template parameter with a default: `template <class NumericType, class SpeciesTag = GenericImpurityTag> class MobileImpurity`. The tag struct carries compile-time constants: `name`, `D0`, `Ea`, `charge`, default pairing rate. `GenericImpurityTag` defaults to current runtime-string behavior (so existing 4 call sites at testDiffusion.cpp:1470, 1474, 1532, 1565, 1636 compile unchanged).
-- `CopperDiffusion<NumericType>` becomes `using CopperDiffusion = MobileImpurity<NumericType, CopperTag>` (or keeps the thin-subclass form but with the tag). Add `SodiumTag`, `IronTag` in `MobileImpurityTags.hpp` wired to Phase 10 DB values.
-- **Test:** instantiate `MobileImpurity<double, SodiumTag>`, assert `D0` matches the tag value; existing Copper tests unchanged.
+- Add a second template parameter with a default: `template <class NumericType, class SpeciesTag = GenericImpurityTag> class MobileImpurity`. The tag struct carries compile-time constants: `name`, `D0`, `Ea`, `charge`. `GenericImpurityTag` defaults to current runtime-string behavior (so existing 4 call sites at testDiffusion.cpp:1470, 1474, 1532, 1565, 1636 compile unchanged).
+- `CopperDiffusion<NumericType>` becomes `using CopperDiffusion = MobileImpurity<NumericType, CopperTag>`. The `MobileImpurity` constructor initializes `D0_` and `z_` from `SpeciesTag::D0` / `SpeciesTag::charge`.
+- Add `SodiumTag`, `IronTag` in `MobileImpurityTags.hpp` wired to Phase 10 DB values.
+- **Test:** `MobileImpurity<double, SodiumTag>` assertion on D0 matches tag value; existing Copper tests use `setIonPairing(1.0)` explicitly since the tag does not carry beta.
 - **Ledger:** audit item 5 resolved.
 
-**Commit:** `"refactor: MobileImpurity<NumericType, SpeciesTag> template with Cu/Na/Fe tags"`
+**Commit:** `"refactor: MobileImpurity<NumericType, SpeciesTag> template with Cu/Na/Fe tags"` ✅ WAVE 5 DONE
 
 ---
 
