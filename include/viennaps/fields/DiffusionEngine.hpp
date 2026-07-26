@@ -357,10 +357,10 @@ public:
     // the sum of basis-function integrals over each element's support,
     // giving the L1 integral when dotted with the GridFunction.
     mfem::ConstantCoefficient oneCoef(1.0);
-    mfem::LinearForm ones(fes_.get());
+    mfem::ParLinearForm ones(fes_.get());
     ones.AddDomainIntegrator(new mfem::DomainLFIntegrator(oneCoef));
     ones.Assemble();
-    const double dose = (*it->second) * ones;
+    const double dose = ones.InnerProduct(*it->second);
     return static_cast<NumericType>(dose);
   }
 
@@ -421,9 +421,9 @@ private:
   // added at most once per species (composing Fermi+Cdd on the same
   // species must not double-add dC/dt).
   struct SpeciesSystem {
-    std::unique_ptr<mfem::BilinearForm> K;
-    std::unique_ptr<mfem::BilinearForm> M;
-    std::unique_ptr<mfem::LinearForm> R;
+    std::unique_ptr<mfem::ParBilinearForm> K;
+    std::unique_ptr<mfem::ParBilinearForm> M;
+    std::unique_ptr<mfem::ParLinearForm> R;
   };
 
   // Returns the assembled systems for all species, keyed by name. The
@@ -473,9 +473,9 @@ private:
             speciesName + "'");
 
       SpeciesSystem sys;
-      sys.K = std::make_unique<mfem::BilinearForm>(fes_.get());
-      sys.M = std::make_unique<mfem::BilinearForm>(fes_.get());
-      sys.R = std::make_unique<mfem::LinearForm>(fes_.get());
+      sys.K = std::make_unique<mfem::ParBilinearForm>(fes_.get());
+      sys.M = std::make_unique<mfem::ParBilinearForm>(fes_.get());
+      sys.R = std::make_unique<mfem::ParLinearForm>(fes_.get());
 
       bool needTimeDeriv = true;
       for (const auto &model : physics_->models()) {
