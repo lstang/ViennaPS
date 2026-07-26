@@ -1321,20 +1321,24 @@ void TestParityGapClosures() {
   {
     auto m1 = mfem::Mesh::MakeCartesian2D(4, 4, mfem::Element::TRIANGLE);
     auto m2 = mfem::Mesh::MakeCartesian2D(8, 8, mfem::Element::TRIANGLE);
+    m1.SetCurvature(1, false);
+    m2.SetCurvature(1, false);
     mfem::H1_FECollection fec1(1, 2), fec2(1, 2);
-    mfem::FiniteElementSpace fes1(&m1, &fec1), fes2(&m2, &fec2);
-    mfem::GridFunction g1(&fes1), g2(&fes2);
+    mfem::ParMesh pm1(MPI_COMM_SELF, m1);
+    mfem::ParMesh pm2(MPI_COMM_SELF, m2);
+    mfem::ParFiniteElementSpace fes1(&pm1, &fec1), fes2(&pm2, &fec2);
+    mfem::ParGridFunction g1(&fes1), g2(&fes2);
     g1 = 1e18;
     g2 = 0.0;
     auto tr = SolutionTransfer::transferL2(g1, g2);
     std::cout << "[parity] L2 relErr=" << tr.relativeDoseError << "\n";
     VC_TEST_ASSERT(tr.ok);
     VC_TEST_ASSERT(tr.relativeDoseError <= 1e-3);
-    const int its = MovingMeshHandler::laplacianSmooth(m1, 2, 0.5);
+    const int its = MovingMeshHandler::laplacianSmooth(pm1, 2, 0.5);
     VC_TEST_ASSERT(its == 2);
-    const double ar = MovingMeshHandler::maxAspectRatio(m1);
+    const double ar = MovingMeshHandler::maxAspectRatio(pm1);
     VC_TEST_ASSERT(ar >= 1.0);
-    VC_TEST_ASSERT(!MovingMeshHandler::needsRemesh(m1, 100.0));
+    VC_TEST_ASSERT(!MovingMeshHandler::needsRemesh(pm1, 100.0));
   }
 
   // PDE reaction term drives decay via LinearReactionDiffusion.
@@ -1533,19 +1537,20 @@ void TestMovingMeshSolutionTransfer() {
   // --- Relabel Si(1) → SiO2(2) when progress crosses threshold.
   {
     auto mesh = mfem::Mesh::MakeCartesian2D(4, 4, mfem::Element::TRIANGLE);
-    for (int e = 0; e < mesh.GetNE(); ++e)
-      mesh.SetAttribute(e, 1);
-    auto none = MovingMeshHandler::relabelAttributes(mesh, 1, 2, /*progress=*/0.1,
+    mfem::ParMesh pmesh(MPI_COMM_SELF, mesh);
+    for (int e = 0; e < pmesh.GetNE(); ++e)
+      pmesh.SetAttribute(e, 1);
+    auto none = MovingMeshHandler::relabelAttributes(pmesh, 1, 2, /*progress=*/0.1,
                                                      /*threshold=*/0.5);
     VC_TEST_ASSERT(none.elementsRelabeled == 0);
     auto flipped = MovingMeshHandler::relabelAttributes(
-        mesh, 1, 2, /*progress=*/0.9, /*threshold=*/0.5);
+        pmesh, 1, 2, /*progress=*/0.9, /*threshold=*/0.5);
     std::cout << "[moving-mesh] relabel flipped=" << flipped.elementsRelabeled
               << "\n";
     VC_TEST_ASSERT(flipped.elementsRelabeled > 0);
     int nOx = 0;
-    for (int e = 0; e < mesh.GetNE(); ++e)
-      if (mesh.GetAttribute(e) == 2)
+    for (int e = 0; e < pmesh.GetNE(); ++e)
+      if (pmesh.GetAttribute(e) == 2)
         ++nOx;
     VC_TEST_ASSERT(nOx == flipped.elementsRelabeled);
   }
@@ -1553,10 +1558,10 @@ void TestMovingMeshSolutionTransfer() {
   // --- Free-surface lift: nonzero displacement on top nodes.
   {
     auto mesh = mfem::Mesh::MakeCartesian2D(4, 4, mfem::Element::TRIANGLE);
+    mesh.SetCurvature(1, false);
+    mfem::ParMesh pmesh(MPI_COMM_SELF, mesh);
     auto lift =
-        MovingMeshHandler::liftFreeSurface(mesh, /*yThresh=*/0.99, /*lift=*/0.05);
-    std::cout << "[moving-mesh] lift nodes=" << lift.nodesDisplaced
-              << " maxDisp=" << lift.maxDisplacement << "\n";
+        MovingMeshHandler::liftFreeSurface(pmesh, /*yThresh=*/0.99, /*lift=*/0.05);
     VC_TEST_ASSERT(lift.nodesDisplaced > 0);
     VC_TEST_ASSERT(lift.maxDisplacement > 0.0);
   }
@@ -1564,12 +1569,12 @@ void TestMovingMeshSolutionTransfer() {
   // --- Integral-preserving transfer: coarse → fine and coarse → coarser.
   // Source: uniform C=1e18 on 4x4 mesh → dose = 1e18 * area(1) = 1e18.
   auto makeUniform = [](int n, double C) {
-    auto mesh = std::make_unique<mfem::Mesh>(
-        mfem::Mesh::MakeCartesian2D(n, n, mfem::Element::TRIANGLE));
+    auto serialMesh = mfem::Mesh::MakeCartesian2D(n, n, mfem::Element::TRIANGLE);
+    auto mesh = std::make_unique<mfem::ParMesh>(MPI_COMM_SELF, serialMesh);
     auto fec = std::make_unique<mfem::H1_FECollection>(1, mesh->Dimension());
     auto fes =
-        std::make_unique<mfem::FiniteElementSpace>(mesh.get(), fec.get());
-    auto gf = std::make_unique<mfem::GridFunction>(fes.get());
+        std::make_unique<mfem::ParFiniteElementSpace>(mesh.get(), fec.get());
+    auto gf = std::make_unique<mfem::ParGridFunction>(fes.get());
     *gf = C;
     return std::make_tuple(std::move(mesh), std::move(fec), std::move(fes),
                            std::move(gf));

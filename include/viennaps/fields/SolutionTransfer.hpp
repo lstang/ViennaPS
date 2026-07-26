@@ -33,17 +33,17 @@ class SolutionTransfer {
 public:
 #ifdef VIENNAPS_HAS_MFEM
   /// L2 dual pairing with the constant-1 functional: ∫ C dV.
-  static double integrate(const mfem::GridFunction &gf) {
-    if (gf.Size() == 0 || !gf.FESpace())
+  static double integrate(const mfem::ParGridFunction &gf) {
+    if (gf.Size() == 0 || !gf.ParFESpace())
       return 0.0;
     mfem::ConstantCoefficient one(1.0);
-    mfem::LinearForm mass(const_cast<mfem::FiniteElementSpace *>(gf.FESpace()));
+    mfem::ParLinearForm mass(gf.ParFESpace());
     mass.AddDomainIntegrator(new mfem::DomainLFIntegrator(one));
     mass.Assemble();
     return gf * mass;
   }
 
-  static double meshVolume(mfem::Mesh &mesh) {
+  static double meshVolume(mfem::ParMesh &mesh) {
     double vol = 0.0;
     for (int e = 0; e < mesh.GetNE(); ++e) {
       mfem::ElementTransformation *T = mesh.GetElementTransformation(e);
@@ -61,7 +61,7 @@ public:
   /// Sample source GF at a physical point (FindPoints).
   class SourceSampleCoef : public mfem::Coefficient {
   public:
-    SourceSampleCoef(const mfem::GridFunction *src, mfem::Mesh *smesh)
+    SourceSampleCoef(const mfem::ParGridFunction *src, mfem::ParMesh *smesh)
         : src_(src), smesh_(smesh) {}
     double Eval(mfem::ElementTransformation &T,
                 const mfem::IntegrationPoint &ip) override {
@@ -82,22 +82,22 @@ public:
     int misses() const { return misses_; }
 
   private:
-    const mfem::GridFunction *src_;
-    mfem::Mesh *smesh_;
+    const mfem::ParGridFunction *src_;
+    mfem::ParMesh *smesh_;
     mutable int misses_ = 0;
   };
 
   /// L2 projection: solve M x = b with b_i = ∫ s(x) φ_i, then dose rescale.
   static TransferResult
-  transferL2(const mfem::GridFunction &source, mfem::GridFunction &target) {
+  transferL2(const mfem::ParGridFunction &source, mfem::ParGridFunction &target) {
     TransferResult r;
     r.doseSource = integrate(source);
-    if (target.Size() == 0 || !target.FESpace() || !source.FESpace()) {
+    if (target.Size() == 0 || !target.ParFESpace() || !source.ParFESpace()) {
       r.ok = false;
       return r;
     }
-    mfem::Mesh *smesh = source.FESpace()->GetMesh();
-    mfem::FiniteElementSpace *fes = target.FESpace();
+    mfem::ParMesh *smesh = source.ParFESpace()->GetParMesh();
+    mfem::ParFiniteElementSpace *fes = target.ParFESpace();
     if (!smesh || !fes) {
       r.ok = false;
       return r;
@@ -105,28 +105,35 @@ public:
 
     SourceSampleCoef coef(&source, smesh);
     mfem::ConstantCoefficient one(1.0);
-    mfem::BilinearForm M(fes);
+    mfem::ParBilinearForm M(fes);
     M.AddDomainIntegrator(new mfem::MassIntegrator(one));
     M.Assemble();
     M.Finalize();
 
-    mfem::LinearForm b(fes);
+    mfem::ParLinearForm b(fes);
     b.AddDomainIntegrator(new mfem::DomainLFIntegrator(coef));
     b.Assemble();
     r.unmappedQuadraturePoints = coef.misses();
 
-    mfem::SparseMatrix &Ms = M.SpMat();
-    mfem::GSSmoother prec(Ms);
+    mfem::HypreParMatrix *Mh = M.ParallelAssemble();
+    mfem::HypreBoomerAMG amg(*Mh);
+    amg.SetPrintLevel(0);
     target = 0.0;
-    mfem::CG(Ms, b, target, /*print_iter*/ 0, /*max_num_iter*/ 400,
-             /*RTOLERANCE*/ 1e-12, /*ATOLERANCE*/ 0.0);
+    mfem::HyprePCG pcg(*Mh);
+    pcg.SetPreconditioner(amg);
+    pcg.SetTol(1e-12);
+    pcg.SetMaxIter(400);
+    pcg.SetPrintLevel(0);
+    pcg.Mult(b, target);
+    delete Mh;
+
     r.doseTargetBeforeScale = integrate(target);
     if (r.doseSource > 0.0) {
       const double now = r.doseTargetBeforeScale;
       if (now > 0.0)
         target *= static_cast<mfem::real_t>(r.doseSource / now);
       else {
-        const double vol = meshVolume(*fes->GetMesh());
+        const double vol = meshVolume(*fes->GetParMesh());
         if (vol > 0.0)
           target = static_cast<mfem::real_t>(r.doseSource / vol);
       }
@@ -136,21 +143,20 @@ public:
     r.relativeDoseError =
         std::abs(r.doseTargetAfterScale - r.doseSource) / denom;
     r.ok = (r.relativeDoseError <= 1e-3);
-    (void)prec;
     return r;
   }
 
   /// Default transfer: L2 Mx=b path with integral-preserving rescale.
   static TransferResult
-  transferIntegralPreserving(const mfem::GridFunction &source,
-                             mfem::GridFunction &target) {
+  transferIntegralPreserving(const mfem::ParGridFunction &source,
+                             mfem::ParGridFunction &target) {
     return transferL2(source, target);
   }
 
   /// Same-size dof copy then optional rescale (identical FE spaces).
   static TransferResult
-  copyIntegralPreserving(const mfem::GridFunction &source,
-                         mfem::GridFunction &target) {
+  copyIntegralPreserving(const mfem::ParGridFunction &source,
+                         mfem::ParGridFunction &target) {
     if (target.Size() != source.Size())
       return transferIntegralPreserving(source, target);
     TransferResult r;
