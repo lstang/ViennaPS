@@ -43,8 +43,8 @@ Legend:
 | ChargedEquilibrium, Carbon detailed balance, Copper drift | ✅ |
 | Poly isotropic/anisotropic + GB FEM segregation residual | 🟡 | Anisotropic PWConst diffusivity + domain-integrated exchange proxy in `assembleReaction`; **NOT** the cited two-sided interior-face residual at `Poly_GI:Poly_GB` faces (Phase 5 plan requires MOOSE `InterfaceReaction` pattern). `enableGbSegregationSpecies` never called in tests. |
 | SiGe FEM + defect-mediated; SiGeC; **GeB pairing FEM**; **strain FEM** | 🟡 | Code-correct FEM assembly exists (`SiGeCDiffusion`, `GeBPairingModel`, `StrainDiffusionModel`); **none instantiated in any engine-solve test** - tests use the OLD 1D `applyStep`/`modifyD` paths. Regression-breaking the FEM paths would not be caught. |
-| III-V FEM + I/V eq; SPER + orientation | 🟡 | FEM stiffness + plain Arrhenius D (`IIIVDiffusion:40-45`); **NOT** the cited eq. 3-239/3-240 carrier-dependent D `(n/ni)`/`(p/ni)` on Ga/As sublattices (Phase 6 plan lines 295-330). 4-sublattice I/V equilibrium deferred (per plan line 383). SPER orientation ✅. |
-| Flash **FEM heat**; **MeltDiffusion FEM** (φ-dependent D) | 🟡 | Heat FEM ✅ (tested). `MeltDiffusion::assembleStiffness` φ-dependent D code-correct but **not exercised in any engine-solve test** (test asserts only `getDiffusivity(1.0)>getDiffusivity(0.0)`). Latent-heat `ρ·L·∂φ/∂t` coupling from eq. 213 absent. |
+| III-V FEM + I/V eq; SPER + orientation | 🟡 | FEM stiffness + carrier-dependent eq. 3-239/3-240 (donor `n/ni`, acceptor `p/ni`, mechanism-aware — Wave 3.1). GaAs/InP band data added. Test verifies Si (linear ratio=36324) vs Zn (quadratic ratio=5.5e8). 4-sublattice I/V equilibrium deferred. SPER orientation ✅. |
+| Flash **FEM heat**; **MeltDiffusion FEM** (φ-dependent D) | 🟡 | Heat FEM ✅ + latent heat `ρ·L·∂φ/∂t` coupling (Wave 2.3). MeltDiffusion φ-dependent D FEM tested (Wave 1: peak phi=0 vs phi=1). Full Allen-Cahn melting/crystallinity phase field still stretch. |
 | FDTD / full TMM / scanning laser / adjoint | ❌ | Stretch |
 
 ## Section 5: KMC — ✅ / stretch
