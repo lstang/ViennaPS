@@ -112,6 +112,9 @@
 
 #ifdef VIENNAPS_HAS_MFEM
 #include <mfem.hpp>
+#ifdef MFEM_USE_MPI
+#include <mpi.h>
+#endif
 
 namespace viennaps {
 
@@ -137,12 +140,21 @@ public:
       throw std::runtime_error(
           "DiffusionEngine::setMesh: mesh SpaceDimension does not match D");
 
-    mesh_ = std::move(mesh);
     attrs_ = &attrs;
+    // Defensive MPI init: ParMesh requires MPI_Init even on MPI_COMM_SELF.
+    int mpiInitFlag = 0;
+    MPI_Initialized(&mpiInitFlag);
+    if (!mpiInitFlag) {
+      mfem::Mpi::Init();
+    }
+    // Wrap serial mesh into ParMesh on MPI_COMM_SELF.
+    mesh_ = std::make_unique<mfem::ParMesh>(MPI_COMM_SELF, *mesh);
     fec_ = std::make_unique<mfem::H1_FECollection>(/*order*/ 1, /*dim*/ D);
-    fes_ = std::make_unique<mfem::FiniteElementSpace>(
+    fes_ = std::make_unique<mfem::ParFiniteElementSpace>(
         mesh_.get(), fec_.get());
     species_.clear();
+    allSpecies_.clear();
+    implicitCache_.clear();
   }
 
   /// Register the physics (species list + models + BCs + temperature).
@@ -201,8 +213,8 @@ public:
   void setSubCycles(int n) { subCycles_ = std::max(1, n); }
   int subCycles() const { return subCycles_; }
 
-  mfem::FiniteElementSpace *fes() { return fes_.get(); }
-  mfem::Mesh *mesh() { return mesh_.get(); }
+  mfem::ParFiniteElementSpace *fes() { return fes_.get(); }
+  mfem::ParMesh *mesh() { return mesh_.get(); }
 
   /// Set uniform value on dofs whose element support intersects attribute.
   void initializeSpeciesOnAttribute(const std::string &name, NumericType value,
@@ -322,7 +334,7 @@ public:
   }
 
   /// Read-only access to the species' current concentration field.
-  const mfem::GridFunction &getSolution(const std::string &name) const {
+  const mfem::ParGridFunction &getSolution(const std::string &name) const {
     auto it = species_.find(name);
     if (it == species_.end())
       throw std::runtime_error(
@@ -354,28 +366,29 @@ public:
 
 private:
   // ---- State ----------------------------------------------------------
-  std::unique_ptr<mfem::Mesh> mesh_;
+  std::unique_ptr<mfem::ParMesh> mesh_;
   std::unique_ptr<mfem::FiniteElementCollection> fec_;
-  std::unique_ptr<mfem::FiniteElementSpace> fes_;
+  std::unique_ptr<mfem::ParFiniteElementSpace> fes_;
   const MeshAttributes *attrs_ = nullptr;
   DiffusionPhysics<NumericType> *physics_ = nullptr;
 
   // Per-species GridFunctions on `fes_`. Same lifetime as the engine; the
   // TimeDependentOperator and ImplicitEuler paths read/write these through
   // the `allSpecies_` map built in `rebuildAllSpecies()`.
-  std::map<std::string, std::unique_ptr<mfem::GridFunction>> species_;
-  std::map<std::string, mfem::GridFunction *> allSpecies_;
+  std::map<std::string, std::unique_ptr<mfem::ParGridFunction>> species_;
+  std::map<std::string, mfem::ParGridFunction *> allSpecies_;
 
   // ---- Helpers --------------------------------------------------------
 
-  mfem::GridFunction *ensureSpecies(const std::string &name) {
+  mfem::ParGridFunction *ensureSpecies(const std::string &name) {
     auto it = species_.find(name);
     if (it != species_.end())
       return it->second.get();
-    auto gf = std::make_unique<mfem::GridFunction>(fes_.get());
+    auto gf = std::make_unique<mfem::ParGridFunction>(fes_.get());
     *gf = mfem::real_t(0);
-    mfem::GridFunction *raw = gf.get();
-    species_.emplace(name, std::move(gf));
+    mfem::ParGridFunction *raw = gf.get();
+    species_[name] = std::move(gf);
+    allSpecies_[name] = species_[name].get();
     return raw;
   }
 
