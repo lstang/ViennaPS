@@ -951,9 +951,9 @@ void TestFemClosures() {
       engine.setPhysics(physics);
       // Non-uniform IC: spike on left half so diffusion spreads it.
       engine.initializeSpecies("Boron", 0.0);
-      mfem::GridFunction &gf =
-          const_cast<mfem::GridFunction &>(engine.getSolution("Boron"));
-      mfem::Mesh *mesh = gf.FESpace()->GetMesh();
+      mfem::ParGridFunction &gf =
+          const_cast<mfem::ParGridFunction &>(engine.getSolution("Boron"));
+      mfem::ParMesh *mesh = gf.ParFESpace()->GetParMesh();
       double xMin = std::numeric_limits<double>::max();
       double xMax = std::numeric_limits<double>::lowest();
       for (int i = 0; i < mesh->GetNV(); ++i) {
@@ -1015,9 +1015,9 @@ void TestFemClosures() {
     // Non-uniform IC: spike on the left half so diffusion can spread it.
     engine.initializeSpecies("Boron", 0.0);
     engine.initializeSpecies("MeltFraction", phiInit);
-    mfem::GridFunction &gf =
-        const_cast<mfem::GridFunction &>(engine.getSolution("Boron"));
-    mfem::Mesh *m = gf.FESpace()->GetMesh();
+    mfem::ParGridFunction &gf =
+        const_cast<mfem::ParGridFunction &>(engine.getSolution("Boron"));
+    mfem::ParMesh *m = gf.ParFESpace()->GetParMesh();
     double xMin = std::numeric_limits<double>::max();
     double xMax = std::numeric_limits<double>::lowest();
     for (int i = 0; i < m->GetNV(); ++i) {
@@ -1075,17 +1075,17 @@ void TestFemClosures() {
       // Set previous phi to 0 so ∂φ/∂t = (1 - 0)/dt > 0 (melting).
       // We approximate by setting MeltFraction high now; the previousPhi
       // pointer is set to a zero GF via a throwaway.
-      mfem::GridFunction &mfGf =
-          const_cast<mfem::GridFunction &>(engine.getSolution("MeltFraction"));
+      mfem::ParGridFunction &mfGf =
+          const_cast<mfem::ParGridFunction &>(engine.getSolution("MeltFraction"));
       mfGf = 1.0; // current phi = 1 (fully melted)
       // Create a zero previous-phi GF on the same space.
-      auto &fes = *mfGf.FESpace();
-      auto prevPhi = std::make_shared<mfem::GridFunction>(&fes);
+      auto *pfes = mfGf.ParFESpace();
+      auto prevPhi = std::make_shared<mfem::ParGridFunction>(pfes);
       *prevPhi = 0.0;
       heat->setPreviousPhi(prevPhi.get());
       // Keep prevPhi alive by storing on the engine via a static (test hack;
       // production: the orchestrator owns the previous-step state).
-      static std::shared_ptr<mfem::GridFunction> sPrevPhi;
+      static std::shared_ptr<mfem::ParGridFunction> sPrevPhi;
       sPrevPhi = prevPhi;
     }
     engine.solve(0.0, 0.1, 0.1);
@@ -2145,9 +2145,9 @@ void TestPhase4FullDepthFem() {
 
     // Non-uniform IC: spike at x ~ 0 (left edge), zero elsewhere.
     engine.initializeSpecies("Copper", 0.0);
-    mfem::GridFunction &gf =
-        const_cast<mfem::GridFunction &>(engine.getSolution("Copper"));
-    mfem::Mesh *m = gf.FESpace()->GetMesh();
+    mfem::ParGridFunction &gf =
+        const_cast<mfem::ParGridFunction &>(engine.getSolution("Copper"));
+    mfem::ParMesh *m = gf.ParFESpace()->GetParMesh();
     double xMin = std::numeric_limits<double>::max();
     double xMax = std::numeric_limits<double>::lowest();
     for (int i = 0; i < m->GetNV(); ++i) {

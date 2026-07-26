@@ -360,7 +360,7 @@ public:
     mfem::ParLinearForm ones(fes_.get());
     ones.AddDomainIntegrator(new mfem::DomainLFIntegrator(oneCoef));
     ones.Assemble();
-    const double dose = ones.InnerProduct(*it->second);
+    const double dose = ones(*it->second);
     return static_cast<NumericType>(dose);
   }
 
@@ -376,7 +376,10 @@ private:
   // TimeDependentOperator and ImplicitEuler paths read/write these through
   // the `allSpecies_` map built in `rebuildAllSpecies()`.
   std::map<std::string, std::unique_ptr<mfem::ParGridFunction>> species_;
-  std::map<std::string, mfem::ParGridFunction *> allSpecies_;
+  // Non-owning base-class view of species_ for model hooks.
+  // Model hooks take map<string, GridFunction*>, so we store GridFunction*
+  // even though the actual objects are ParGridFunction.
+  std::map<std::string, mfem::GridFunction *> allSpecies_;
 
   // ---- Helpers --------------------------------------------------------
 
@@ -914,7 +917,8 @@ private:
   //     (Phase 2 concern; the gate `bool nonlinearK_` is false in Phase 1)
   // --------------------------------------------------------------------
   struct ImplicitCache {
-    std::unique_ptr<mfem::BilinearForm> A; // eliminated system matrix + M_e
+    std::unique_ptr<mfem::ParBilinearForm> A_bf; // eliminated system + mat_e (for RHS shift)
+    std::unique_ptr<mfem::HypreParMatrix> A;      // ParallelAssemble(A_bf) — for solve
     mfem::Array<int> essVdofs;             // essential vdofs (for RHS shift)
     NumericType dtCached = NumericType(-1);
   };
@@ -993,13 +997,13 @@ private:
 
     // Rebuild the FE space from scratch on the refined mesh.
     fec_ = std::make_unique<mfem::H1_FECollection>(1, D);
-    fes_ = std::make_unique<mfem::FiniteElementSpace>(mesh_.get(), fec_.get());
+    fes_ = std::make_unique<mfem::ParFiniteElementSpace>(mesh_.get(), fec_.get());
 
     // Re-initialize species on the new space with dose-preserving uniform fill.
     // For H1-P1 on conforming refinement, this conserves total dose to O(dt).
     for (auto &kv : species_) {
       const std::string &name = kv.first;
-      auto newGf = std::make_unique<mfem::GridFunction>(fes_.get());
+      auto newGf = std::make_unique<mfem::ParGridFunction>(fes_.get());
       const double dose = oldDose.count(name) ? oldDose[name] : 0.0;
       // Compute volume of the refined mesh.
       double vol = 0.0;
@@ -1088,16 +1092,16 @@ private:
 
         // Build or fetch cached eliminated system matrix for this (species, dt).
         auto &cache = implicitCache_[name];
-        const bool dtChanged = !cache.A || cache.dtCached != dt;
+        const bool dtChanged = !cache.A_bf || cache.dtCached != dt;
         if (dtChanged) {
-          // A = M + dt*K + dt*BoundaryMass(h)  (Robin dose-loss).
-          cache.A = std::make_unique<mfem::BilinearForm>(fes_.get());
+          // A_bf = M + dt*K + dt*BoundaryMass(h)  (Robin dose-loss).
+          cache.A_bf = std::make_unique<mfem::ParBilinearForm>(fes_.get());
           mfem::ConstantCoefficient oneCoef(1.0);
-          cache.A->AddDomainIntegrator(new mfem::MassIntegrator(oneCoef));
-          cache.A->Assemble();
+          cache.A_bf->AddDomainIntegrator(new mfem::MassIntegrator(oneCoef));
+          cache.A_bf->Assemble();
           // K already includes Robin boundary mass from assembleAllSpecies.
-          cache.A->SpMat().Add(dtd, *Ks[name]);
-          cache.A->Finalize();
+          cache.A_bf->SpMat().Add(dtd, *Ks[name]);
+          cache.A_bf->Finalize();
 
           // Resolve essential vdofs as a LIST (EliminateVDofs takes a list,
           // not a marker array).
@@ -1108,10 +1112,12 @@ private:
             cache.essVdofs = essMarker;
             // Eliminate essential vdofs from A, storing the off-diagonal
             // entries in mat_e (used by EliminateVDofsInRHS each step).
-            cache.A->EliminateVDofs(
+            cache.A_bf->EliminateVDofs(
                 cache.essVdofs, mfem::Operator::DiagonalPolicy::DIAG_ONE);
-            cache.A->Finalize();
+            cache.A_bf->Finalize();
           }
+          // Build HypreParMatrix from the eliminated ParBilinearForm
+          cache.A.reset(cache.A_bf->ParallelAssemble());
           cache.dtCached = dt;
         }
 
@@ -1124,7 +1130,7 @@ private:
 
         if (masks.neumannAttrMarker.Size() > 0 &&
             masks.neumannAttrMarker.Max() > 0) {
-          mfem::LinearForm bndRHS(fes_.get());
+          mfem::ParLinearForm bndRHS(fes_.get());
           // MFEM requires non-const Array& for the bdr marker.
           mfem::Array<int> neumannMarker = masks.neumannAttrMarker;
           bndRHS.AddBoundaryIntegrator(
@@ -1143,15 +1149,20 @@ private:
           mfem::Vector uStamp = gf; // copy: ndof-sized Vector view of gf
           for (int i = 0; i < cache.essVdofs.Size(); ++i)
             uStamp(cache.essVdofs[i]) = masks.dirichletValue;
-          cache.A->EliminateVDofsInRHS(cache.essVdofs, uStamp, b);
+          cache.A_bf->EliminateVDofsInRHS(cache.essVdofs, uStamp, b);
         }
 
-        // Solve A u_{n+1} = b against the eliminated A.
-        auto bundle = makeMassSolver();
-        bundle->cg->SetOperator(cache.A->SpMat());
+        // Solve A u_{n+1} = b against the eliminated HypreParMatrix.
+        mfem::HypreBoomerAMG amg(*cache.A);
+        amg.SetPrintLevel(0);
+        mfem::HyprePCG pcg(*cache.A);
+        pcg.SetPreconditioner(amg);
+        pcg.SetTol(1e-9);
+        pcg.SetMaxIter(500);
+        pcg.SetPrintLevel(0);
         mfem::Vector unext(ndof);
         unext = 0.0;
-        bundle->cg->Mult(b, unext);
+        pcg.Mult(b, unext);
 
         mfem::Vector gfVec(gf.GetData(), ndof);
         gfVec = unext;
