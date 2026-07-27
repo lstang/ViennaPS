@@ -32,7 +32,7 @@ Legend:
 | MovingMesh relabel/ALE/Laplacian/remesh trigger | ✅ | Relabel + ALE displacement + Laplacian smoothing implemented; quality-triggered remesh is the follow-up marker |
 | SolutionTransfer L2 Mx=b | ✅ | |
 | AdaptiveMeshRefiner mark/refine/ZZ/threshold/derefine API | ✅ | NC derefine no-op on serial Cartesian |
-| Runtime AMR in solve | 🟡 | Mark-count hook runs mid-solve (Euler path) but `GeneralRefinement` + prolongation causes segfault on serial H1 (MFEM `Update()` issue). Offline `refineMarked` works. `refineMarkedWithProlongation` helper exists but is dead code (never called at runtime). Needs MFEM-side fix or workaround (e.g. between-step refine). |
+| Runtime AMR in solve | ✅ | ParMesh `GeneralRefinement(nonconforming=1)` + `ParFESpace::Update(true)` + per-species `ParGF::Update()` prolongation + `UpdatesFinished()`. Root cause of prior crash was a missing NCMesh (conforming ParMesh can't do nonconforming refinement) — fixed by `EnsureNCMesh(true)` in `setMesh` before ParMesh wrapping. Dose preserved to machine precision (rel_diff=6.4e-16), mesh grew 32→512 elements over 2 refines. `TestRuntimeAmrDosePreservation` asserts dose <0.1% + element count increase + refine count >0. AMR fires on implicit-Euler path; CVODE path forces implicit Euler with a one-time warning (CVODE AMR out of scope). |
 | Boundary-conforming Delaunay / marching cubes | ❌ | Stretch F6 |
 
 ## Section 4: Continuum models — ✅ / stretch
@@ -80,7 +80,7 @@ Legend:
 
 1. ✅ Moving mesh + remesh trigger + Laplacian  
 2. ✅ L2 solution transfer  
-3. 🟡 Runtime AMR: mark hook works; between-step `refineBetweenSteps()` implemented but MFEM serial-H1 crash on `GeneralRefinement` (mesh Nodes GF tied to dead FESpace). Offline `refineMarked` + `setMesh` rebuild works. Needs MFEM parallel mesh or between-solve full re-setup.
+3. ✅ Runtime AMR: ParMesh `GeneralRefinement(nonconforming=1)` + `ParFESpace::Update(true)` + `ParGF::Update()` prolongation. Root cause of prior crash was a missing NCMesh, not an MFEM bug — fixed by `EnsureNCMesh(true)` in `setMesh`. `TestRuntimeAmrDosePreservation` passes (dose rel_diff=6.4e-16, ne 32→512, 2 refines). See review `2026-07-27-parmesh-amr-task8-review.md`.
 4. ✅ Jacobian strategy (b) path  
 5. ✅ 3D LevelSetToMesh Cartesian  
 6. ✅ PDE reaction + IC  

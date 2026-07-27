@@ -247,6 +247,18 @@ public:
     mass.Assemble();
     return gf * mass;
   }
+
+#ifdef MFEM_USE_MPI
+  /// ParGridFunction overload (Task 10): dose via ParLinearForm inner
+  /// product. On MPI_COMM_SELF this matches the serial result exactly.
+  static double dose(const mfem::ParGridFunction &gf) {
+    mfem::ConstantCoefficient one(1.0);
+    mfem::ParLinearForm mass(gf.ParFESpace());
+    mass.AddDomainIntegrator(new mfem::DomainLFIntegrator(one));
+    mass.Assemble();
+    return mass(gf);
+  }
+#endif
 #endif
 
   static double dose(const std::vector<double> &field, double dx) {

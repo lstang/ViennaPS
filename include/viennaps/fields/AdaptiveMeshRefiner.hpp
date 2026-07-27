@@ -134,6 +134,41 @@ public:
     return static_cast<int>(el_to_refine.Size());
   }
 
+#ifdef MFEM_USE_MPI
+  /// ParMesh overload (Task 9): nonconforming refinement +
+  /// ParFiniteElementSpace::Update prolongation for ParGridFunctions.
+  /// This is the safe AMR path used by DiffusionEngine::refineBetweenSteps.
+  /// nonconforming=1 allows hanging nodes via constraints.
+  static int
+  refineMarkedWithProlongation(mfem::ParMesh &mesh,
+                               mfem::ParFiniteElementSpace &fes,
+                               const std::vector<int> &elemIds,
+                               std::vector<mfem::ParGridFunction *> &gfs) {
+    if (elemIds.empty())
+      return 0;
+    mfem::Array<int> el_to_refine;
+    for (int id : elemIds)
+      if (id >= 0 && id < mesh.GetNE())
+        el_to_refine.Append(id);
+    if (el_to_refine.Size() == 0)
+      return 0;
+
+    mesh.GeneralRefinement(el_to_refine, /*nonconforming=*/1);
+    fes.Update(true);
+    for (auto *gf : gfs)
+      gf->Update();
+    fes.UpdatesFinished();
+    return static_cast<int>(el_to_refine.Size());
+  }
+
+  /// markBox overload for ParMesh (ParMesh derives from Mesh, but provide
+  /// an explicit overload for type-safe ParMesh callers).
+  static std::vector<int> markBox(mfem::ParMesh &mesh,
+                                  const RefinementBox &box) {
+    return markBox(static_cast<mfem::Mesh &>(mesh), box);
+  }
+#endif
+
   /// Gradient-based marking: elements with |∇u| ≥ fraction * max|∇u|.
   static std::vector<int> markByGradient(mfem::Mesh &mesh,
                                          const mfem::GridFunction &u,

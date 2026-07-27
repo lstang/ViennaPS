@@ -2934,6 +2934,160 @@ void TestMultiSpeciesSmoke() {
   VC_TEST_ASSERT(phosphorusRelDiff < 1e-6);
 }
 
+/// Task 8 Step 3: runtime AMR via ParMesh GeneralRefinement +
+/// ParFESpace::Update + ParGF::Update prolongation. After refinement:
+///   (a) dose must be preserved to 0.1% (prolongation is L2-projective)
+///   (b) mesh element count must increase (refinement actually happened)
+///   (c) amrRefineCount_ must be > 0 (the engine counted refinements)
+/// This is the regression guard against the false-closure pattern where
+/// refineBetweenSteps returned true without calling GeneralRefinement.
+void TestRuntimeAmrDosePreservation() {
+  MeshAttributes attrs;
+  attrs.setAttributeName(1, "Si");
+
+  auto mesh = std::make_unique<mfem::Mesh>(
+      mfem::Mesh::MakeCartesian2D(4, 4, mfem::Element::TRIANGLE));
+
+  DiffusionEngine<double, 2> engine;
+  engine.setMesh(std::move(mesh), attrs);
+
+  // Enable runtime AMR: refine the whole domain (box covers [0,1]^2)
+  // every step, up to amrMaxLevels_=2.
+  engine.setRuntimeAmrBox(0.0, 1.0, 0.0, 1.0, /*everyNSteps=*/1);
+  // Use implicit Euler for deterministic behavior.
+  engine.setForceImplicitEuler(true);
+
+  auto model = std::make_shared<ConstantDiffusion<double>>("Boron");
+  model->setDiffusivity(1e-8, 0.0);
+  DiffusionPhysics<double> physics;
+  physics.addSpecies("Boron");
+  physics.addModel(model);
+  physics.setTemperature(1273.15);
+  engine.setPhysics(physics);
+
+  engine.initializeSpecies("Boron", 1e18);
+  const double doseInitial = engine.getIntegral("Boron");
+  const int neInitial = engine.mesh()->GetNE();
+
+  // Solve 3 steps; AMR triggers every step but maxLevels=2 caps at 2 refines.
+  engine.solve(0.0, 3.0, 1.0);
+
+  const double doseFinal = engine.getIntegral("Boron");
+  const int neFinal = engine.mesh()->GetNE();
+  const double relDiff =
+      std::abs(doseFinal - doseInitial) / std::abs(doseInitial);
+
+  std::cout << "[runtime-amr] dose_initial=" << doseInitial
+            << " dose_final=" << doseFinal << " rel_diff=" << relDiff
+            << " ne_initial=" << neInitial << " ne_final=" << neFinal
+            << " refine_count=" << engine.runtimeAmrRefineCount() << "\n";
+
+  // (a) Dose preserved to 0.1% — prolongation is L2-projective so this
+  //     should hold to machine precision for a uniform IC; 0.1% is a wide
+  //     margin that still catches false-closure (where no prolongation
+  //     happens but the field is re-initialized to dose/volume).
+  VC_TEST_ASSERT(relDiff < 1e-3);
+  // (b) Mesh actually refined — element count must increase.
+  VC_TEST_ASSERT(neFinal > neInitial);
+  // (c) Engine counted refinements.
+  VC_TEST_ASSERT(engine.runtimeAmrRefineCount() > 0);
+}
+
+/// Tighter AMR test: non-uniform IC (left-quarter spike) distinguishes
+/// true prolongation from the false-closure pattern. With a uniform IC,
+/// both true prolongation AND false-closure (re-init to dose/volume)
+/// conserve dose — the uniform-IC test above can't tell them apart. With
+/// a non-uniform IC, true prolongation preserves the spatial distribution
+/// (peak stays high on the left), while false-closure flattens it to
+/// uniform (peak == average). The "peak > average" check catches the
+/// false-closure pattern that TestRuntimeAmrDosePreservation misses.
+void TestRuntimeAmrNonUniformIC() {
+  MeshAttributes attrs;
+  attrs.setAttributeName(1, "Si");
+
+  auto mesh = std::make_unique<mfem::Mesh>(
+      mfem::Mesh::MakeCartesian2D(4, 4, mfem::Element::TRIANGLE));
+
+  DiffusionEngine<double, 2> engine;
+  engine.setMesh(std::move(mesh), attrs);
+  engine.setRuntimeAmrBox(0.0, 1.0, 0.0, 1.0, /*everyNSteps=*/1);
+  engine.setForceImplicitEuler(true);
+
+  auto model = std::make_shared<ConstantDiffusion<double>>("Boron");
+  // Small D: diffusion length sqrt(D*t) = sqrt(1e-8*1) = 1e-4, much
+  // smaller than the mesh size (0.25). The spike won't spread in 1s,
+  // so the peak should barely change — any peak loss is from the AMR
+  // transfer, not physics.
+  model->setDiffusivity(1e-8, 0.0);
+  DiffusionPhysics<double> physics;
+  physics.addSpecies("Boron");
+  physics.addModel(model);
+  physics.setTemperature(1273.15);
+  engine.setPhysics(physics);
+
+  // Non-uniform IC: left-quarter spike at 2e18, rest at 0.
+  engine.initializeSpecies("Boron", 0.0);
+  mfem::ParGridFunction &gf =
+      const_cast<mfem::ParGridFunction &>(engine.getSolution("Boron"));
+  mfem::ParMesh *m = gf.ParFESpace()->GetParMesh();
+  double xMin = std::numeric_limits<double>::max();
+  double xMax = std::numeric_limits<double>::lowest();
+  for (int i = 0; i < m->GetNV(); ++i) {
+    xMin = std::min(xMin, m->GetVertex(i)[0]);
+    xMax = std::max(xMax, m->GetVertex(i)[0]);
+  }
+  const double dx = (xMax - xMin) / 4.0;
+  for (int i = 0; i < gf.Size(); ++i) {
+    double xv[2] = {0.0, 0.0};
+    gf.FESpace()->GetMesh()->GetNode(i, xv);
+    if (xv[0] <= xMin + dx)
+      gf[i] = 2e18;
+  }
+
+  const double doseInitial = engine.getIntegral("Boron");
+  const int neInitial = engine.mesh()->GetNE();
+  double peakInitial = 0.0;
+  for (int i = 0; i < gf.Size(); ++i)
+    peakInitial = std::max(peakInitial, gf(i));
+
+  // Solve 1 step; AMR triggers once.
+  engine.solve(0.0, 1.0, 1.0);
+
+  const double doseFinal = engine.getIntegral("Boron");
+  const int neFinal = engine.mesh()->GetNE();
+  double peakFinal = 0.0;
+  for (int i = 0; i < gf.Size(); ++i)
+    peakFinal = std::max(peakFinal, gf(i));
+  // Average concentration = dose / domain area. MakeCartesian2D(4,4)
+  // produces a [0,1]^2 mesh, so area = 1.0.
+  const double avgFinal = doseFinal / 1.0;
+  const double doseRelDiff =
+      std::abs(doseFinal - doseInitial) / std::abs(doseInitial);
+
+  std::cout << "[runtime-amr-nonuniform] dose_initial=" << doseInitial
+            << " dose_final=" << doseFinal << " rel_diff=" << doseRelDiff
+            << " peak_initial=" << peakInitial << " peak_final=" << peakFinal
+            << " avg_final=" << avgFinal << " peak/avg=" << peakFinal / avgFinal
+            << " ne_initial=" << neInitial << " ne_final=" << neFinal
+            << " refine_count=" << engine.runtimeAmrRefineCount() << "\n";
+
+  // (a) Dose preserved to 0.1%.
+  VC_TEST_ASSERT(doseRelDiff < 1e-3);
+  // (b) Mesh refined.
+  VC_TEST_ASSERT(neFinal > neInitial);
+  // (c) Peak preserved: true prolongation keeps the spatial structure.
+  //     D=1e-8, t=1.0 → negligible diffusion (Fourier ~1e-7), so the
+  //     peak should barely change. Allow 5% for prolongation + solve noise.
+  VC_TEST_ASSERT(peakFinal > 0.95 * peakInitial);
+  // (d) Peak significantly above average — spatial structure preserved,
+  //     NOT flattened to uniform. If false-closure re-init to dose/volume
+  //     happened, peakFinal ≈ avgFinal (ratio ~1.0). True prolongation
+  //     keeps peak/avg ~2.7 (left-quarter spike at 2e18; H1-P1 linear
+  //     interpolation between the spike and zero adds dose, so the actual
+  //     average ~7.5e17, not the 5e17 a perfect step function would give).
+  VC_TEST_ASSERT(peakFinal > 1.5 * avgFinal);
+}
+
 int main() {
   try {
     TestIntrinsicCarrier();
@@ -2980,6 +3134,8 @@ int main() {
     TestNeumannBC();
     TestMultiSpeciesSmoke();
     TestReentrantSolve();
+    TestRuntimeAmrDosePreservation();
+    TestRuntimeAmrNonUniformIC();
     TestFemClosures();
     TestKmcIdwDoseConservation();
     std::cout << "All diffusion tests passed.\n";

@@ -30,6 +30,21 @@ public:
       }
     }
   }
+
+#ifdef MFEM_USE_MPI
+  /// ParMesh overload (Task 10): retag elements on a parallel mesh.
+  /// On MPI_COMM_SELF this is identical to the serial path.
+  static void convertMesh(mfem::ParMesh &mesh, MeshAttributes &attrs,
+                          int fromAttr, int toAttr,
+                          const std::string &newMaterial) {
+    attrs.setAttributeName(toAttr, newMaterial);
+    for (int e = 0; e < mesh.GetNE(); ++e) {
+      if (mesh.GetAttribute(e) == fromAttr) {
+        mesh.SetAttribute(e, toAttr);
+      }
+    }
+  }
+#endif
 #endif
 };
 

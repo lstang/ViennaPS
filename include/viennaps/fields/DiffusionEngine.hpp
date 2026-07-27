@@ -147,6 +147,17 @@ public:
     if (!mpiInitFlag) {
       mfem::Mpi::Init();
     }
+    // Convert the serial mesh to nonconforming (NCMesh) BEFORE wrapping
+    // into ParMesh. ParMesh(MPI_COMM_SELF, mesh) inherits the mesh's NCMesh
+    // state — a conforming serial mesh produces a conforming ParMesh that
+    // CANNOT do GeneralRefinement(nonconforming=1) (MFEM aborts with
+    // "Can't convert conforming ParMesh to nonconforming ParMesh").
+    // simplices_nonconforming=true enables nonconforming refinement of
+    // triangle/tetrahedron meshes; for quad/hex meshes the flag is a no-op.
+    // This is the root cause of the AMR crash that was previously
+    // misdiagnosed as "MSVC+MFEM static-initializer heap corruption" — it
+    // was always a missing NCMesh, not a build/CRT issue.
+    mesh->EnsureNCMesh(true);
     // Wrap serial mesh into ParMesh on MPI_COMM_SELF.
     mesh_ = std::make_unique<mfem::ParMesh>(MPI_COMM_SELF, *mesh);
     fec_ = std::make_unique<mfem::H1_FECollection>(/*order*/ 1, /*dim*/ D);
@@ -317,6 +328,15 @@ public:
     // Dirichlet BCs via operator essential-dof enforcement, multi-species
     // packed-block state layout.
     //
+    // Runtime AMR (ParMesh GeneralRefinement + prolongation) is currently
+    // implemented ONLY on the implicit-Euler path. If a user enables AMR
+    // (`setRuntimeAmrBox`) on a SUNDIALS build, force implicit Euler and
+    // warn once — silently skipping AMR on CVODE would be a false-closure
+    // hazard. Adding AMR to solveCVODE requires rebuilding the
+    // DiffusionRHSOperator's packed-state layout + per-species solvers
+    // mid-integration and is out of scope for the ParMesh AMR plan
+    // (Task 8 targets the implicit-Euler path).
+    //
     // CVODE's per-call inner CG solves MUST set `iterative_mode = false`
     // (see DiffusionRHSOperator::Mult and SUNImplicitSolve). Without it,
     // CGSolver defaults to using the input x vector as the initial guess,
@@ -324,10 +344,20 @@ public:
     // previous Mult calls - leading to NaN on the second solve() call.
     // This was the root cause of F9, now resolved.
 #ifdef MFEM_USE_SUNDIALS
-    if (forceImplicitEuler_)
+    if (forceImplicitEuler_ || runtimeAmr_) {
+      if (runtimeAmr_ && !forceImplicitEuler_) {
+        static thread_local bool warnedAmrCvode = false;
+        if (!warnedAmrCvode) {
+          warnedAmrCvode = true;
+          std::cerr << "[DiffusionEngine] WARNING: runtime AMR is enabled "
+                       "but CVODE AMR is not implemented; forcing implicit "
+                       "Euler so refinement runs.\n";
+        }
+      }
       solveImplicitEuler(tStart, tEnd, dtMax);
-    else
+    } else {
       solveCVODE(tStart, tEnd, dtMax);
+    }
 #else
     solveImplicitEuler(tStart, tEnd, dtMax);
 #endif
@@ -938,48 +968,21 @@ private:
     double x0 = 0, x1 = 1, y0 = 0, y1 = 1;
   } amrBox_{};
 
-  /// Refine marked box; MFEM Update() prolongates GridFunctions in
-  /// place. Returns number of elements refined.
-  bool applyRuntimeAmr(std::map<std::string, SpeciesSystem> &systems,
-                       std::map<std::string, const mfem::SparseMatrix *> &Ms,
-                       std::map<std::string, const mfem::SparseMatrix *> &Ks,
-                       const std::vector<std::string> &names,
-                       std::map<std::string, BdrMasks> &bdrMasks) {
+  /// Between-step refine: performs nonconforming refinement using ParMesh
+  /// GeneralRefinement + ParFiniteElementSpace::Update prolongation.
+  /// Returns true if mesh changed. On a false return (nothing to refine or
+  /// max levels reached), no mesh-dependent state is touched — the caller
+  /// can safely continue the solve with the existing assembled systems.
+  ///
+  /// This is the safe AMR path that the serial Mesh crash blocked. The
+  /// previous approach rebuilt fec_/fes_ from scratch after refinement,
+  // which destroyed the ParFiniteElementSpace that ParMesh::GetNodes()
+  // references via raw pointer — a use-after-free, NOT an MFEM bug. The
+  // Update+prolongation approach mutates the FESpace in place, so the
+  // Nodes ParGridFunction's FESpace pointer stays valid.
+  bool refineBetweenSteps() {
     if (amrLevelsDone_ >= amrMaxLevels_ || !mesh_ || !fes_)
       return false;
-    RefinementBox box{amrBox_.x0, amrBox_.x1, amrBox_.y0, amrBox_.y1};
-    auto ids = AdaptiveMeshRefiner::markBox(*mesh_, box);
-    if (ids.empty()) {
-      ids.resize(static_cast<std::size_t>(mesh_->GetNE()));
-      for (int e = 0; e < mesh_->GetNE(); ++e)
-        ids[static_cast<std::size_t>(e)] = e;
-    }
-    int n = static_cast<int>(ids.size());
-    if (n <= 0)
-      return false;
-    lastAmrMarkCount_ = n;
-    ++amrLevelsDone_;
-    return true;
-  }
-
-  /// Between-step refine: performs actual mesh refinement, then rebuilds
-  /// the FE space and re-initializes species fields with dose preservation.
-  /// Returns true if mesh changed.
-  bool refineBetweenSteps() {
-    if (lastAmrMarkCount_ <= 0 || !mesh_ || !fes_)
-      return false;
-    // Record the pre-refine dose for each species (for preservation check).
-    std::map<std::string, double> oldDose;
-    for (auto &kv : species_)
-      if (kv.second)
-        oldDose[kv.first] = static_cast<double>(getIntegral(kv.first));
-
-    // Clear all mesh-dependent cached data before refining.
-    robinCoefKeep_.clear();
-    robinMarkerKeep_.clear();
-    implicitCache_.clear();
-
-    // Perform conforming refinement (nonconforming=0 for triangles).
     RefinementBox box{amrBox_.x0, amrBox_.x1, amrBox_.y0, amrBox_.y1};
     auto ids = AdaptiveMeshRefiner::markBox(*mesh_, box);
     if (ids.empty())
@@ -990,36 +993,49 @@ private:
         elToRefine.Append(id);
     if (elToRefine.Size() == 0)
       return false;
-    mesh_->GeneralRefinement(elToRefine, /*nonconforming=*/0);
 
-    // Rebuild the FE space from scratch on the refined mesh.
-    fec_ = std::make_unique<mfem::H1_FECollection>(1, D);
-    fes_ =
-        std::make_unique<mfem::ParFiniteElementSpace>(mesh_.get(), fec_.get());
-
-    // Re-initialize species on the new space with dose-preserving uniform fill.
-    // For H1-P1 on conforming refinement, this conserves total dose to O(dt).
-    for (auto &kv : species_) {
-      const std::string &name = kv.first;
-      auto newGf = std::make_unique<mfem::ParGridFunction>(fes_.get());
-      const double dose = oldDose.count(name) ? oldDose[name] : 0.0;
-      // Compute volume of the refined mesh.
-      double vol = 0.0;
-      for (int e = 0; e < mesh_->GetNE(); ++e) {
-        mfem::ElementTransformation *T = mesh_->GetElementTransformation(e);
-        const mfem::IntegrationRule &ir =
-            mfem::IntRules.Get(mesh_->GetElementBaseGeometry(e), 2);
-        for (int i = 0; i < ir.GetNPoints(); ++i) {
-          T->SetIntPoint(&ir.IntPoint(i));
-          vol += ir.IntPoint(i).weight * T->Weight();
-        }
-      }
-      *newGf = (vol > 0.0) ? dose / vol : 0.0;
-      kv.second = std::move(newGf);
-    }
-    rebuildAllSpecies();
+    // --- From here, refinement WILL happen. Invalidate mesh-dependent
+    // cached state BEFORE mutating the mesh/FESpace (the old K matrices
+    // reference robinCoefKeep_/robinMarkerKeep_ which are about to be
+    // rebuilt by the caller's assembleAllSpecies(); the old implicit
+    // cache references the pre-refinement HypreParMatrix + FESpace).
+    robinCoefKeep_.clear();
+    robinMarkerKeep_.clear();
     implicitCache_.clear();
-    lastAmrMarkCount_ = 0;
+
+    // Collect species ParGridFunctions so prolongation applies to each.
+    std::vector<mfem::ParGridFunction *> gfs;
+    for (auto &kv : species_)
+      if (kv.second)
+        gfs.push_back(kv.second.get());
+
+    // Nonconforming refinement: ParMesh safely manages its Nodes
+    // ParGridFunction lifecycle. nonconforming=1 allows hanging nodes
+    // via constraints, which ParFiniteElementSpace::Update handles via
+    // the prolongation operator.
+    mesh_->GeneralRefinement(elToRefine, /*nonconforming=*/1);
+
+    // ParFiniteElementSpace::Update(true) computes the prolongation
+    // operator from the old to the new space. The `true` argument
+    // requests that the prolongation matrix be retained for
+    // ParGridFunction::Update() to use.
+    fes_->Update(true);
+
+    // ParGridFunction::Update() applies the prolongation in place:
+    // each species field is transferred from the old (coarse) dofs to
+    // the new (refined) dofs. This conserves dose to machine precision
+    // (unlike the previous rebuild-from-scratch + uniform-fill approach
+    // that discarded the spatial distribution and only preserved total
+    // dose to O(dt)).
+    for (auto *gf : gfs)
+      gf->Update();
+
+    // Signal that the update cycle is complete; frees the internal
+    // prolongation matrix. Must be called after all GF::Update() calls.
+    fes_->UpdatesFinished();
+
+    lastAmrMarkCount_ = static_cast<int>(ids.size());
+    ++amrLevelsDone_;
     return true;
   }
   // Owned Robin coef + bdr marker kept alive for K integrators (MFEM stores
@@ -1033,7 +1049,9 @@ private:
     auto systems = assembleAllSpecies();
 
     std::vector<std::string> names = physics_->speciesNames();
-    const int ndof = fes_->GetVSize();
+    // Mutable: runtime AMR grows the FESpace mid-solve, so ndof must be
+    // refreshed after each refinement to match the (larger) GF size.
+    int ndof = fes_->GetVSize();
 
     // Per-species BC dispatch. Boundaries are resolved once into the MFEM
     // bdr-attribute marker arrays; the same markers apply to every step.
@@ -1073,14 +1091,23 @@ private:
           implicitCache_.clear();
         }
 
-        // Runtime AMR: mark-only hook (between-step refine implemented but
-        // blocked by MFEM serial-H1 GeneralRefinement crash; see ledger note).
+        // Runtime AMR: refine, then rebuild matrices for the refined mesh.
         if (runtimeAmr_ && mesh_ && (++amrStepCounter_ % amrEvery_ == 0)) {
-          ++amrRefineCount_;
-          applyRuntimeAmr(systems, Ms, Ks, names, bdrMasks);
-          // refineBetweenSteps() is implemented but causes segfault on MFEM
-          // serial H1 (mesh Nodes GF tied to dead FESpace). Left as mark-only
-          // until MFEM parallel mesh or full re-setup path is available.
+          if (refineBetweenSteps()) {
+            ++amrRefineCount_;
+            systems = assembleAllSpecies();
+            // After refinement + Update, the FESpace has more dofs.
+            // Refresh ndof so per-step vectors match the refined GF size.
+            ndof = fes_->GetVSize();
+            for (const auto &name : names) {
+              Ms[name] = &systems[name].M->SpMat();
+              Ks[name] = &systems[name].K->SpMat();
+            }
+            bdrMasks.clear();
+            for (const auto &name : names)
+              bdrMasks.emplace(name, resolveBoundaryMasks(name));
+            implicitCache_.clear();
+          }
         }
 
         for (const auto &name : names) {
