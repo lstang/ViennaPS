@@ -29,8 +29,13 @@ struct PdeIC {
 };
 
 struct PdeBC {
-  enum class Type { Dirichlet, Neumann, Robin, Flux, Segregation } type =
-      Type::Neumann;
+  enum class Type {
+    Dirichlet,
+    Neumann,
+    Robin,
+    Flux,
+    Segregation
+  } type = Type::Neumann;
   std::string species;
   std::string boundary = "all";
   double value = 0.0;
@@ -114,11 +119,9 @@ public:
       if (auto *diff = dynamic_cast<const DiffusionPdeTerm *>(t.get())) {
         auto m = std::make_shared<ConstantDiffusion<NumericType>>(
             diff->targetSpecies());
-        m->setDiffusivity(static_cast<NumericType>(diff->D()),
-                          NumericType(0));
+        m->setDiffusivity(static_cast<NumericType>(diff->D()), NumericType(0));
         out.push_back(std::move(m));
-      } else if (auto *rx =
-                     dynamic_cast<const ReactionPdeTerm *>(t.get())) {
+      } else if (auto *rx = dynamic_cast<const ReactionPdeTerm *>(t.get())) {
         out.push_back(std::make_shared<LinearReactionDiffusion<NumericType>>(
             rx->targetSpecies(), static_cast<NumericType>(rx->k())));
       }
@@ -183,8 +186,7 @@ public:
   }
 
   /// Apply ICs to an engine (initializeSpecies for each stored PdeIC).
-  template <class Engine>
-  void applyICs(Engine &engine) const {
+  template <class Engine> void applyICs(Engine &engine) const {
     for (const auto &ic : ics_)
       engine.initializeSpecies(ic.species, ic.value);
   }
@@ -305,16 +307,14 @@ struct CalibratedParameters {
 
   /// Blend two parameter sets (e.g. inheritance Si → SiGe).
   static CalibratedParameters blend(const CalibratedParameters &a,
-                                    const CalibratedParameters &b,
-                                    double w) {
+                                    const CalibratedParameters &b, double w) {
     CalibratedParameters out = a;
     for (const auto &kv : b.dopantD0Ea) {
       auto it = out.dopantD0Ea.find(kv.first);
       if (it == out.dopantD0Ea.end())
         out.dopantD0Ea[kv.first] = kv.second;
       else {
-        it->second.first =
-            (1.0 - w) * it->second.first + w * kv.second.first;
+        it->second.first = (1.0 - w) * it->second.first + w * kv.second.first;
         it->second.second =
             (1.0 - w) * it->second.second + w * kv.second.second;
       }
@@ -413,4 +413,3 @@ inline PdeEquation makeConstantDiffusionEquation(const std::string &species,
 }
 
 } // namespace viennaps
-

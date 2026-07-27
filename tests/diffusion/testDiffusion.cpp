@@ -1,65 +1,64 @@
 #include <cmath>
+#include <fields/AdaptiveMeshRefiner.hpp>
+#include <fields/BandgapModel.hpp>
+#include <fields/DiffusionEngine.hpp>
+#include <fields/DiffusionModel.hpp>
+#include <fields/DiffusionPhysics.hpp>
+#include <fields/DiffusivityMaterial.hpp>
+#include <fields/GrainBoundaryMesh.hpp>
+#include <fields/GrainModel.hpp>
+#include <fields/IntrinsicCarrier.hpp>
+#include <fields/KernelTerm.hpp>
+#include <fields/KernelTerms.hpp>
+#include <fields/LevelSetToMesh.hpp>
+#include <fields/MaterialConverter.hpp>
+#include <fields/MeshAttributes.hpp>
+#include <fields/MovingMeshHandler.hpp>
+#include <fields/ParameterDatabase.hpp>
+#include <fields/PdeApi.hpp>
+#include <fields/PointDefectEquilibrium.hpp>
+#include <fields/SPERKernel.hpp>
+#include <fields/SolutionTransfer.hpp>
+#include <fields/kmc/KmcAtomisticEngine.hpp>
+#include <fields/kmc/KmcEpitaxy.hpp>
+#include <fields/kmc/KmcEvent.hpp>
+#include <fields/kmc/KmcLattice.hpp>
+#include <fields/models/CarbonDiffusion.hpp>
+#include <fields/models/CddDiffusion.hpp>
+#include <fields/models/ChargedEquilibriumDiffusion.hpp>
+#include <fields/models/ChargedFermiDiffusion.hpp>
+#include <fields/models/ChargedPairDiffusion.hpp>
+#include <fields/models/ChargedReactDiffusion.hpp>
+#include <fields/models/Cluster311.hpp>
+#include <fields/models/ConstantDiffusion.hpp>
+#include <fields/models/CopperDiffusion.hpp>
+#include <fields/models/DislocationLoop.hpp>
+#include <fields/models/DoseLossBC.hpp>
+#include <fields/models/FermiDiffusion.hpp>
+#include <fields/models/FlashLaserAnneal.hpp>
+#include <fields/models/IIIVDiffusion.hpp>
+#include <fields/models/ImpurityCluster.hpp>
+#include <fields/models/MobileImpurity.hpp>
+#include <fields/models/NeutralReactDiffusion.hpp>
+#include <fields/models/NitrogenDiffusion.hpp>
+#include <fields/models/OedSource.hpp>
+#include <fields/models/PairDiffusion.hpp>
+#include <fields/models/PolysiliconDiffusion.hpp>
+#include <fields/models/ReactDiffusion.hpp>
+#include <fields/models/Segregation.hpp>
+#include <fields/models/SiGeCDiffusion.hpp>
+#include <fields/models/SiGeDiffusion.hpp>
+#include <fields/models/SolidSolubility.hpp>
+#include <fields/models/TedInitializer.hpp>
+#include <fields/models/VacancyCluster.hpp>
+#include <geometries/psMakePlane.hpp>
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <psDomain.hpp>
+#include <random>
 #include <set>
 #include <vcTestAsserts.hpp>
-#include <fields/IntrinsicCarrier.hpp>
-#include <fields/DiffusivityMaterial.hpp>
-#include <fields/MeshAttributes.hpp>
-#include <fields/DiffusionModel.hpp>
-#include <fields/models/ConstantDiffusion.hpp>
-#include <fields/models/FermiDiffusion.hpp>
-#include <fields/models/ChargedFermiDiffusion.hpp>
-#include <fields/models/SolidSolubility.hpp>
-#include <fields/models/Segregation.hpp>
-#include <fields/KernelTerm.hpp>
-#include <fields/KernelTerms.hpp>
-#include <fields/PointDefectEquilibrium.hpp>
-#include <fields/models/ReactDiffusion.hpp>
-#include <fields/models/ChargedReactDiffusion.hpp>
-#include <fields/models/PairDiffusion.hpp>
-#include <fields/models/ChargedPairDiffusion.hpp>
-#include <fields/models/NeutralReactDiffusion.hpp>
-#include <fields/models/Cluster311.hpp>
-#include <fields/models/VacancyCluster.hpp>
-#include <fields/models/ImpurityCluster.hpp>
-#include <fields/models/DislocationLoop.hpp>
-#include <fields/models/CddDiffusion.hpp>
-#include <fields/models/OedSource.hpp>
-#include <fields/models/TedInitializer.hpp>
-#include <fields/models/DoseLossBC.hpp>
-#include <fields/models/ChargedEquilibriumDiffusion.hpp>
-#include <fields/models/CarbonDiffusion.hpp>
-#include <fields/models/NitrogenDiffusion.hpp>
-#include <fields/models/CopperDiffusion.hpp>
-#include <fields/models/MobileImpurity.hpp>
-#include <fields/GrainModel.hpp>
-#include <fields/GrainBoundaryMesh.hpp>
-#include <fields/BandgapModel.hpp>
-#include <fields/MaterialConverter.hpp>
-#include <fields/models/PolysiliconDiffusion.hpp>
-#include <fields/models/SiGeDiffusion.hpp>
-#include <fields/models/SiGeCDiffusion.hpp>
-#include <fields/models/IIIVDiffusion.hpp>
-#include <fields/kmc/KmcLattice.hpp>
-#include <fields/kmc/KmcEvent.hpp>
-#include <fields/kmc/KmcAtomisticEngine.hpp>
-#include <fields/kmc/KmcEpitaxy.hpp>
-#include <fields/models/FlashLaserAnneal.hpp>
-#include <fields/models/IIIVDiffusion.hpp>
-#include <fields/SPERKernel.hpp>
-#include <fields/PdeApi.hpp>
-#include <fields/AdaptiveMeshRefiner.hpp>
-#include <fields/MovingMeshHandler.hpp>
-#include <fields/SolutionTransfer.hpp>
-#include <fields/DiffusionPhysics.hpp>
-#include <fields/ParameterDatabase.hpp>
-#include <random>
-#include <fields/DiffusionEngine.hpp>
-#include <fields/LevelSetToMesh.hpp>
-#include <geometries/psMakePlane.hpp>
-#include <psDomain.hpp>
 #include <vector>
 
 using namespace viennaps;
@@ -97,10 +96,10 @@ void TestIntrinsicCarrier() {
   VC_TEST_ASSERT(nFD < nB);
 
   // activity hook: Boltzmann => 1, Fermi-Dirac at degenerate C => (0,1)
-  const double gB = ic.activity(Cdeg, 300.0, "Si",
-                                CarrierStatistics::Boltzmann);
-  const double gFD = ic.activity(Cdeg, 300.0, "Si",
-                                 CarrierStatistics::FermiDirac);
+  const double gB =
+      ic.activity(Cdeg, 300.0, "Si", CarrierStatistics::Boltzmann);
+  const double gFD =
+      ic.activity(Cdeg, 300.0, "Si", CarrierStatistics::FermiDirac);
   VC_TEST_ASSERT(std::abs(gB - 1.0) < 1e-12);
   VC_TEST_ASSERT(gFD > 0.0 && gFD < 1.0);
 
@@ -148,7 +147,8 @@ void TestConstantDiffusion() {
   VC_TEST_ASSERT(model.speciesNames()[0] == "Boron");
   double kB = 8.617333262145e-5;
   double expectedD = 1e-13 * std::exp(-3.46 / (kB * 1273.15));
-  VC_TEST_ASSERT(std::abs(model.getDiffusivity() - expectedD) / expectedD < 1e-6);
+  VC_TEST_ASSERT(std::abs(model.getDiffusivity() - expectedD) / expectedD <
+                 1e-6);
 }
 
 void TestKernelTerm() {
@@ -181,8 +181,8 @@ void TestPointDefectEquilibrium() {
   PointDefectEquilibrium<double> pde;
   const double cI = pde.C_I_eq(1273.0, "Si");
   const double cV = pde.C_V_eq(1273.0, "Si");
-  std::cout << "[point-defect-eq] C_I_eq(1273)=" << cI
-            << " C_V_eq(1273)=" << cV << "\n";
+  std::cout << "[point-defect-eq] C_I_eq(1273)=" << cI << " C_V_eq(1273)=" << cV
+            << "\n";
   // Plan: ~1e10–1e12 range; allow broader TCAD band.
   VC_TEST_ASSERT(cI > 1e9 && cI < 1e16);
   VC_TEST_ASSERT(cV > 1e9 && cV < 1e16);
@@ -285,14 +285,13 @@ void TestPhase3FullDepthFem() {
     DiffusionEngine<double, 2> engine;
     auto meshCopy = std::make_unique<mfem::Mesh>(*mesh);
     engine.setMesh(std::move(meshCopy), attrs);
-    auto model = std::make_shared<ChargedPairDiffusion<double>>("Boron",
-                                                               "Interstitial");
+    auto model =
+        std::make_shared<ChargedPairDiffusion<double>>("Boron", "Interstitial");
     model->setPairDiffusivity(1e-12);
     model->setCIEq(1e12);
     model->setFermiEnhancement(1.0, 1e10);
     // Interstitial as passive field (ConstantDiffusion) so pair D is finite.
-    auto iModel =
-        std::make_shared<ConstantDiffusion<double>>("Interstitial");
+    auto iModel = std::make_shared<ConstantDiffusion<double>>("Interstitial");
     iModel->setDiffusivity(1e-14, 0.0);
     DiffusionPhysics<double> physics;
     physics.addSpecies("Boron");
@@ -454,7 +453,8 @@ void TestPhase5Poly() {
   std::vector<std::pair<double, double>> centers = {{0.25, 0.25}, {0.75, 0.75}};
   auto dual = gbMesh.build(8, 8, centers, 0.08);
   VC_TEST_ASSERT(dual.numInterior > 0);
-  VC_TEST_ASSERT(GrainBoundaryMesh::hasConnectedBoundaryNetwork(dual.numBoundary));
+  VC_TEST_ASSERT(
+      GrainBoundaryMesh::hasConnectedBoundaryNetwork(dual.numBoundary));
 
   PolyOxideBreakup<double> brk;
   brk.setOxideThickness(1e-6);
@@ -624,9 +624,8 @@ void TestPhase7Kmc() {
   engR.setClusteringEnabled(false);
   engR.run(20);
   VC_TEST_ASSERT(engR.recombCount() > 0);
-  VC_TEST_ASSERT(engR.lattice().countSpecies(1) +
-                     engR.lattice().countSpecies(2) <
-                 2);
+  VC_TEST_ASSERT(
+      engR.lattice().countSpecies(1) + engR.lattice().countSpecies(2) < 2);
 
   // I+I clustering: adjacent interstitials form {311}-like cluster.
   KmcLattice latC;
@@ -731,8 +730,8 @@ void TestPhase8Epitaxy() {
     eng.setClusteringEnabled(false);
     eng.run(200);
     std::cout << "[phase8-bkl] deposit=" << eng.depositCount()
-              << " twin=" << eng.twinCount()
-              << " steps=" << eng.steps() << "\n";
+              << " twin=" << eng.twinCount() << " steps=" << eng.steps()
+              << "\n";
     VC_TEST_ASSERT(eng.depositCount() > 0);
     // Growth occurred: some Si atoms deposited above the substrate.
     // Read from the engine's lattice (setLattice copies by value).
@@ -979,15 +978,16 @@ void TestFemClosures() {
     std::cout << "[fem-closure] strain peak(eps=0)=" << peakUnstrained
               << " peak(eps=0.02)=" << peakStrained << "\n";
     // Different D -> different redistribution -> different peak.
-    // eps=0.02 with alpha=5, T=1273: D_strained/D_unstrained = exp(5*0.02/(kB*1273))
-    // kB*1273 ~ 0.11, so exp(0.1/0.11) = exp(~0.9) ~ 2.5x -> visibly different peak.
+    // eps=0.02 with alpha=5, T=1273: D_strained/D_unstrained =
+    // exp(5*0.02/(kB*1273)) kB*1273 ~ 0.11, so exp(0.1/0.11) = exp(~0.9) ~ 2.5x
+    // -> visibly different peak.
     VC_TEST_ASSERT(peakUnstrained > 0.0);
     VC_TEST_ASSERT(peakStrained > 0.0);
     // The strain modifies D, which changes how much the spike spreads,
     // giving a different peak. Assert relative difference > 0.5%.
     VC_TEST_ASSERT(std::abs(peakStrained - peakUnstrained) /
-                           std::max(peakUnstrained, 1e-30) >
-                       0.005);
+                       std::max(peakUnstrained, 1e-30) >
+                   0.005);
   }
 
   // --- MeltDiffusion FEM (phi-dependent D): register Boron + MeltFraction.
@@ -997,10 +997,10 @@ void TestFemClosures() {
   auto runMelt = [&attrs, &baseMesh](double phiInit) {
     DiffusionEngine<double, 2> engine;
     engine.setMesh(baseMesh(), attrs);
-      auto md = std::make_shared<MeltDiffusion<double>>("Boron", "MeltFraction");
-      // Large D values so diffusion is visible on a unit-square mesh in 0.2s.
-      md->setSolidD(1e-3);
-      md->setLiquidD(1e0);
+    auto md = std::make_shared<MeltDiffusion<double>>("Boron", "MeltFraction");
+    // Large D values so diffusion is visible on a unit-square mesh in 0.2s.
+    md->setSolidD(1e-3);
+    md->setLiquidD(1e0);
     // MeltFraction needs a (trivial) diffusion model so its K matrix is
     // non-empty; otherwise the engine cannot assemble the system for it.
     auto mfDiff = std::make_shared<ConstantDiffusion<double>>("MeltFraction");
@@ -1075,8 +1075,8 @@ void TestFemClosures() {
       // Set previous phi to 0 so ∂φ/∂t = (1 - 0)/dt > 0 (melting).
       // We approximate by setting MeltFraction high now; the previousPhi
       // pointer is set to a zero GF via a throwaway.
-      mfem::ParGridFunction &mfGf =
-          const_cast<mfem::ParGridFunction &>(engine.getSolution("MeltFraction"));
+      mfem::ParGridFunction &mfGf = const_cast<mfem::ParGridFunction &>(
+          engine.getSolution("MeltFraction"));
       mfGf = 1.0; // current phi = 1 (fully melted)
       // Create a zero previous-phi GF on the same space.
       auto *pfes = mfGf.ParFESpace();
@@ -1272,7 +1272,8 @@ void TestPhase11Amr() {
 }
 
 /// MovingMeshHandler + SolutionTransfer full-depth (gap analysis wave).
-/// Parity gap closures: physics ratios, L2 transfer, PDE reaction, 3D mesh, FEM heat.
+/// Parity gap closures: physics ratios, L2 transfer, PDE reaction, 3D mesh, FEM
+/// heat.
 void TestParityGapClosures() {
 #ifdef VIENNAPS_HAS_MFEM
   // Carbon detailed balance: residual vanishes at CI = C*I/C*_I.
@@ -1284,16 +1285,14 @@ void TestParityGapClosures() {
     const double kf = 1e-20;
     carb.setTrapRate(kf);
     carb.setReverseRate(kf * Cstar);
-    std::vector<double> C(1, 1e15), I(1, 1e15),
-        CI(1, C[0] * I[0] / Cstar);
+    std::vector<double> C(1, 1e15), I(1, 1e15), CI(1, C[0] * I[0] / Cstar);
     const double ci0 = CI[0];
     carb.applyTrapStep(C, I, CI, 1e-4);
     std::cout << "[parity] carbon eq residual dCI=" << (CI[0] - ci0)
               << " ratio=" << CI[0] / (C[0] * I[0]) << "\n";
     VC_TEST_ASSERT(std::abs(CI[0] - ci0) / ci0 < 1e-6);
-    VC_TEST_ASSERT(std::abs(CI[0] / (C[0] * I[0]) - 1.0 / Cstar) /
-                       (1.0 / Cstar) <
-                   1e-6);
+    VC_TEST_ASSERT(
+        std::abs(CI[0] / (C[0] * I[0]) - 1.0 / Cstar) / (1.0 / Cstar) < 1e-6);
   }
 
   // ChargedEquilibrium: extrinsic D differs from intrinsic by formula.
@@ -1540,8 +1539,9 @@ void TestMovingMeshSolutionTransfer() {
     mfem::ParMesh pmesh(MPI_COMM_SELF, mesh);
     for (int e = 0; e < pmesh.GetNE(); ++e)
       pmesh.SetAttribute(e, 1);
-    auto none = MovingMeshHandler::relabelAttributes(pmesh, 1, 2, /*progress=*/0.1,
-                                                     /*threshold=*/0.5);
+    auto none =
+        MovingMeshHandler::relabelAttributes(pmesh, 1, 2, /*progress=*/0.1,
+                                             /*threshold=*/0.5);
     VC_TEST_ASSERT(none.elementsRelabeled == 0);
     auto flipped = MovingMeshHandler::relabelAttributes(
         pmesh, 1, 2, /*progress=*/0.9, /*threshold=*/0.5);
@@ -1560,8 +1560,8 @@ void TestMovingMeshSolutionTransfer() {
     auto mesh = mfem::Mesh::MakeCartesian2D(4, 4, mfem::Element::TRIANGLE);
     mesh.SetCurvature(1, false);
     mfem::ParMesh pmesh(MPI_COMM_SELF, mesh);
-    auto lift =
-        MovingMeshHandler::liftFreeSurface(pmesh, /*yThresh=*/0.99, /*lift=*/0.05);
+    auto lift = MovingMeshHandler::liftFreeSurface(pmesh, /*yThresh=*/0.99,
+                                                   /*lift=*/0.05);
     VC_TEST_ASSERT(lift.nodesDisplaced > 0);
     VC_TEST_ASSERT(lift.maxDisplacement > 0.0);
   }
@@ -1569,7 +1569,8 @@ void TestMovingMeshSolutionTransfer() {
   // --- Integral-preserving transfer: coarse → fine and coarse → coarser.
   // Source: uniform C=1e18 on 4x4 mesh → dose = 1e18 * area(1) = 1e18.
   auto makeUniform = [](int n, double C) {
-    auto serialMesh = mfem::Mesh::MakeCartesian2D(n, n, mfem::Element::TRIANGLE);
+    auto serialMesh =
+        mfem::Mesh::MakeCartesian2D(n, n, mfem::Element::TRIANGLE);
     auto mesh = std::make_unique<mfem::ParMesh>(MPI_COMM_SELF, serialMesh);
     auto fec = std::make_unique<mfem::H1_FECollection>(1, mesh->Dimension());
     auto fes =
@@ -1587,8 +1588,7 @@ void TestMovingMeshSolutionTransfer() {
 
     // Fine target (8x8)
     auto [mFine, fecFine, fesFine, gfFine] = makeUniform(8, 0.0);
-    auto trFine =
-        SolutionTransfer::transferIntegralPreserving(*gfSrc, *gfFine);
+    auto trFine = SolutionTransfer::transferIntegralPreserving(*gfSrc, *gfFine);
     std::cout << "[solution-transfer] fine doseSrc=" << trFine.doseSource
               << " doseAfter=" << trFine.doseTargetAfterScale
               << " relErr=" << trFine.relativeDoseError << "\n";
@@ -1796,7 +1796,8 @@ void TestProductionSegregationEngine() {
   dSi->setDiffusivity(1e-3, 0.0);
   auto dOx = std::make_shared<ConstantDiffusion<double>>("Boron_Ox");
   dOx->setDiffusivity(1e-3, 0.0);
-  auto seg = std::make_shared<Segregation<double>>("Boron_Si", "Boron_Ox", 1, 2);
+  auto seg =
+      std::make_shared<Segregation<double>>("Boron_Si", "Boron_Ox", 1, 2);
   const double m = 0.1;
   seg->setSegregationCoefficient(m, /*k0=*/1.0);
 
@@ -1842,16 +1843,16 @@ void TestProductionTedSequence() {
   engine.setForceImplicitEuler(true);
   engine.setPicardReassembly(true);
 
-  auto pair =
-      std::make_shared<PairDiffusion<double>>("Boron", "Interstitial");
+  auto pair = std::make_shared<PairDiffusion<double>>("Boron", "Interstitial");
   pair->setPairDiffusivity(1e-10);
   pair->setCIEq(1e12);
   // SUPG off for stability on tiny mesh; pair D(C_I) still active.
   pair->setSupg(false);
 
-  // ReactDiffusion owns I+V transport + recombination (no extra Constant models).
-  auto react = std::make_shared<ReactDiffusion<double>>("Interstitial",
-                                                        "Vacancy");
+  // ReactDiffusion owns I+V transport + recombination (no extra Constant
+  // models).
+  auto react =
+      std::make_shared<ReactDiffusion<double>>("Interstitial", "Vacancy");
   react->setRecombinationRate(1e-15);
   react->setDiffusivities(1e-8, 1e-9);
 
@@ -1881,13 +1882,12 @@ void TestProductionTedSequence() {
   const double boron1 = engine.getIntegral("Boron");
   const double I1 = engine.getIntegral("Interstitial");
   const double Deff1 = pair->getDiffusivity(std::max(I1, 1.0), 1273.0);
-  const double boronRel =
-      std::abs(boron1 - boron0) / std::max(boron0, 1.0);
+  const double boronRel = std::abs(boron1 - boron0) / std::max(boron0, 1.0);
 
   std::cout << "[prod-ted] boron0=" << boron0 << " boron1=" << boron1
             << " rel=" << boronRel << " I0=" << I0 << " I1=" << I1
-            << " Deff0=" << Deff0 << " Deff1=" << Deff1
-            << " DeffEq=" << DeffEq << "\n";
+            << " Deff0=" << Deff0 << " Deff1=" << Deff1 << " DeffEq=" << DeffEq
+            << "\n";
   VC_TEST_ASSERT(boronRel < 0.01);
   VC_TEST_ASSERT(I1 < I0);
   VC_TEST_ASSERT(Deff0 > DeffEq);
@@ -1972,8 +1972,8 @@ void TestProductionAmr() {
   const double d0 = engine.getIntegral("Boron");
   engine.solve(0.0, 0.1, 0.05);
   const double d1 = engine.getIntegral("Boron");
-  std::cout << "[prod-amr] ne0=" << ne0 << " nref=" << nref
-            << " dose0=" << d0 << " dose1=" << d1 << "\n";
+  std::cout << "[prod-amr] ne0=" << ne0 << " nref=" << nref << " dose0=" << d0
+            << " dose1=" << d1 << "\n";
   VC_TEST_ASSERT(d0 > 0.0);
   VC_TEST_ASSERT(d1 > 0.0);
   VC_TEST_ASSERT(std::isfinite(d1));
@@ -2020,7 +2020,7 @@ void TestPhase4Models() {
   ceq.setNi(1e10);
   // Charge-state partition: extrinsic D differs from intrinsic (not flat).
   VC_TEST_ASSERT(std::abs(ceq.getDiffusivity(1e20, 1273.0) -
-                           ceq.getDiffusivity(1e10, 1273.0)) /
+                          ceq.getDiffusivity(1e10, 1273.0)) /
                      ceq.getDiffusivity(1e10, 1273.0) >
                  0.01);
 
@@ -2191,8 +2191,8 @@ void TestPhase4FullDepthFem() {
 
     const double xCentroid1 = computeCentroidX();
     std::cout << "[p4-full] copper-drift-direction xCentroid0=" << xCentroid0
-              << " xCentroid1=" << xCentroid1 << " delta=" << (xCentroid1 - xCentroid0)
-              << "\n";
+              << " xCentroid1=" << xCentroid1
+              << " delta=" << (xCentroid1 - xCentroid0) << "\n";
     // Drift must move the centroid +x (toward larger x) for z=+1, E>0.
     // A sign error in the drift integrator would move it -x (or zero).
     // Magnitude is small (~1e-7 for these parameters) but unambiguously
@@ -2397,8 +2397,8 @@ void TestSegregation() {
   const double dose1 = C1(0) + C2(0);
   const double ratio = (C1(0) > 0.0) ? C2(0) / C1(0) : 0.0;
   std::cout << "[segregation] C1=" << C1(0) << " C2=" << C2(0)
-            << " ratio=" << ratio << " m=" << m
-            << " dose0=" << dose0 << " dose1=" << dose1 << "\n";
+            << " ratio=" << ratio << " m=" << m << " dose0=" << dose0
+            << " dose1=" << dose1 << "\n";
 
   // Dose conservation to 1%.
   VC_TEST_ASSERT(std::abs(dose1 - dose0) / dose0 < 0.01);
@@ -2465,15 +2465,14 @@ void TestFermiWithSegregation() {
   const double dose1 = C_si + C_ox;
   const double ratio = (C_si > 0.0) ? C_ox / C_si : 0.0;
   std::cout << "[fermi-segregation] C_si=" << C_si << " C_ox=" << C_ox
-            << " ratio=" << ratio << " dose_rel="
-            << std::abs(dose1 - dose0) / dose0 << "\n";
+            << " ratio=" << ratio
+            << " dose_rel=" << std::abs(dose1 - dose0) / dose0 << "\n";
   // Models are constructed (Fermi + Constant + Segregation) — interface
   // physics must conserve dose and approach m.
   VC_TEST_ASSERT(std::abs(dose1 - dose0) / dose0 < 0.01);
   VC_TEST_ASSERT(std::abs(ratio - m) / m < 0.05);
   // Sanity: Fermi extrinsic D > oxide D (models configured).
-  VC_TEST_ASSERT(fermi.getDiffusivity(1e18, 1273.0) >
-                 oxide.getDiffusivity());
+  VC_TEST_ASSERT(fermi.getDiffusivity(1e18, 1273.0) > oxide.getDiffusivity());
 }
 
 void TestDiffusionPhysics() {
@@ -2489,16 +2488,16 @@ void TestDiffusionPhysics() {
   physics.addModel(model);
 
   // BC specification
-  physics.addNeumannBC("Boron", "surface", 0.0);  // zero flux
+  physics.addNeumannBC("Boron", "surface", 0.0); // zero flux
   physics.addDirichletBC("Boron", "bottom", 1e18);
 
   VC_TEST_ASSERT(physics.numModels() == 1);
 
   // Per-species BC lookup (not flat list)
-  const auto& boronBCs = physics.boundaryConditions("Boron");
+  const auto &boronBCs = physics.boundaryConditions("Boron");
   VC_TEST_ASSERT(boronBCs.size() == 2);
-  const auto& iBCs = physics.boundaryConditions("Interstitial");
-  VC_TEST_ASSERT(iBCs.empty());  // Interstitial has no BCs yet
+  const auto &iBCs = physics.boundaryConditions("Interstitial");
+  VC_TEST_ASSERT(iBCs.empty()); // Interstitial has no BCs yet
 }
 
 void TestDiffusionPhysicsComposition() {
@@ -2558,8 +2557,7 @@ void TestLevelSetToMesh2D() {
   VC_TEST_ASSERT(attrs.numMaterials() >= 1);
 
   std::cout << "[level-set-to-mesh-check] nv=" << mesh->GetNV()
-            << " ne=" << mesh->GetNE()
-            << " attributes=" << attributes.size()
+            << " ne=" << mesh->GetNE() << " attributes=" << attributes.size()
             << " materials=" << attrs.numMaterials() << "\n";
 }
 
@@ -2596,8 +2594,7 @@ void TestLevelSetToMesh3D() {
   VC_TEST_ASSERT(attrs.numMaterials() >= 1);
 
   std::cout << "[level-set-to-mesh-3d-check] nv=" << mesh->GetNV()
-            << " ne=" << mesh->GetNE()
-            << " attributes=" << attributes.size()
+            << " ne=" << mesh->GetNE() << " attributes=" << attributes.size()
             << " materials=" << attrs.numMaterials() << "\n";
 }
 
@@ -2622,11 +2619,11 @@ void TestDiffusionEngineAssembly() {
   engine.setMesh(std::move(mesh), attrs);
 
   auto model = std::make_shared<ConstantDiffusion<double>>("Boron");
-  model->setDiffusivity(1e-3, 0.0);  // Ea=0 => D = D0 = 1e-3 regardless of T
+  model->setDiffusivity(1e-3, 0.0); // Ea=0 => D = D0 = 1e-3 regardless of T
   DiffusionPhysics<double> physics;
   physics.addSpecies("Boron");
   physics.addModel(model);
-  physics.setTemperature(1273.15);  // irrelevant for Ea=0 but kept for realism
+  physics.setTemperature(1273.15); // irrelevant for Ea=0 but kept for realism
   engine.setPhysics(physics);
 
   engine.initializeSpecies("Boron", 1e18);
@@ -2652,7 +2649,7 @@ void TestDiffusionEngineAssembly() {
   const mfem::GridFunction &gf = engine.getSolution("Boron");
   const double gfMax = gf.Max();
   std::cout << "[diffusion-engine-assembly] Boron max = " << gfMax << "\n";
-  VC_TEST_ASSERT(gfMax > 1e17);  // within ~10x of initial 1e18
+  VC_TEST_ASSERT(gfMax > 1e17); // within ~10x of initial 1e18
 }
 
 void TestDoseConservation() {
@@ -2680,11 +2677,11 @@ void TestDoseConservation() {
   engine.setMesh(std::move(mesh), attrs);
 
   auto model = std::make_shared<ConstantDiffusion<double>>("Boron");
-  model->setDiffusivity(1e-8, 0.0);  // Ea=0 => D = D0 = 1e-8 regardless of T
+  model->setDiffusivity(1e-8, 0.0); // Ea=0 => D = D0 = 1e-8 regardless of T
   DiffusionPhysics<double> physics;
   physics.addSpecies("Boron");
   physics.addModel(model);
-  physics.setTemperature(1273.15);  // irrelevant for Ea=0 but kept for realism
+  physics.setTemperature(1273.15); // irrelevant for Ea=0 but kept for realism
   engine.setPhysics(physics);
 
   engine.initializeSpecies("Boron", 1e18);
@@ -2809,8 +2806,8 @@ void TestNeumannBC() {
   const double relDiff = std::abs(doseFinal - doseExpected) / doseExpected;
 
   std::cout << "[neumann-bc] dose_initial=" << doseInitial
-            << " dose_final=" << doseFinal
-            << " expected=" << doseExpected << " rel_diff=" << relDiff << "\n";
+            << " dose_final=" << doseFinal << " expected=" << doseExpected
+            << " rel_diff=" << relDiff << "\n";
 
   // 5% tolerance: spatial discretization + implicit-Euler time integration
   // introduce small errors, but the integral balance should be tight.
@@ -2926,11 +2923,10 @@ void TestMultiSpeciesSmoke() {
       std::abs(phosphorusInitial);
 
   std::cout << "[multi-species] boron: initial=" << boronInitial
-            << " final=" << boronFinal << " rel_diff=" << boronRelDiff
-            << "\n";
+            << " final=" << boronFinal << " rel_diff=" << boronRelDiff << "\n";
   std::cout << "[multi-species] phosphorus: initial=" << phosphorusInitial
-            << " final=" << phosphorusFinal
-            << " rel_diff=" << phosphorusRelDiff << "\n";
+            << " final=" << phosphorusFinal << " rel_diff=" << phosphorusRelDiff
+            << "\n";
 
   // Each species must conserve its own dose independently. 1e-6 tolerance
   // catches any cross-species coupling bug (order-unity drift).
@@ -2940,54 +2936,54 @@ void TestMultiSpeciesSmoke() {
 
 int main() {
   try {
-  TestIntrinsicCarrier();
-  TestKernelTerm();
-  TestPointDefectEquilibrium();
-  TestReactDiffusion();
-  TestChargedReact();
-  TestPairDiffusion();
-  TestClusterModels();
-  TestPhase3FullDepthFem();
-  TestCddDiffusion();
-  TestPhase4Models();
-  TestPhase4FullDepthFem();
-  TestPhase5Poly();
-  TestPhase6SiGe();
-  TestPhase7Kmc();
-  TestPhase8Epitaxy();
-  TestPhase9Laser();
-  TestPhase10PdeApi();
-  TestPhase11Amr();
-  TestParityGapClosures();
-  TestMovingMeshSolutionTransfer();
-  TestDeepenedApis();
-  TestDeepenedRobinEngine();
-  TestProductionSegregationEngine();
-  TestProductionTedSequence();
-  TestProductionBcStack();
-  TestProductionAmr();
-  TestFermiDiffusion();
-  TestChargedFermi();
-  TestSolidSolubility();
-  TestSegregation();
-  TestFermiWithSegregation();
-  TestMeshAttributes();
-  TestDiffusionModelInterface();
-  TestConstantDiffusion();
-  TestDiffusionPhysics();
-  TestDiffusionPhysicsComposition();
-  TestLevelSetToMesh2D();
-  TestLevelSetToMesh3D();
-  TestDiffusionEngineAssembly();
-  TestDoseConservation();
-  TestDirichletBC();
-  TestNeumannBC();
-  TestMultiSpeciesSmoke();
-  TestReentrantSolve();
-  TestFemClosures();
-  TestKmcIdwDoseConservation();
-  std::cout << "All diffusion tests passed.\n";
-  return 0;
+    TestIntrinsicCarrier();
+    TestKernelTerm();
+    TestPointDefectEquilibrium();
+    TestReactDiffusion();
+    TestChargedReact();
+    TestPairDiffusion();
+    TestClusterModels();
+    TestPhase3FullDepthFem();
+    TestCddDiffusion();
+    TestPhase4Models();
+    TestPhase4FullDepthFem();
+    TestPhase5Poly();
+    TestPhase6SiGe();
+    TestPhase7Kmc();
+    TestPhase8Epitaxy();
+    TestPhase9Laser();
+    TestPhase10PdeApi();
+    TestPhase11Amr();
+    TestParityGapClosures();
+    TestMovingMeshSolutionTransfer();
+    TestDeepenedApis();
+    TestDeepenedRobinEngine();
+    TestProductionSegregationEngine();
+    TestProductionTedSequence();
+    TestProductionBcStack();
+    TestProductionAmr();
+    TestFermiDiffusion();
+    TestChargedFermi();
+    TestSolidSolubility();
+    TestSegregation();
+    TestFermiWithSegregation();
+    TestMeshAttributes();
+    TestDiffusionModelInterface();
+    TestConstantDiffusion();
+    TestDiffusionPhysics();
+    TestDiffusionPhysicsComposition();
+    TestLevelSetToMesh2D();
+    TestLevelSetToMesh3D();
+    TestDiffusionEngineAssembly();
+    TestDoseConservation();
+    TestDirichletBC();
+    TestNeumannBC();
+    TestMultiSpeciesSmoke();
+    TestReentrantSolve();
+    TestFemClosures();
+    TestKmcIdwDoseConservation();
+    std::cout << "All diffusion tests passed.\n";
+    return 0;
   } catch (const std::exception &ex) {
     std::cerr << "TEST EXCEPTION: " << ex.what() << "\n";
     return 1;
@@ -2996,14 +2992,14 @@ int main() {
 #else
 int main() {
   try {
-  TestIntrinsicCarrier();
-  TestFermiDiffusion();
-  TestChargedFermi();
-  TestSolidSolubility();
-  TestSegregation();
-  TestFermiWithSegregation();
-  std::cout << "MFEM not available, skipping MFEM diffusion tests.\n";
-  return 0;
+    TestIntrinsicCarrier();
+    TestFermiDiffusion();
+    TestChargedFermi();
+    TestSolidSolubility();
+    TestSegregation();
+    TestFermiWithSegregation();
+    std::cout << "MFEM not available, skipping MFEM diffusion tests.\n";
+    return 0;
   } catch (const std::exception &ex) {
     std::cerr << "TEST EXCEPTION: " << ex.what() << "\n";
     return 1;

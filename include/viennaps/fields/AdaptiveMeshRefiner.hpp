@@ -111,12 +111,12 @@ public:
     return n;
   }
 
-  /// Refine mesh and prolongate all GridFunctions to the new space (MFEM native).
-  /// Returns number of elements refined.
-  static int refineMarkedWithProlongation(mfem::Mesh &mesh,
-                                          mfem::FiniteElementSpace &fes,
-                                          const std::vector<int> &elemIds,
-                                          std::vector<mfem::GridFunction *> &gfs) {
+  /// Refine mesh and prolongate all GridFunctions to the new space (MFEM
+  /// native). Returns number of elements refined.
+  static int
+  refineMarkedWithProlongation(mfem::Mesh &mesh, mfem::FiniteElementSpace &fes,
+                               const std::vector<int> &elemIds,
+                               std::vector<mfem::GridFunction *> &gfs) {
     if (elemIds.empty())
       return 0;
     mfem::Array<int> el_to_refine;
@@ -135,9 +135,9 @@ public:
   }
 
   /// Gradient-based marking: elements with |∇u| ≥ fraction * max|∇u|.
-  static std::vector<int>
-  markByGradient(mfem::Mesh &mesh, const mfem::GridFunction &u,
-                 double fractionOfMax = 0.5) {
+  static std::vector<int> markByGradient(mfem::Mesh &mesh,
+                                         const mfem::GridFunction &u,
+                                         double fractionOfMax = 0.5) {
     std::vector<double> g(static_cast<std::size_t>(mesh.GetNE()), 0.0);
     double gmax = 0.0;
     for (int e = 0; e < mesh.GetNE(); ++e) {

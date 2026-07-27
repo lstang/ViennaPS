@@ -7,7 +7,8 @@
 ///   M_s du_s/dt = -K_s u_s + R_s        (one per species s)
 /// in time. Uses Phase 1 Tasks 1-4 building blocks:
 ///   - MeshAttributes        (Task 1)  attribute <-> material name map
-///   - DiffusionModel         (Task 2)  per-species M / K / R contribution hooks
+///   - DiffusionModel         (Task 2)  per-species M / K / R contribution
+///   hooks
 ///   - ConstantDiffusion      (Task 3)  concrete D(u,T)=const model
 ///   - DiffusionPhysics       (Task 3.5) species + model registry with the
 ///                                       composition gatekeeper that prevents
@@ -131,8 +132,7 @@ public:
   /// Take ownership of `mesh` and build the H1 order-1 FE space on it.
   /// `attrs` is stored by reference (attribute <-> material name map) and
   /// is used by models for material-dependent coefficients.
-  void
-  setMesh(std::unique_ptr<mfem::Mesh> mesh, const MeshAttributes &attrs) {
+  void setMesh(std::unique_ptr<mfem::Mesh> mesh, const MeshAttributes &attrs) {
     if (!mesh)
       throw std::runtime_error(
           "DiffusionEngine::setMesh: mesh pointer is null");
@@ -150,8 +150,8 @@ public:
     // Wrap serial mesh into ParMesh on MPI_COMM_SELF.
     mesh_ = std::make_unique<mfem::ParMesh>(MPI_COMM_SELF, *mesh);
     fec_ = std::make_unique<mfem::H1_FECollection>(/*order*/ 1, /*dim*/ D);
-    fes_ = std::make_unique<mfem::ParFiniteElementSpace>(
-        mesh_.get(), fec_.get());
+    fes_ =
+        std::make_unique<mfem::ParFiniteElementSpace>(mesh_.get(), fec_.get());
     species_.clear();
     allSpecies_.clear();
     implicitCache_.clear();
@@ -269,10 +269,10 @@ public:
     if (samples.empty() || gf->Size() == 0)
       return;
     for (int i = 0; i < gf->Size(); ++i) {
-      const double xi = (gf->Size() == 1)
-                            ? 0.0
-                            : static_cast<double>(i) /
-                                  static_cast<double>(gf->Size() - 1);
+      const double xi =
+          (gf->Size() == 1)
+              ? 0.0
+              : static_cast<double>(i) / static_cast<double>(gf->Size() - 1);
       const double sj = xi * static_cast<double>(samples.size() - 1);
       const std::size_t j0 = static_cast<std::size_t>(sj);
       const std::size_t j1 = std::min(j0 + 1, samples.size() - 1);
@@ -283,8 +283,8 @@ public:
     }
     const double doseNow = static_cast<double>(getIntegral(name));
     if (doseNow > 0.0 && static_cast<double>(targetDose) > 0.0) {
-      *gf *= static_cast<mfem::real_t>(static_cast<double>(targetDose) /
-                                       doseNow);
+      *gf *=
+          static_cast<mfem::real_t>(static_cast<double>(targetDose) / doseNow);
     }
   }
 
@@ -436,8 +436,7 @@ private:
   // D, future Fermi/Cdd model coefficients, ...). Mirrors MOOSE
   // PhysicsBase::initialize() — without this call the models would see only
   // whatever T was last manually set on them.
-  std::map<std::string, SpeciesSystem>
-  assembleAllSpecies() {
+  std::map<std::string, SpeciesSystem> assembleAllSpecies() {
     if (!physics_)
       throw std::runtime_error(
           "DiffusionEngine::assembleAllSpecies: physics is null");
@@ -552,9 +551,8 @@ private:
     return systems;
   }
 
-  static bool
-  modelTargetsSpecies(const DiffusionModel<NumericType> &model,
-                      const std::string &speciesName) {
+  static bool modelTargetsSpecies(const DiffusionModel<NumericType> &model,
+                                  const std::string &speciesName) {
     const auto names = model.speciesNames();
     for (const auto &n : names)
       if (n == speciesName)
@@ -570,11 +568,12 @@ private:
   // distributed matrix) as input — see `HypreBoomerAMG::SetOperator` at
   // hypre.cpp:5384 which asserts `new Operator must be a HypreParMatrix`.
   // Our engine builds *serial* `BilinearForm`s on a serial `FiniteElementSpace`
-  // (the FES from `setMesh` is `FiniteElementSpace`, not `ParFiniteElementSpace`),
-  // so feeding `SparseMatrix` to `HypreBoomerAMG` triggers that assertion at
-  // runtime. `MFEM_USE_MPI` being defined is necessary but not sufficient:
-  // you also need the engine itself to construct `ParFiniteElementSpace` +
-  // `ParBilinearForm` + `ParGridFunction` and run under MPI.
+  // (the FES from `setMesh` is `FiniteElementSpace`, not
+  // `ParFiniteElementSpace`), so feeding `SparseMatrix` to `HypreBoomerAMG`
+  // triggers that assertion at runtime. `MFEM_USE_MPI` being defined is
+  // necessary but not sufficient: you also need the engine itself to construct
+  // `ParFiniteElementSpace` + `ParBilinearForm` + `ParGridFunction` and run
+  // under MPI.
   //
   // Phase 1's test meshes (4x4, 8x8 — 25-81 DOFs) converge in <10 CG
   // iterations with DSmoother, so the parallel path offers no benefit here.
@@ -592,8 +591,8 @@ private:
     std::unique_ptr<mfem::DSmoother> prec;
   };
 
-  std::unique_ptr<MassSolverBundle>
-  makeMassSolver(mfem::real_t relTol = 1e-9, int maxIters = 500) const {
+  std::unique_ptr<MassSolverBundle> makeMassSolver(mfem::real_t relTol = 1e-9,
+                                                   int maxIters = 500) const {
     auto bundle = std::make_unique<MassSolverBundle>();
     auto cg = std::make_unique<mfem::CGSolver>();
     cg->SetRelTol(relTol);
@@ -681,8 +680,7 @@ private:
     double dt = static_cast<double>(dtMax);
     const double tFinal = static_cast<double>(tEnd);
     while (t < tFinal) {
-      const double targetTime =
-          std::min(t + dt, tFinal);
+      const double targetTime = std::min(t + dt, tFinal);
       dt = targetTime - t;
       cvode.SetMaxStep(tFinal - t);
       cvode.Step(state, t, dt);
@@ -711,12 +709,11 @@ private:
   struct BdrMasks; // forward declaration - defined later in DiffusionEngine
   class DiffusionRHSOperator : public mfem::TimeDependentOperator {
   public:
-    DiffusionRHSOperator(
-        DiffusionEngine &engine,
-        std::map<std::string, SpeciesSystem> &systems,
-        const std::vector<std::string> &names, int ndof, int nSpecies,
-        int totalSize,
-        const std::map<std::string, BdrMasks> &bdrMasks)
+    DiffusionRHSOperator(DiffusionEngine &engine,
+                         std::map<std::string, SpeciesSystem> &systems,
+                         const std::vector<std::string> &names, int ndof,
+                         int nSpecies, int totalSize,
+                         const std::map<std::string, BdrMasks> &bdrMasks)
         : mfem::TimeDependentOperator(totalSize, 0.0,
                                       /*type*/ IMPLICIT),
           engine_(engine), systems_(systems), names_(names), ndof_(ndof),
@@ -800,8 +797,8 @@ private:
     /// against it in SUNImplicitSolve. Essential (Dirichlet) rows are
     /// eliminated so the Newton update for those dofs is zero (BC value
     /// is preserved across corrector iterations).
-    int SUNImplicitSetup(const mfem::Vector &y, const mfem::Vector &fy,
-                         int jok, int *jcur, mfem::real_t gamma) override {
+    int SUNImplicitSetup(const mfem::Vector &y, const mfem::Vector &fy, int jok,
+                         int *jcur, mfem::real_t gamma) override {
       for (int s = 0; s < nSpecies_; ++s) {
         const auto &name = names_[s];
         const auto &sp = solvers_.at(name);
@@ -872,11 +869,12 @@ private:
       const mfem::SparseMatrix *K = nullptr;
       const mfem::Vector *R = nullptr;
       std::unique_ptr<typename DiffusionEngine::MassSolverBundle> bundle;
-      mfem::Array<int> essVdofs;          // Dirichlet dofs (empty if none)
-      mfem::real_t dirichletValue = 0.0;  // prescribed BC value
+      mfem::Array<int> essVdofs;         // Dirichlet dofs (empty if none)
+      mfem::real_t dirichletValue = 0.0; // prescribed BC value
     };
     struct ImplicitSolverSlot {
-      std::unique_ptr<mfem::SparseMatrix> J; // (M + gamma·K), Dirichlet-eliminated
+      std::unique_ptr<mfem::SparseMatrix>
+          J; // (M + gamma·K), Dirichlet-eliminated
       std::unique_ptr<typename DiffusionEngine::MassSolverBundle> bundle;
     };
 
@@ -915,9 +913,11 @@ private:
   //     (Phase 2 concern; the gate `bool nonlinearK_` is false in Phase 1)
   // --------------------------------------------------------------------
   struct ImplicitCache {
-    std::unique_ptr<mfem::ParBilinearForm> A_bf; // eliminated system + mat_e (for RHS shift)
-    std::unique_ptr<mfem::HypreParMatrix> A;      // ParallelAssemble(A_bf) — for solve
-    mfem::Array<int> essVdofs;             // essential vdofs (for RHS shift)
+    std::unique_ptr<mfem::ParBilinearForm>
+        A_bf; // eliminated system + mat_e (for RHS shift)
+    std::unique_ptr<mfem::HypreParMatrix>
+        A;                     // ParallelAssemble(A_bf) — for solve
+    mfem::Array<int> essVdofs; // essential vdofs (for RHS shift)
     NumericType dtCached = NumericType(-1);
   };
   std::map<std::string, ImplicitCache> implicitCache_;
@@ -940,12 +940,11 @@ private:
 
   /// Refine marked box; MFEM Update() prolongates GridFunctions in
   /// place. Returns number of elements refined.
-  bool applyRuntimeAmr(
-      std::map<std::string, SpeciesSystem> &systems,
-      std::map<std::string, const mfem::SparseMatrix *> &Ms,
-      std::map<std::string, const mfem::SparseMatrix *> &Ks,
-      const std::vector<std::string> &names,
-      std::map<std::string, BdrMasks> &bdrMasks) {
+  bool applyRuntimeAmr(std::map<std::string, SpeciesSystem> &systems,
+                       std::map<std::string, const mfem::SparseMatrix *> &Ms,
+                       std::map<std::string, const mfem::SparseMatrix *> &Ks,
+                       const std::vector<std::string> &names,
+                       std::map<std::string, BdrMasks> &bdrMasks) {
     if (amrLevelsDone_ >= amrMaxLevels_ || !mesh_ || !fes_)
       return false;
     RefinementBox box{amrBox_.x0, amrBox_.x1, amrBox_.y0, amrBox_.y1};
@@ -995,7 +994,8 @@ private:
 
     // Rebuild the FE space from scratch on the refined mesh.
     fec_ = std::make_unique<mfem::H1_FECollection>(1, D);
-    fes_ = std::make_unique<mfem::ParFiniteElementSpace>(mesh_.get(), fec_.get());
+    fes_ =
+        std::make_unique<mfem::ParFiniteElementSpace>(mesh_.get(), fec_.get());
 
     // Re-initialize species on the new space with dose-preserving uniform fill.
     // For H1-P1 on conforming refinement, this conserves total dose to O(dt).
@@ -1047,8 +1047,8 @@ private:
       auto it = systems.find(name);
       if (it == systems.end())
         throw std::runtime_error(
-            "DiffusionEngine::solveImplicitEuler: missing system for '" +
-            name + "'");
+            "DiffusionEngine::solveImplicitEuler: missing system for '" + name +
+            "'");
       Ms[name] = &it->second.M->SpMat();
       Ks[name] = &it->second.K->SpMat();
     }
@@ -1056,121 +1056,121 @@ private:
     NumericType t = tStart;
     while (t < tEnd) {
       NumericType dtOuter = std::min(dtMax, tEnd - t);
-      const NumericType dt =
-          dtOuter / static_cast<NumericType>(subCycles_);
+      const NumericType dt = dtOuter / static_cast<NumericType>(subCycles_);
       // Sub-cycling: advance subCycles_ micro-steps of size dt.
       for (int sc = 0; sc < subCycles_; ++sc) {
-      if (t >= tEnd)
-        break;
-      const double dtd = static_cast<double>(dt);
+        if (t >= tEnd)
+          break;
+        const double dtd = static_cast<double>(dt);
 
-      // Picard: rebuild M/K/R from current concentration fields.
-      if (picardReassembly_) {
-        systems = assembleAllSpecies();
-        for (const auto &name : names) {
-          Ms[name] = &systems[name].M->SpMat();
-          Ks[name] = &systems[name].K->SpMat();
-        }
-        implicitCache_.clear();
-      }
-
-      // Runtime AMR: mark-only hook (between-step refine implemented but
-      // blocked by MFEM serial-H1 GeneralRefinement crash; see ledger note).
-      if (runtimeAmr_ && mesh_ && (++amrStepCounter_ % amrEvery_ == 0)) {
-        ++amrRefineCount_;
-        applyRuntimeAmr(systems, Ms, Ks, names, bdrMasks);
-        // refineBetweenSteps() is implemented but causes segfault on MFEM
-        // serial H1 (mesh Nodes GF tied to dead FESpace). Left as mark-only
-        // until MFEM parallel mesh or full re-setup path is available.
-      }
-
-      for (const auto &name : names) {
-        mfem::GridFunction &gf = *allSpecies_[name];
-        const auto &masks = bdrMasks.at(name);
-
-        // Build or fetch cached eliminated system matrix for this (species, dt).
-        auto &cache = implicitCache_[name];
-        const bool dtChanged = !cache.A_bf || cache.dtCached != dt;
-        if (dtChanged) {
-          // A_bf = M + dt*K + dt*BoundaryMass(h)  (Robin dose-loss).
-          cache.A_bf = std::make_unique<mfem::ParBilinearForm>(fes_.get());
-          mfem::ConstantCoefficient oneCoef(1.0);
-          cache.A_bf->AddDomainIntegrator(new mfem::MassIntegrator(oneCoef));
-          cache.A_bf->Assemble();
-          // K already includes Robin boundary mass from assembleAllSpecies.
-          cache.A_bf->SpMat().Add(dtd, *Ks[name]);
-          cache.A_bf->Finalize();
-
-          // Resolve essential vdofs as a LIST (EliminateVDofs takes a list,
-          // not a marker array).
-          cache.essVdofs.SetSize(0);
-          if (masks.dirichletCoef != nullptr) {
-            mfem::Array<int> essMarker;
-            fes_->GetEssentialTrueDofs(masks.essAttrMarker, essMarker);
-            cache.essVdofs = essMarker;
-            // Eliminate essential vdofs from A, storing the off-diagonal
-            // entries in mat_e (used by EliminateVDofsInRHS each step).
-            cache.A_bf->EliminateVDofs(
-                cache.essVdofs, mfem::Operator::DiagonalPolicy::DIAG_ONE);
-            cache.A_bf->Finalize();
+        // Picard: rebuild M/K/R from current concentration fields.
+        if (picardReassembly_) {
+          systems = assembleAllSpecies();
+          for (const auto &name : names) {
+            Ms[name] = &systems[name].M->SpMat();
+            Ks[name] = &systems[name].K->SpMat();
           }
-          // Build HypreParMatrix from the eliminated ParBilinearForm
-          cache.A.reset(cache.A_bf->ParallelAssemble());
-          cache.dtCached = dt;
+          implicitCache_.clear();
         }
 
-        // RHS: b = M u + dt R, plus non-zero Neumann flux on marked bdr.
-        mfem::Vector M_u(ndof);
-        Ms[name]->Mult(gf, M_u);
-        mfem::Vector b(ndof);
-        b = M_u;
-        b.Add(dtd, *systems[name].R);
-
-        if (masks.neumannAttrMarker.Size() > 0 &&
-            masks.neumannAttrMarker.Max() > 0) {
-          mfem::ParLinearForm bndRHS(fes_.get());
-          // MFEM requires non-const Array& for the bdr marker.
-          mfem::Array<int> neumannMarker = masks.neumannAttrMarker;
-          bndRHS.AddBoundaryIntegrator(
-              new mfem::BoundaryLFIntegrator(*masks.neumannCoef),
-              neumannMarker);
-          bndRHS.Assemble();
-          b.Add(dtd, bndRHS);
+        // Runtime AMR: mark-only hook (between-step refine implemented but
+        // blocked by MFEM serial-H1 GeneralRefinement crash; see ledger note).
+        if (runtimeAmr_ && mesh_ && (++amrStepCounter_ % amrEvery_ == 0)) {
+          ++amrRefineCount_;
+          applyRuntimeAmr(systems, Ms, Ks, names, bdrMasks);
+          // refineBetweenSteps() is implemented but causes segfault on MFEM
+          // serial H1 (mesh Nodes GF tied to dead FESpace). Left as mark-only
+          // until MFEM parallel mesh or full re-setup path is available.
         }
 
-        // Apply Dirichlet to RHS via the cached mat_e: b -= A_e * u, then
-        // b[essVdofs] = prescValues[essVdofs]. The "current state" passed
-        // in must have prescribed values at the essential dofs. We build
-        // a copy of gf with Dirichlet values stamped on essential dofs so
-        // the original GridFunction is not mutated.
-        if (masks.dirichletCoef != nullptr) {
-          mfem::Vector uStamp = gf; // copy: ndof-sized Vector view of gf
-          for (int i = 0; i < cache.essVdofs.Size(); ++i)
-            uStamp(cache.essVdofs[i]) = masks.dirichletValue;
-          cache.A_bf->EliminateVDofsInRHS(cache.essVdofs, uStamp, b);
+        for (const auto &name : names) {
+          mfem::GridFunction &gf = *allSpecies_[name];
+          const auto &masks = bdrMasks.at(name);
+
+          // Build or fetch cached eliminated system matrix for this (species,
+          // dt).
+          auto &cache = implicitCache_[name];
+          const bool dtChanged = !cache.A_bf || cache.dtCached != dt;
+          if (dtChanged) {
+            // A_bf = M + dt*K + dt*BoundaryMass(h)  (Robin dose-loss).
+            cache.A_bf = std::make_unique<mfem::ParBilinearForm>(fes_.get());
+            mfem::ConstantCoefficient oneCoef(1.0);
+            cache.A_bf->AddDomainIntegrator(new mfem::MassIntegrator(oneCoef));
+            cache.A_bf->Assemble();
+            // K already includes Robin boundary mass from assembleAllSpecies.
+            cache.A_bf->SpMat().Add(dtd, *Ks[name]);
+            cache.A_bf->Finalize();
+
+            // Resolve essential vdofs as a LIST (EliminateVDofs takes a list,
+            // not a marker array).
+            cache.essVdofs.SetSize(0);
+            if (masks.dirichletCoef != nullptr) {
+              mfem::Array<int> essMarker;
+              fes_->GetEssentialTrueDofs(masks.essAttrMarker, essMarker);
+              cache.essVdofs = essMarker;
+              // Eliminate essential vdofs from A, storing the off-diagonal
+              // entries in mat_e (used by EliminateVDofsInRHS each step).
+              cache.A_bf->EliminateVDofs(
+                  cache.essVdofs, mfem::Operator::DiagonalPolicy::DIAG_ONE);
+              cache.A_bf->Finalize();
+            }
+            // Build HypreParMatrix from the eliminated ParBilinearForm
+            cache.A.reset(cache.A_bf->ParallelAssemble());
+            cache.dtCached = dt;
+          }
+
+          // RHS: b = M u + dt R, plus non-zero Neumann flux on marked bdr.
+          mfem::Vector M_u(ndof);
+          Ms[name]->Mult(gf, M_u);
+          mfem::Vector b(ndof);
+          b = M_u;
+          b.Add(dtd, *systems[name].R);
+
+          if (masks.neumannAttrMarker.Size() > 0 &&
+              masks.neumannAttrMarker.Max() > 0) {
+            mfem::ParLinearForm bndRHS(fes_.get());
+            // MFEM requires non-const Array& for the bdr marker.
+            mfem::Array<int> neumannMarker = masks.neumannAttrMarker;
+            bndRHS.AddBoundaryIntegrator(
+                new mfem::BoundaryLFIntegrator(*masks.neumannCoef),
+                neumannMarker);
+            bndRHS.Assemble();
+            b.Add(dtd, bndRHS);
+          }
+
+          // Apply Dirichlet to RHS via the cached mat_e: b -= A_e * u, then
+          // b[essVdofs] = prescValues[essVdofs]. The "current state" passed
+          // in must have prescribed values at the essential dofs. We build
+          // a copy of gf with Dirichlet values stamped on essential dofs so
+          // the original GridFunction is not mutated.
+          if (masks.dirichletCoef != nullptr) {
+            mfem::Vector uStamp = gf; // copy: ndof-sized Vector view of gf
+            for (int i = 0; i < cache.essVdofs.Size(); ++i)
+              uStamp(cache.essVdofs[i]) = masks.dirichletValue;
+            cache.A_bf->EliminateVDofsInRHS(cache.essVdofs, uStamp, b);
+          }
+
+          // Solve A u_{n+1} = b against the eliminated HypreParMatrix.
+          mfem::HypreBoomerAMG amg(*cache.A);
+          amg.SetPrintLevel(0);
+          mfem::HyprePCG pcg(*cache.A);
+          pcg.SetPreconditioner(amg);
+          pcg.SetTol(1e-9);
+          pcg.SetMaxIter(500);
+          pcg.SetPrintLevel(0);
+          mfem::Vector unext(ndof);
+          unext = 0.0;
+          pcg.Mult(b, unext);
+
+          mfem::Vector gfVec(gf.GetData(), ndof);
+          gfVec = unext;
         }
 
-        // Solve A u_{n+1} = b against the eliminated HypreParMatrix.
-        mfem::HypreBoomerAMG amg(*cache.A);
-        amg.SetPrintLevel(0);
-        mfem::HyprePCG pcg(*cache.A);
-        pcg.SetPreconditioner(amg);
-        pcg.SetTol(1e-9);
-        pcg.SetMaxIter(500);
-        pcg.SetPrintLevel(0);
-        mfem::Vector unext(ndof);
-        unext = 0.0;
-        pcg.Mult(b, unext);
+        // Operator-split segregation (dual-species interface exchange).
+        if (enableSegregationSplit_)
+          applySegregationOperatorSplit(static_cast<double>(dt));
 
-        mfem::Vector gfVec(gf.GetData(), ndof);
-        gfVec = unext;
-      }
-
-      // Operator-split segregation (dual-species interface exchange).
-      if (enableSegregationSplit_)
-        applySegregationOperatorSplit(static_cast<double>(dt));
-
-      t += dt;
+        t += dt;
       } // sub-cycle
     }
   }
@@ -1236,8 +1236,7 @@ private:
         if (!m.dirichletCoefOwner) {
           m.dirichletValue = static_cast<mfem::real_t>(bc.value);
           m.dirichletCoefOwner =
-              std::make_unique<mfem::ConstantCoefficient>(
-                  m.dirichletValue);
+              std::make_unique<mfem::ConstantCoefficient>(m.dirichletValue);
           m.dirichletCoef = m.dirichletCoefOwner.get();
         }
       } else if (bc.type == "neumann") {
@@ -1245,9 +1244,8 @@ private:
           continue; // natural; no integrator
         marker = &m.neumannAttrMarker;
         if (!m.neumannCoefOwner) {
-          m.neumannCoefOwner =
-              std::make_unique<mfem::ConstantCoefficient>(
-                  static_cast<mfem::real_t>(bc.value));
+          m.neumannCoefOwner = std::make_unique<mfem::ConstantCoefficient>(
+              static_cast<mfem::real_t>(bc.value));
           m.neumannCoef = m.neumannCoefOwner.get();
         }
       } else if (bc.type == "robin") {
@@ -1289,10 +1287,10 @@ private:
       if (attr >= 1 && attr <= marker.Size())
         marker[attr - 1] = 1;
       else
-        throw std::runtime_error(
-            "DiffusionEngine: boundary attribute " + spec +
-            " out of range; mesh has " +
-            std::to_string(marker.Size()) + " bdr attributes");
+        throw std::runtime_error("DiffusionEngine: boundary attribute " + spec +
+                                 " out of range; mesh has " +
+                                 std::to_string(marker.Size()) +
+                                 " bdr attributes");
     } catch (const std::invalid_argument &) {
       throw std::runtime_error(
           "DiffusionEngine: boundary spec '" + spec +
