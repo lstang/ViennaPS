@@ -212,6 +212,7 @@ public:
   }
   void setRuntimeAmr(bool on) { runtimeAmr_ = on; }
   int runtimeAmrRefineCount() const { return amrRefineCount_; }
+  bool usedImplicitEulerPath() const { return usedImplicitEuler_; }
   int lastAmrMarkCount() const { return lastAmrMarkCount_; }
 
   /// Force implicit Euler even when CVODE is available (deterministic tests).
@@ -328,14 +329,9 @@ public:
     // Dirichlet BCs via operator essential-dof enforcement, multi-species
     // packed-block state layout.
     //
-    // Runtime AMR (ParMesh GeneralRefinement + prolongation) is currently
-    // implemented ONLY on the implicit-Euler path. If a user enables AMR
-    // (`setRuntimeAmrBox`) on a SUNDIALS build, force implicit Euler and
-    // warn once — silently skipping AMR on CVODE would be a false-closure
-    // hazard. Adding AMR to solveCVODE requires rebuilding the
-    // DiffusionRHSOperator's packed-state layout + per-species solvers
-    // mid-integration and is out of scope for the ParMesh AMR plan
-    // (Task 8 targets the implicit-Euler path).
+    // Runtime AMR (ParMesh GeneralRefinement + prolongation) is handled
+    // inside solveCVODE via segment checkpointing, or inside
+    // solveImplicitEuler.
     //
     // CVODE's per-call inner CG solves MUST set `iterative_mode = false`
     // (see DiffusionRHSOperator::Mult and SUNImplicitSolve). Without it,
@@ -344,21 +340,15 @@ public:
     // previous Mult calls - leading to NaN on the second solve() call.
     // This was the root cause of F9, now resolved.
 #ifdef MFEM_USE_SUNDIALS
-    if (forceImplicitEuler_ || runtimeAmr_) {
-      if (runtimeAmr_ && !forceImplicitEuler_) {
-        static thread_local bool warnedAmrCvode = false;
-        if (!warnedAmrCvode) {
-          warnedAmrCvode = true;
-          std::cerr << "[DiffusionEngine] WARNING: runtime AMR is enabled "
-                       "but CVODE AMR is not implemented; forcing implicit "
-                       "Euler so refinement runs.\n";
-        }
-      }
+    if (forceImplicitEuler_) {
+      usedImplicitEuler_ = true;
       solveImplicitEuler(tStart, tEnd, dtMax);
     } else {
+      usedImplicitEuler_ = false;
       solveCVODE(tStart, tEnd, dtMax);
     }
 #else
+    usedImplicitEuler_ = true;
     solveImplicitEuler(tStart, tEnd, dtMax);
 #endif
   }
@@ -657,9 +647,9 @@ private:
     // unpacks species blocks, computes M^{-1}(-K u + R) per species, and
     // repacks.
     std::vector<std::string> names = physics_->speciesNames();
-    const int ndof = fes_->GetVSize();
+    int ndof = fes_->GetVSize();
     const int nSpecies = static_cast<int>(names.size());
-    const int totalSize = ndof * nSpecies;
+    int totalSize = ndof * nSpecies;
 
     // Per-species BC resolution - same as the implicit-Euler path. Each
     // species gets its Dirichlet/Neumann/Robin mask set.
@@ -673,21 +663,29 @@ private:
     // frees state's memory before ~CVODESolver is done with it.
     mfem::Vector state(totalSize);
 
-    DiffusionRHSOperator op(*this, systems, names, ndof, nSpecies, totalSize,
-                            bdrMasks);
+    std::unique_ptr<DiffusionRHSOperator> op;
+    std::unique_ptr<mfem::CVODESolver> cvode;
 
-    mfem::CVODESolver cvode(CV_BDF);
-    cvode.Init(op);
-    // CVODE tolerances: reltol=1e-6 is tight enough for diffusion; abstol
-    // should be small relative to the smallest expected |y|. Dopant concs
-    // span 1e10-1e20, so abstol=1e5 catches the noise floor without
-    // dominating at low concentrations.
-    // abstol=1e5: absolute floor for dopant-scale fields (~1e10–1e20).
-    // Defect species at lower concentrations may need a tighter per-species
-    // abstol later; a single global value is Phase-1/production default.
-    cvode.SetSStolerances(/*reltol*/ 1e-6, /*abstol*/ 1e5);
-    cvode.SetMaxStep(static_cast<double>(dtMax));
-    cvode.UseMFEMLinearSolver();
+    // Build (or rebuild, after an AMR segment) the RHS operator and a
+    // fresh CVODE solver. A solver's operator is bound at Init, so a
+    // refined mesh requires a NEW solver; ReInit cannot swap operators.
+    auto buildIntegrator = [&]() {
+      op = std::make_unique<DiffusionRHSOperator>(
+          *this, systems, names, ndof, nSpecies, totalSize, bdrMasks);
+      cvode = std::make_unique<mfem::CVODESolver>(CV_BDF);
+      cvode->Init(*op);
+      // CVODE tolerances: reltol=1e-6 is tight enough for diffusion; abstol
+      // should be small relative to the smallest expected |y|. Dopant concs
+      // span 1e10-1e20, so abstol=1e5 catches the noise floor without
+      // dominating at low concentrations.
+      // abstol=1e5: absolute floor for dopant-scale fields (~1e10–1e20).
+      // Defect species at lower concentrations may need a tighter per-species
+      // abstol later; a single global value is Phase-1/production default.
+      cvode->SetSStolerances(/*reltol*/ 1e-6, /*abstol*/ 1e5);
+      cvode->SetMaxStep(static_cast<double>(dtMax));
+      cvode->UseMFEMLinearSolver();
+    };
+    buildIntegrator();
 
     // Pack initial state. For Dirichlet dofs, stamp the prescribed value
     // so CVODE's predictor starts from the correct boundary state (the
@@ -712,8 +710,37 @@ private:
     while (t < tFinal) {
       const double targetTime = std::min(t + dt, tFinal);
       dt = targetTime - t;
-      cvode.SetMaxStep(tFinal - t);
-      cvode.Step(state, t, dt);
+      cvode->SetMaxStep(tFinal - t);
+      cvode->Step(state, t, dt);
+
+      // Runtime AMR checkpoint on the CVODE path (segment restart):
+      // 1) sync the live packed state into the species GridFunctions —
+      //    mid-integration those GFs are STALE, and refineBetweenSteps()
+      //    prolongs whatever is in them, so this sync MUST come first.
+      // 2) refine + prolong, 3) repack at the new resolution,
+      // 4) rebuild systems + operator + a fresh CVODESolver, restart BDF
+      //    from the current time.
+      if (runtimeAmr_ && (++amrStepCounter_ % amrEvery_ == 0)) {
+        for (int s = 0; s < nSpecies; ++s) {
+          auto &gf = *allSpecies_[names[s]];
+          mfem::Vector block(state.GetData() + s * ndof, ndof);
+          gf = block;
+        }
+        if (refineBetweenSteps()) {
+          ++amrRefineCount_;
+          ndof = fes_->GetVSize();
+          totalSize = ndof * nSpecies;
+          state.SetSize(totalSize);
+          for (int s = 0; s < nSpecies; ++s) {
+            auto &gf = *allSpecies_[names[s]];
+            mfem::Vector block(state.GetData() + s * ndof, ndof);
+            block = gf;
+          }
+          systems = assembleAllSpecies();
+          buildIntegrator();
+        }
+      }
+
       if (t >= tFinal)
         break;
     }
@@ -953,6 +980,7 @@ private:
   std::map<std::string, ImplicitCache> implicitCache_;
   bool picardReassembly_ = false;
   bool forceImplicitEuler_ = false;
+  bool usedImplicitEuler_ = false;
   bool enableSegregationSplit_ = false;
   int subCycles_ = 1;
   bool enableJacobian_ = false;

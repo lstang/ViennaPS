@@ -3088,6 +3088,72 @@ void TestRuntimeAmrNonUniformIC() {
   VC_TEST_ASSERT(peakFinal > 1.5 * avgFinal);
 }
 
+void TestAmrCvode() {
+  // --- Runtime AMR on the CVODE path: refinement must run WITHOUT the
+  // implicit-Euler fallback, and dose must stay conserved.
+  {
+    MeshAttributes attrs;
+    attrs.setAttributeName(1, "Si");
+    auto mesh = std::make_unique<mfem::Mesh>(
+        mfem::Mesh::MakeCartesian2D(8, 8, mfem::Element::TRIANGLE));
+    DiffusionEngine<double, 2> engine;
+    engine.setMesh(std::move(mesh), attrs);
+    auto model = std::make_shared<ConstantDiffusion<double>>("Boron");
+    model->setDiffusivity(1e-4, 0.0);
+    DiffusionPhysics<double> physics;
+    physics.addSpecies("Boron");
+    physics.addModel(model);
+    physics.setTemperature(1273.0);
+    engine.setPhysics(physics);
+    engine.initializeSpecies("Boron", 1e18);
+    engine.setRuntimeAmrBox(0.25, 0.75, 0.25, 0.75, /*everyNSteps=*/2);
+    const double d0 = engine.getIntegral("Boron");
+    engine.solve(0.0, 0.2, 0.05);
+    const double d1 = engine.getIntegral("Boron");
+    const double rel = std::abs(d1 - d0) / std::max(d0, 1.0);
+    std::cout << "[amr-cvode] implicitPath=" << engine.usedImplicitEulerPath()
+              << " refineCount=" << engine.runtimeAmrRefineCount()
+              << " marks=" << engine.lastAmrMarkCount() << " doseRel=" << rel
+              << "\n";
+    VC_TEST_ASSERT(!engine.usedImplicitEulerPath());
+    VC_TEST_ASSERT(engine.runtimeAmrRefineCount() > 0);
+    VC_TEST_ASSERT(engine.lastAmrMarkCount() > 0);
+    VC_TEST_ASSERT(rel < 0.05);
+  }
+
+  // --- AMR CVODE vs AMR implicit-Euler: same physics, comparable dose
+  // (both integrators solve the same ODE; CVODE is adaptive, Euler is
+  // fixed-step, so allow 5% agreement).
+  {
+    MeshAttributes attrs;
+    attrs.setAttributeName(1, "Si");
+    auto runAmr = [&](bool forceEuler) {
+      auto mesh = std::make_unique<mfem::Mesh>(
+          mfem::Mesh::MakeCartesian2D(8, 8, mfem::Element::TRIANGLE));
+      DiffusionEngine<double, 2> engine;
+      engine.setMesh(std::move(mesh), attrs);
+      auto model = std::make_shared<ConstantDiffusion<double>>("Boron");
+      model->setDiffusivity(1e-4, 0.0);
+      DiffusionPhysics<double> physics;
+      physics.addSpecies("Boron");
+      physics.addModel(model);
+      physics.setTemperature(1273.0);
+      engine.setPhysics(physics);
+      engine.initializeSpecies("Boron", 1e18);
+      engine.setRuntimeAmrBox(0.25, 0.75, 0.25, 0.75, /*everyNSteps=*/2);
+      engine.setForceImplicitEuler(forceEuler);
+      engine.solve(0.0, 0.2, 0.05);
+      return engine.getIntegral("Boron");
+    };
+    const double dCvode = runAmr(false);
+    const double dEuler = runAmr(true);
+    const double rel = std::abs(dCvode - dEuler) / std::max(dEuler, 1.0);
+    std::cout << "[amr-cvode] cvode=" << dCvode << " euler=" << dEuler
+              << " rel=" << rel << "\n";
+    VC_TEST_ASSERT(rel < 0.10);
+  }
+}
+
 int main() {
   try {
     TestIntrinsicCarrier();
@@ -3136,6 +3202,7 @@ int main() {
     TestReentrantSolve();
     TestRuntimeAmrDosePreservation();
     TestRuntimeAmrNonUniformIC();
+    TestAmrCvode();
     TestFemClosures();
     TestKmcIdwDoseConservation();
     std::cout << "All diffusion tests passed.\n";
