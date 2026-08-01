@@ -38,3 +38,7 @@ last_configure.log
 
 # uv lockfile (keep out of VCS until pyproject workspace is finalized)
 uv.lock
+
+
+# Worktree directory
+.worktrees/
