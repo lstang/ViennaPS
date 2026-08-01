@@ -9,9 +9,12 @@
 /// assembly code. GAP_ANALYSIS §4.3: commercial tools feed implant damage
 /// into the anneal step automatically; this is that bridge.
 
-#include "../models/psMCBcaImplant.hpp"
 #include "DiffusionEngine.hpp"
+#include "models/ConstantDiffusion.hpp"
+#include "models/PairDiffusion.hpp"
+#include "models/psMCBcaImplant.hpp"
 
+#include <memory>
 #include <numeric>
 #include <string>
 #include <vector>
@@ -40,6 +43,26 @@ public:
     const NumericType dose =
         std::accumulate(profile.begin(), profile.end(), NumericType(0));
     engine.projectIntegralPreserving(name, profile, dose);
+  }
+
+  /// TED pair-diffusion factory: D_eff = D_pair * C_I / C_I_eq.
+  static std::shared_ptr<PairDiffusion<NumericType>>
+  makeTedPair(const std::string &dopant, const std::string &interstitial,
+              NumericType D_pair, NumericType C_Ieq) {
+    auto m =
+        std::make_shared<PairDiffusion<NumericType>>(dopant, interstitial);
+    m->setPairDiffusivity(D_pair);
+    m->setCIEq(C_Ieq);
+    return m;
+  }
+
+  /// Defect transport factory (Arrhenius constant diffusivity).
+  static std::shared_ptr<ConstantDiffusion<NumericType>>
+  makeDefectTransport(const std::string &species, NumericType D0,
+                      NumericType Ea_eV) {
+    auto m = std::make_shared<ConstantDiffusion<NumericType>>(species);
+    m->setDiffusivity(D0, Ea_eV);
+    return m;
   }
 };
 
