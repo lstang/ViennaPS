@@ -53,10 +53,8 @@ void TestImplantDamageSeeding() {
   const double iDose = engine.getIntegral("Interstitial");
   const double vDose = engine.getIntegral("Vacancy");
   std::cout << "[implant-coupling] target=" << dopantDose
-            << " seeded=" << seeded << " I=" << iDose << " V=" << vDose
-            << "\n";
-  VC_TEST_ASSERT(std::abs(seeded - dopantDose) /
-                     std::max(dopantDose, 1.0) <
+            << " seeded=" << seeded << " I=" << iDose << " V=" << vDose << "\n";
+  VC_TEST_ASSERT(std::abs(seeded - dopantDose) / std::max(dopantDose, 1.0) <
                  1e-3);
   VC_TEST_ASSERT(iDose > 0.0);
   VC_TEST_ASSERT(vDose > 0.0);

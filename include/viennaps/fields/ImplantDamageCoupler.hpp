@@ -49,8 +49,7 @@ public:
   static std::shared_ptr<PairDiffusion<NumericType>>
   makeTedPair(const std::string &dopant, const std::string &interstitial,
               NumericType D_pair, NumericType C_Ieq) {
-    auto m =
-        std::make_shared<PairDiffusion<NumericType>>(dopant, interstitial);
+    auto m = std::make_shared<PairDiffusion<NumericType>>(dopant, interstitial);
     m->setPairDiffusivity(D_pair);
     m->setCIEq(C_Ieq);
     return m;
