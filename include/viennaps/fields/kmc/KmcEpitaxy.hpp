@@ -2,6 +2,7 @@
 
 /// KMC lattice epitaxy helpers (Phase 8 skeleton).
 
+#include "KmcAtomisticEngine.hpp"
 #include "KmcLattice.hpp"
 
 #include <algorithm>
@@ -129,6 +130,25 @@ public:
 
   double effectiveGrowthRate() const {
     return growthRate_ * geGrowthFactor();
+  }
+
+  /// Rate-based parity: run the BKL KmcAtomisticEngine epitaxy path with
+  /// this model's growth rate and Ge fraction. Returns the number of
+  /// Deposit events executed; `lat` is updated in place.
+  int runRateBased(KmcLattice &lat, int maxSteps, unsigned seed = 42) {
+    KmcAtomisticEngine<double> engine(seed);
+    engine.setLattice(lat);
+    KmcParameters p;
+    p.attachPreFactor *= growthRate_;
+    p.desorbPreFactor = 0; // deterministic growth mode (matches planarGrow)
+    p.twinPreFactor = 0;
+    engine.setParameters(p);
+    engine.setEpitaxyEnabled(true);
+    engine.setDiamondNeighbors(true);
+    engine.setGeFraction(xGe_);
+    engine.run(maxSteps);
+    lat = engine.lattice();
+    return engine.depositCount();
   }
 
 private:

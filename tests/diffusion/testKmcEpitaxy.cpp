@@ -142,6 +142,21 @@ template <class NumericType, int D> void RunTest() {
     VC_TEST_ASSERT(engine.depositCount() > 0);
     VC_TEST_ASSERT(engine.twinCount() < engine.depositCount() * 0.15);
   }
+
+  // --- Test 7: KmcEpitaxyModel rate-based parity.
+  {
+    std::cout << "[kmc-epi] Test 7 start" << std::endl;
+    KmcLattice lat;
+    lat.resize(8, 8, 8);
+    seedFloor(lat);
+    KmcEpitaxyModel model;
+    model.setGrowthRate(1.0);
+    model.setGeFraction(0.0);
+    const int deposits = model.runRateBased(lat, 64);
+    std::cout << "[kmc-epi] model.runRateBased deposits=" << deposits << std::endl;
+    VC_TEST_ASSERT(deposits > 0);
+    VC_TEST_ASSERT(lat.countSpecies(KmcSi) > 64);
+  }
 }
 
 } // namespace viennacore
