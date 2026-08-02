@@ -577,3 +577,31 @@ Two ways to execute:
    `superpowers:executing-plans`, running the exact build/test commands above.
 
 The user selects which; the plan's TDD steps are self-contained either way.
+
+## Amendment (2026-08-01, post-merge repair — P1T3 protocol)
+
+Found during merge-back verification (fresh `zcode` rebuild): the rate-rewrite
+commit `b75d5859` deleted `KmcDeatomize`, `KmcAmorphousPocket`, `KmcReport`,
+and `KmcContinuumCoupler` from `KmcAtomisticEngine.hpp` and templated the
+engine as `template <class NumericType>` **without a default template
+argument**, while `testDiffusion.cpp` — never recompiled after `b75d5859`
+(the 40/40 suite ran a stale `testDiffusion.exe`, mtimes predate the commit)
+— still uses the pre-existing API surface (`KmcDeatomize::deatomize`/
+`deatomizeIDW`, `KmcAmorphousPocket::implant`, `KmcReport::fromEngine`,
+`KmcContinuumCoupler::hopAndDeatomize`, bare `KmcAtomisticEngine` uses).
+
+- **Conflicts with this plan's own mandate**: the plan's Backward-compatibility
+  section (lines 76–79, "`KmcAtomisticEngine`'s existing API … keeps its
+  signatures") required the old call syntax to survive; the deletion and the
+  missing default template argument both violate it.
+- **Fix (commit `[FIX]` on `gemini`)**: restored the four classes verbatim
+  (self-contained; depend only on `KmcLattice` accessors and the engine's
+  surviving getters `time/steps/recombCount/clusterCount/dissocCount/lattice`);
+  added `template <class NumericType = double>` so bare `KmcAtomisticEngine`
+  declarations keep compiling; used explicit `KmcAtomisticEngine<double>` in
+  `KmcReport::fromEngine`/`KmcContinuumCoupler::hopAndDeatomize` signatures
+  (MSVC C2955 rejects the bare template-name in parameter declarations even
+  with a default). `KmcAtomize` had survived the rewrite and is untouched.
+- **Verified**: full suite **40/40 PASS** on a fresh rebuild at the fix commit
+  (main checkout `zcode`), including the previously-uncompiled KMC tests in
+  `testDiffusion.cpp`; test target `testDiffusion` compiles clean.
