@@ -66,7 +66,7 @@ private:
   std::vector<Real> tree_;
 };
 
-template <class NumericType> class KmcAtomisticEngine {
+template <class NumericType = double> class KmcAtomisticEngine {
 public:
   KmcAtomisticEngine() = default;
   explicit KmcAtomisticEngine(unsigned seed) : rng_(seed) {}
@@ -491,6 +491,142 @@ public:
             s.species = speciesCode;
           }
         }
+  }
+};
+
+class KmcDeatomize {
+public:
+  static void deatomize(const KmcLattice &lat, std::vector<double> &conc,
+                        double volumePerSite, int speciesCode) {
+    conc.assign(lat.size(), 0.0);
+    std::size_t idx = 0;
+    for (int k = 0; k < lat.nz(); ++k)
+      for (int j = 0; j < lat.ny(); ++j)
+        for (int i = 0; i < lat.nx(); ++i) {
+          const auto &s = lat.at(i, j, k);
+          conc[idx++] =
+              (s.occupied && s.species == speciesCode) ? (1.0 / volumePerSite)
+                                                       : 0.0;
+        }
+  }
+
+  /// Inverse-distance weighted smooth of discrete occupations onto a 1D/flat
+  /// continuum grid of length `nOut` (depth bins along k).
+  static std::vector<double> deatomizeIDW(const KmcLattice &lat,
+                                          int speciesCode, int nOut,
+                                          double power = 2.0) {
+    std::vector<double> out(static_cast<std::size_t>(std::max(nOut, 1)), 0.0);
+    if (nOut <= 0 || lat.nz() <= 0)
+      return out;
+    std::vector<double> wsum(out.size(), 0.0);
+    for (int k = 0; k < lat.nz(); ++k) {
+      int count = 0;
+      for (int j = 0; j < lat.ny(); ++j)
+        for (int i = 0; i < lat.nx(); ++i)
+          if (lat.at(i, j, k).occupied &&
+              lat.at(i, j, k).species == speciesCode)
+            ++count;
+      const double zk = static_cast<double>(k) / std::max(lat.nz() - 1, 1);
+      for (int b = 0; b < nOut; ++b) {
+        const double zb =
+            static_cast<double>(b) / std::max(nOut - 1, 1);
+        const double d = std::abs(zk - zb) + 1e-9;
+        const double w = 1.0 / std::pow(d, power);
+        out[static_cast<std::size_t>(b)] += w * count;
+        wsum[static_cast<std::size_t>(b)] += w;
+      }
+    }
+    for (std::size_t i = 0; i < out.size(); ++i)
+      if (wsum[i] > 0)
+        out[i] /= wsum[i];
+    return out;
+  }
+};
+
+/// Amorphous pocket: mark a cubic region as amorphous species (code 7).
+class KmcAmorphousPocket {
+public:
+  static int implant(KmcLattice &lat, int i0, int j0, int k0, int r,
+                     int amorphCode = 7) {
+    int n = 0;
+    for (int k = k0 - r; k <= k0 + r; ++k)
+      for (int j = j0 - r; j <= j0 + r; ++j)
+        for (int i = i0 - r; i <= i0 + r; ++i) {
+          if (i < 0 || j < 0 || k < 0 || i >= lat.nx() || j >= lat.ny() ||
+              k >= lat.nz())
+            continue;
+          if ((i - i0) * (i - i0) + (j - j0) * (j - j0) + (k - k0) * (k - k0) >
+              r * r)
+            continue;
+          auto &s = lat.at(i, j, k);
+          s.occupied = true;
+          s.species = amorphCode;
+          ++n;
+        }
+    return n;
+  }
+};
+
+struct KmcReport {
+  double time = 0;
+  int steps = 0;
+  int hopCount = 0;
+  int occupied = 0;
+  int recombCount = 0;
+  int clusterCount = 0;
+  int dissocCount = 0;
+  double supersaturationI = 0.0;
+  std::vector<int> depthProfileI;
+  std::map<int, int> clusterSizeHistogram; // size→count (size=1 free I, 2=cluster)
+
+  static KmcReport fromEngine(const KmcAtomisticEngine<double> &eng,
+                              double C_I_eq = 1e12) {
+    KmcReport r;
+    r.time = eng.time();
+    r.steps = eng.steps();
+    r.recombCount = eng.recombCount();
+    r.clusterCount = eng.clusterCount();
+    r.dissocCount = eng.dissocCount();
+    r.occupied = 0;
+    int nI = 0, nCl = 0;
+    for (int k = 0; k < eng.lattice().nz(); ++k)
+      for (int j = 0; j < eng.lattice().ny(); ++j)
+        for (int i = 0; i < eng.lattice().nx(); ++i) {
+          const auto &s = eng.lattice().at(i, j, k);
+          if (!s.occupied)
+            continue;
+          ++r.occupied;
+          if (s.species == 1)
+            ++nI;
+          if (s.species == 3)
+            ++nCl;
+        }
+    r.depthProfileI = eng.lattice().profile1D(1);
+    r.clusterSizeHistogram[1] = nI;
+    r.clusterSizeHistogram[2] = nCl;
+    // Supersaturation proxy: free-I count / (C_I_eq * volume units).
+    const double volSites =
+        static_cast<double>(eng.lattice().size());
+    r.supersaturationI =
+        (C_I_eq > 0 && volSites > 0)
+            ? static_cast<double>(nI) / (C_I_eq * volSites * 1e-24 + 1e-30)
+            : 0.0;
+    return r;
+  }
+};
+
+class KmcContinuumCoupler {
+public:
+  static std::vector<double>
+  hopAndDeatomize(KmcLattice lat, KmcParameters params, int speciesCode,
+                  double volumePerSite, int steps, unsigned seed = 1) {
+    KmcAtomisticEngine<double> eng(seed);
+    eng.setLattice(std::move(lat));
+    eng.setParameters(params);
+    eng.run(steps);
+    std::vector<double> conc;
+    KmcDeatomize::deatomize(eng.lattice(), conc, volumePerSite, speciesCode);
+    return conc;
   }
 };
 
