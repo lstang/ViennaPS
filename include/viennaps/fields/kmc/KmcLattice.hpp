@@ -75,4 +75,15 @@ private:
   std::vector<KmcSite> sites_;
 };
 
+class KmcVisibility {
+public:
+  /// Simple z-buffer shadowing: site visible if no occupied site above.
+  static bool isVisible(const KmcLattice &lat, int i, int j, int k) {
+    for (int kk = k + 1; kk < lat.nz(); ++kk)
+      if (lat.at(i, j, kk).occupied)
+        return false;
+    return true;
+  }
+};
+
 } // namespace viennaps

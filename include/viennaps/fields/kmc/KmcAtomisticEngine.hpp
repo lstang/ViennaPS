@@ -1,97 +1,103 @@
 #pragma once
 
-/// KmcAtomisticEngine — BKL KMC with Hop, Recombine, Cluster, Dissociate.
-///
-/// Event selection uses Fenwick tree over per-site total rates for O(log N)
-/// site selection, with O(1)-per-affected-site incremental rebuild after each
-/// event. Species codes: 0 empty, 1 interstitial, 2 vacancy, 3 {311}-like.
+/// BKL kinetic Monte Carlo atomistic engine (SProcess Ch. 5 partial;
+/// Phase 7 skeleton + Phase 8 LKMC epitaxy production rates).
 
 #include "KmcEvent.hpp"
 #include "KmcLattice.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <iostream>
 #include <map>
-#include <numeric>
+#include <memory>
 #include <random>
+#include <string>
 #include <vector>
 
 namespace viennaps {
 
-// Fenwick Tree (Binary Indexed Tree) for O(log N) prefix sums and updates.
-template <class Real>
-class FenwickTree {
+template <class Real> class FenwickTree {
 public:
   explicit FenwickTree(std::size_t n = 0) { init(n); }
 
   void init(std::size_t n) {
     n_ = n;
-    bit_.assign(n + 1, Real(0));
+    tree_.assign(n_ + 1, Real(0));
   }
 
-  void add(std::size_t i, double delta) {
-    for (std::size_t idx = i + 1; idx <= n_; idx += idx & -idx)
-      bit_[idx] += delta;
+  std::size_t size() const { return n_; }
+
+  void add(std::size_t idx, Real val) {
+    for (std::size_t i = idx + 1; i <= n_; i += (i & -i))
+      tree_[i] += val;
   }
 
-  double sum(std::size_t i) const {
-    double res = 0;
-    for (std::size_t idx = i + 1; idx > 0; idx -= idx & -idx)
-      res += bit_[idx];
-    return res;
+  Real total() const {
+    Real sum = 0;
+    for (std::size_t i = n_; i > 0; i -= (i & -i))
+      sum += tree_[i];
+    return sum;
   }
 
-  double total() const { return sum(n_ - 1); }
-
-  std::size_t lower_bound(double target) const {
-    if (target <= 0)
+  /// 0-indexed lower bound: returns smallest 0-based index whose prefix sum >= val.
+  std::size_t lower_bound(Real val) const {
+    if (n_ == 0)
       return 0;
     std::size_t idx = 0;
-    double s = 0;
-    std::size_t bit = 1;
-    while (bit << 1 <= n_)
-      bit <<= 1;
-    for (; bit > 0; bit >>= 1) {
-      std::size_t next = idx + bit;
-      if (next <= n_ && s + bit_[next] < target) {
-        idx = next;
-        s += bit_[next];
+    std::size_t mask = 1;
+    while (mask <= n_)
+      mask <<= 1;
+    mask >>= 1;
+
+    for (; mask > 0; mask >>= 1) {
+      const std::size_t nextIdx = idx + mask;
+      if (nextIdx <= n_ && val > tree_[nextIdx]) {
+        idx = nextIdx;
+        val -= tree_[idx];
       }
     }
     return std::min(idx, n_ - 1);
   }
 
-  std::size_t size() const { return n_; }
-
 private:
   std::size_t n_ = 0;
-  std::vector<double> bit_;
+  std::vector<Real> tree_;
 };
 
-class KmcAtomisticEngine {
+template <class NumericType> class KmcAtomisticEngine {
 public:
-  explicit KmcAtomisticEngine(unsigned seed = 42) : rng_(seed) {}
+  KmcAtomisticEngine() = default;
+  explicit KmcAtomisticEngine(unsigned seed) : rng_(seed) {}
 
-  void setLattice(KmcLattice lattice) { lattice_ = std::move(lattice); }
-  KmcLattice &lattice() { return lattice_; }
+  void setLattice(KmcLattice lat) {
+    lattice_ = std::move(lat);
+    fenwickInitialized_ = false;
+  }
   const KmcLattice &lattice() const { return lattice_; }
+  KmcLattice &lattice() { return lattice_; }
 
-  void setParameters(KmcParameters p) { params_ = std::move(p); }
+  void setParameters(KmcParameters p) {
+    params_ = p;
+    fenwickInitialized_ = false;
+  }
   const KmcParameters &parameters() const { return params_; }
 
-  void setDiamondNeighbors(bool on) { diamond_ = on; }
+  /// Ge mole fraction for Deposit events: the deposited species is KmcGe
+  /// with probability xGe, else growthSpecies_; the deposit rate is scaled
+  /// by the Ge growth factor (1 - 0.3*xGe) like KmcEpitaxyModel.
+  void setGeFraction(double x) { xGe_ = std::clamp(x, 0.0, 1.0); }
+  double geFraction() const { return xGe_; }
+  /// Deposit candidates need at least this many occupied neighbors.
+  void setMinCoordination(int c) { minCoord_ = std::max(0, c); }
+  /// Require deposit sites to pass KmcVisibility::isVisible (z-buffer).
+  void setVisibilityEnabled(bool on) { visibility_ = on; }
   bool diamondNeighbors() const { return diamond_; }
 
+  void setDiamondNeighbors(bool on) { diamond_ = on; }
   void setRecombinationEnabled(bool on) { recomb_ = on; }
-  bool recombinationEnabled() const { return recomb_; }
-
   void setClusteringEnabled(bool on) { cluster_ = on; }
-  bool clusteringEnabled() const { return cluster_; }
-
-  /// Enable epitaxial surface events (Deposit/Desorb/Twin) as BKL events.
   void setEpitaxyEnabled(bool on) { epitaxy_ = on; }
-  bool epitaxyEnabled() const { return epitaxy_; }
-  /// Set the growth species code for Deposit events (default KmcSi=4).
   void setGrowthSpecies(int code) { growthSpecies_ = code; }
 
   double time() const { return time_; }
@@ -133,7 +139,7 @@ public:
         break;
       }
     }
-    if (!chosen && !siteEvents.empty())
+    if (!chosen && !siteEvents.empty() && siteTotalRates_[siteIdx] > 0.0)
       chosen = &siteEvents.back();
 
     if (chosen) {
@@ -183,6 +189,15 @@ private:
   std::size_t linearIndex(int i, int j, int k) const {
     return static_cast<std::size_t>(
         (k * lattice_.ny() + j) * lattice_.nx() + i);
+  }
+
+  int coordinatedNeighbors(int i, int j, int k) const {
+    int c = 0;
+    forEachNeighbor(i, j, k, [&](int i1, int j1, int k1) {
+      if (lattice_.at(i1, j1, k1).occupied)
+        ++c;
+    });
+    return c;
   }
 
   void buildAllSiteEvents() {
@@ -251,8 +266,8 @@ private:
         }
         if (cluster_ && s.species == KmcInterstitial &&
             n.species == KmcInterstitial) {
-          const int a = static_cast<int>(siteIdx);
-          const int b = (k1 * ny + j1) * nx + i1;
+          const std::size_t a = siteIdx;
+          const std::size_t b = linearIndex(i1, j1, k1);
           if (a < b) {
             KmcEvent ev;
             ev.type = KmcEventType::Cluster;
@@ -267,35 +282,56 @@ private:
     }
 
     if (epitaxy_) {
-      int kTop = -1;
-      for (int kk = nz - 1; kk >= 0; --kk) {
-        if (lattice_.at(i, j, kk).occupied) {
-          kTop = kk;
-          break;
+      // Generalized surface events. Deposit: any empty site with >= minCoord
+      // occupied neighbors (and, optionally, clear line of sight), rate
+      // scaled by coordination fraction c/c_max and the Ge growth factor.
+      // On a perfect crystal this reduces to the old column-top rule with
+      // full-coordination rates (c == c_max → factor 1).
+      if (!s.occupied) {
+        const int c = coordinatedNeighbors(i, j, k);
+        if (c >= minCoord_ &&
+            (!visibility_ || KmcVisibility::isVisible(lattice_, i, j, k))) {
+          const double maxCoord = diamond_ ? 4.0 : 6.0;
+          const double coordFactor = static_cast<double>(c) / maxCoord;
+          KmcEvent ev;
+          ev.type = KmcEventType::Deposit;
+          ev.i0 = i;
+          ev.j0 = j;
+          ev.k0 = k;
+          ev.rate =
+              params_.attachRate() * coordFactor * (1.0 - 0.3 * xGe_);
+          evList.push_back(ev);
+          totalRate += ev.rate;
         }
-      }
-      if (kTop >= 0 && k == kTop + 1 && kTop + 1 < nz &&
-          !lattice_.at(i, j, kTop + 1).occupied) {
-        KmcEvent ev;
-        ev.type = KmcEventType::Deposit;
-        ev.i0 = i;     ev.j0 = j;     ev.k0 = kTop + 1;
-        ev.rate = params_.attachRate();
-        evList.push_back(ev);
-        totalRate += ev.rate;
-      }
-      if (k == kTop && s.occupied) {
-        KmcEvent ev;
-        ev.type = KmcEventType::Desorb;
-        ev.i0 = i;  ev.j0 = j;  ev.k0 = kTop;
-        ev.rate = params_.desorbRate();
-        evList.push_back(ev);
-        totalRate += ev.rate;
-        KmcEvent ev2;
-        ev2.type = KmcEventType::Twin;
-        ev2.i0 = i;  ev2.j0 = j;  ev2.k0 = kTop;
-        ev2.rate = params_.twinRate();
-        evList.push_back(ev2);
-        totalRate += ev2.rate;
+      } else {
+        int kTop = -1;
+        for (int kk = nz - 1; kk >= 0; --kk) {
+          if (lattice_.at(i, j, kk).occupied) {
+            kTop = kk;
+            break;
+          }
+        }
+        if (k == kTop) {
+          const int c = coordinatedNeighbors(i, j, k);
+          const double maxCoord = diamond_ ? 4.0 : 6.0;
+          const double coordFactor = static_cast<double>(c) / maxCoord;
+          KmcEvent ev;
+          ev.type = KmcEventType::Desorb;
+          ev.i0 = i;  ev.j0 = j;  ev.k0 = kTop;
+          // Weakly bonded atoms desorb faster (fewer bonds → higher rate).
+          ev.rate = params_.desorbRate() * (1.0 - 0.5 * coordFactor);
+          evList.push_back(ev);
+          totalRate += ev.rate;
+          if (s.species != KmcTwin) {
+            KmcEvent ev2;
+            ev2.type = KmcEventType::Twin;
+            ev2.i0 = i;  ev2.j0 = j;  ev2.k0 = kTop;
+            // Twins form preferentially on well-coordinated {111}-like sites.
+            ev2.rate = params_.twinRate() * (c >= 3 ? 1.0 : 0.2);
+            evList.push_back(ev2);
+            totalRate += ev2.rate;
+          }
+        }
       }
     }
 
@@ -311,14 +347,24 @@ private:
     sites.push_back(idx0);
     if (idx1 != idx0)
       sites.push_back(idx1);
+
     auto addNeighbors = [&](int ci, int cj, int ck) {
       forEachNeighbor(ci, cj, ck, [&](int ni, int nj, int nk) {
         sites.push_back(linearIndex(ni, nj, nk));
       });
+      // In epitaxy mode, changing any site in column (ci, cj) alters kTop for that column,
+      // so rebuild all sites in column (ci, cj).
+      if (epitaxy_) {
+        for (int kk = 0; kk < lattice_.nz(); ++kk) {
+          sites.push_back(linearIndex(ci, cj, kk));
+        }
+      }
     };
+
     addNeighbors(e.i0, e.j0, e.k0);
     if (idx1 != idx0)
       addNeighbors(e.i1, e.j1, e.k1);
+
     std::sort(sites.begin(), sites.end());
     sites.erase(std::unique(sites.begin(), sites.end()), sites.end());
     for (auto idx : sites)
@@ -359,10 +405,12 @@ private:
       b.occupied = true;
       ++dissocCount_;
     } else if (e.type == KmcEventType::Deposit) {
-      // Epitaxial surface attachment: fill the empty site with growth species.
+      // Epitaxial surface attachment: fill the empty site with the growth
+      // species (Si) or Ge with probability xGe (SiGe composition).
       auto &a = lattice_.at(e.i0, e.j0, e.k0);
       a.occupied = true;
-      a.species = growthSpecies_;
+      std::uniform_real_distribution<double> U(0.0, 1.0);
+      a.species = (U(rng_) < xGe_) ? KmcGe : growthSpecies_;
       ++depositCount_;
     } else if (e.type == KmcEventType::Desorb) {
       // Surface desorption: remove the surface atom.
@@ -382,7 +430,7 @@ private:
   KmcParameters params_;
   std::vector<std::vector<KmcEvent>> eventsBySite_;
   std::vector<double> siteTotalRates_;
-  FenwickTree<double> fenwick_;
+  viennaps::FenwickTree<double> fenwick_;
   bool fenwickInitialized_ = false;
   double time_ = 0.0;
   int steps_ = 0;
@@ -397,6 +445,9 @@ private:
   bool cluster_ = true;
   bool epitaxy_ = false;
   int growthSpecies_ = KmcSi;
+  double xGe_ = 0.0;
+  int minCoord_ = 1;
+  bool visibility_ = false;
   std::mt19937 rng_;
 };
 
@@ -420,142 +471,6 @@ public:
             s.species = speciesCode;
           }
         }
-  }
-};
-
-class KmcDeatomize {
-public:
-  static void deatomize(const KmcLattice &lat, std::vector<double> &conc,
-                        double volumePerSite, int speciesCode) {
-    conc.assign(lat.size(), 0.0);
-    std::size_t idx = 0;
-    for (int k = 0; k < lat.nz(); ++k)
-      for (int j = 0; j < lat.ny(); ++j)
-        for (int i = 0; i < lat.nx(); ++i) {
-          const auto &s = lat.at(i, j, k);
-          conc[idx++] =
-              (s.occupied && s.species == speciesCode) ? (1.0 / volumePerSite)
-                                                       : 0.0;
-        }
-  }
-
-  /// Inverse-distance weighted smooth of discrete occupations onto a 1D/flat
-  /// continuum grid of length `nOut` (depth bins along k).
-  static std::vector<double> deatomizeIDW(const KmcLattice &lat,
-                                          int speciesCode, int nOut,
-                                          double power = 2.0) {
-    std::vector<double> out(static_cast<std::size_t>(std::max(nOut, 1)), 0.0);
-    if (nOut <= 0 || lat.nz() <= 0)
-      return out;
-    std::vector<double> wsum(out.size(), 0.0);
-    for (int k = 0; k < lat.nz(); ++k) {
-      int count = 0;
-      for (int j = 0; j < lat.ny(); ++j)
-        for (int i = 0; i < lat.nx(); ++i)
-          if (lat.at(i, j, k).occupied &&
-              lat.at(i, j, k).species == speciesCode)
-            ++count;
-      const double zk = static_cast<double>(k) / std::max(lat.nz() - 1, 1);
-      for (int b = 0; b < nOut; ++b) {
-        const double zb =
-            static_cast<double>(b) / std::max(nOut - 1, 1);
-        const double d = std::abs(zk - zb) + 1e-9;
-        const double w = 1.0 / std::pow(d, power);
-        out[static_cast<std::size_t>(b)] += w * count;
-        wsum[static_cast<std::size_t>(b)] += w;
-      }
-    }
-    for (std::size_t i = 0; i < out.size(); ++i)
-      if (wsum[i] > 0)
-        out[i] /= wsum[i];
-    return out;
-  }
-};
-
-/// Amorphous pocket: mark a cubic region as amorphous species (code 7).
-class KmcAmorphousPocket {
-public:
-  static int implant(KmcLattice &lat, int i0, int j0, int k0, int r,
-                     int amorphCode = 7) {
-    int n = 0;
-    for (int k = k0 - r; k <= k0 + r; ++k)
-      for (int j = j0 - r; j <= j0 + r; ++j)
-        for (int i = i0 - r; i <= i0 + r; ++i) {
-          if (i < 0 || j < 0 || k < 0 || i >= lat.nx() || j >= lat.ny() ||
-              k >= lat.nz())
-            continue;
-          if ((i - i0) * (i - i0) + (j - j0) * (j - j0) + (k - k0) * (k - k0) >
-              r * r)
-            continue;
-          auto &s = lat.at(i, j, k);
-          s.occupied = true;
-          s.species = amorphCode;
-          ++n;
-        }
-    return n;
-  }
-};
-
-struct KmcReport {
-  double time = 0;
-  int steps = 0;
-  int hopCount = 0;
-  int occupied = 0;
-  int recombCount = 0;
-  int clusterCount = 0;
-  int dissocCount = 0;
-  double supersaturationI = 0.0;
-  std::vector<int> depthProfileI;
-  std::map<int, int> clusterSizeHistogram; // size→count (size=1 free I, 2=cluster)
-
-  static KmcReport fromEngine(const KmcAtomisticEngine &eng,
-                              double C_I_eq = 1e12) {
-    KmcReport r;
-    r.time = eng.time();
-    r.steps = eng.steps();
-    r.recombCount = eng.recombCount();
-    r.clusterCount = eng.clusterCount();
-    r.dissocCount = eng.dissocCount();
-    r.occupied = 0;
-    int nI = 0, nCl = 0;
-    for (int k = 0; k < eng.lattice().nz(); ++k)
-      for (int j = 0; j < eng.lattice().ny(); ++j)
-        for (int i = 0; i < eng.lattice().nx(); ++i) {
-          const auto &s = eng.lattice().at(i, j, k);
-          if (!s.occupied)
-            continue;
-          ++r.occupied;
-          if (s.species == 1)
-            ++nI;
-          if (s.species == 3)
-            ++nCl;
-        }
-    r.depthProfileI = eng.lattice().profile1D(1);
-    r.clusterSizeHistogram[1] = nI;
-    r.clusterSizeHistogram[2] = nCl;
-    // Supersaturation proxy: free-I count / (C_I_eq * volume units).
-    const double volSites =
-        static_cast<double>(eng.lattice().size());
-    r.supersaturationI =
-        (C_I_eq > 0 && volSites > 0)
-            ? static_cast<double>(nI) / (C_I_eq * volSites * 1e-24 + 1e-30)
-            : 0.0;
-    return r;
-  }
-};
-
-class KmcContinuumCoupler {
-public:
-  static std::vector<double>
-  hopAndDeatomize(KmcLattice lat, KmcParameters params, int speciesCode,
-                  double volumePerSite, int steps, unsigned seed = 1) {
-    KmcAtomisticEngine eng(seed);
-    eng.setLattice(std::move(lat));
-    eng.setParameters(params);
-    eng.run(steps);
-    std::vector<double> conc;
-    KmcDeatomize::deatomize(eng.lattice(), conc, volumePerSite, speciesCode);
-    return conc;
   }
 };
 
