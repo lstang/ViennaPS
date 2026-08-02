@@ -121,6 +121,7 @@
 #include <fields/models/VacancyCluster.hpp>
 #ifdef VIENNAPS_HAS_MFEM
 #include <fields/DiffusionEngine.hpp>
+#include <fields/FlashAnnealFlow.hpp>
 #include <fields/ImplantDamageCoupler.hpp>
 #include <fields/LevelSetToMesh.hpp>
 #endif

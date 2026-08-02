@@ -115,7 +115,7 @@ This is the biggest change since the 2026-07-27 edition. The `fields/` layer now
 - **Clustering / deactivation:** `Cluster311`, `VacancyCluster`, `ImpurityCluster`, `DislocationLoop`, `SolidSolubility` — matching ATHENA §3.2 and SProcess Ch. 5 cluster chemistry.
 - **Interface physics:** `Segregation` (material-interface BC), `OedSource` (oxidation-enhanced diffusion injection), `TedInitializer` (transient-enhanced-diffusion seeding from implant damage), `DoseLossBC` (surface evaporation), `LinearReactionDiffusion`.
 - **Material systems:** `PolysiliconDiffusion` (grain-boundary + grain-interior paths, supported by `GrainModel`/`GrainBoundaryMesh`), `SiGeDiffusion`, `SiGeCDiffusion` (C-suppressed TED, `BandgapModel`), `IIIVDiffusion` (GaAs/InP, ATHENA eq. 3-239/3-240 with 4-sublattice I/V equilibrium and GaAs data), `MobileImpurity` (+ tags).
-- **Anneal:** `FlashLaserAnneal` (`HeatTransfer` with latent-heat melt-fraction coupling, 1D T-stepping; Allen-Cahn melting phase fields).
+- **Anneal:** `FlashLaserAnneal` + `FlashAnnealFlow` (process-level FEM orchestration coupling surface Beer's-law heat pulse → melting phase field → melt-enhanced dopant diffusion → solidification trapping `SolidificationTrapping` → SPER crystallinity), plus 1D `FlashLaserAnneal::runPulse`.
 
 The engine is no longer a toy: `DiffusionEngine` runs on `ParMesh`/`ParFiniteElementSpace`/`ParGridFunction` with `HypreParMatrix` + `HyprePCG`/`BoomerAMG`-preconditioned CG, integrates in time via CVODE BDF (MFEM SUNDIALS wrapper) or a cached implicit-Euler path, supports Dirichlet/Neumann/Robin (dose-loss) BCs, dose-preserving projection, and runtime AMR (`GeneralRefinement` + prolongation, implicit-Euler path). `PdeApi.hpp` adds composable equation/BC terms bridging into `DiffusionPhysics`.
 
@@ -206,7 +206,7 @@ Remaining gaps: TDR/DF-ISE database output, defect/cluster-size histograms, inte
 1. **Implement a basic CMP model.** (DONE — `psCMP.hpp` Preston law planarization model, pattern density modulation, selectivity, hard stops, `testCmp`).
 2. **Production-harden the atomistic KMC engine**: calibrated hop/recombine rates, cluster-size histograms, `KmcReport` output, and validated `KmcDeatomize` round-trips against continuum Fermi results.
 3. **Complete LKMC epitaxy** (`KmcEpitaxyModel`): facet growth, twin formation on {111}, SiGe segregation, visibility — moving Ch. 6 from skeleton to usable.
-4. **Flash/laser anneal**: finish melt phase-field (Allen-Cahn), couple `HeatTransfer` latent heat to SPER and liquid-phase diffusion.
+4. **Flash/laser anneal** (DONE — `FlashAnnealFlow` FEM heat-melt-dopant-trapping flow + `SolidificationTrapping` + `testFlashAnneal`).
 5. **Expand the material/parameter database.** Add calibrated Si, SiO₂, SiGe, poly-Si, common metals, and dopant data; continue the III-V (GaAs/InP) entries.
 6. **Layout-driven example.** Demonstrate GDS → mask → lithography → etch workflow end-to-end, using `ProcessOrchestrator` as the scaffold.
 

@@ -30,7 +30,9 @@ public:
   /// is negative (absorbs heat); when falling (solidifying), positive.
   void setMeltSpecies(std::string s) { meltSpecies_ = std::move(s); }
   void setLatentHeat(NumericType rhoL) { rhoL_ = rhoL; }
-  void setPreviousPhi(const mfem::ParGridFunction *prev) { previousPhi_ = prev; }
+  void setPreviousPhi(const mfem::ParGridFunction *prev) {
+    previousPhi_ = prev;
+  }
 
   /// 1D explicit heat step on T profile.
   void step(std::vector<NumericType> &T, NumericType dx, NumericType dt) const {
@@ -39,8 +41,7 @@ public:
     const NumericType a = alpha_ * dt / (dx * dx);
     std::vector<NumericType> n = T;
     for (std::size_t i = 1; i + 1 < T.size(); ++i) {
-      n[i] = T[i] + a * (T[i - 1] - NumericType(2) * T[i] + T[i + 1]) +
-             q_ * dt;
+      n[i] = T[i] + a * (T[i - 1] - NumericType(2) * T[i] + T[i + 1]) + q_ * dt;
     }
     T.swap(n);
   }
@@ -66,8 +67,8 @@ public:
       const mfem::ParGridFunction * /*temp*/) const override {
     // Volumetric heat source Q (constant).
     if (q_ != NumericType(0)) {
-      srcCoef_ = std::make_unique<mfem::ConstantCoefficient>(
-          static_cast<double>(q_));
+      srcCoef_ =
+          std::make_unique<mfem::ConstantCoefficient>(static_cast<double>(q_));
       R.AddDomainIntegrator(new mfem::DomainLFIntegrator(*srcCoef_));
     }
     // Latent-heat coupling ρ·L·∂φ/∂t (SProcess eq. 213). Read current φ
@@ -129,8 +130,7 @@ private:
 #endif
 };
 
-template <class NumericType>
-class LaserIntensity {
+template <class NumericType> class LaserIntensity {
 public:
   void setPeak(NumericType I0) { I0_ = I0; }
   void setAbsorption(NumericType alpha) { alpha_ = alpha; }
@@ -146,8 +146,7 @@ private:
 };
 
 /// Allen–Cahn phase-field term: dφ/dt = -L * (df/dφ - κ ∇²φ)
-template <class NumericType>
-class AllenCahnTerm {
+template <class NumericType> class AllenCahnTerm {
 public:
   void setMobility(NumericType L) { L_ = L; }
   void setGradientEnergy(NumericType kappa) { kappa_ = kappa; }
@@ -166,8 +165,7 @@ private:
   NumericType kappa_ = NumericType(1e-12);
 };
 
-template <class NumericType>
-class MeltingPhaseField {
+template <class NumericType> class MeltingPhaseField {
 public:
   void setMeltingPoint(NumericType Tm) { Tm_ = Tm; }
 
@@ -208,9 +206,7 @@ public:
   }
 
   int numSpecies() const override { return 1; }
-  std::vector<std::string> speciesNames() const override {
-    return {species_};
-  }
+  std::vector<std::string> speciesNames() const override { return {species_}; }
 
 #ifdef VIENNAPS_HAS_MFEM
   class MeltDCoef : public mfem::Coefficient {
@@ -263,13 +259,12 @@ private:
 /// dφ/dt = -L * (df/dφ - κ ∇²φ),  f(φ,T) = (φ²-1)²/4 - λ(T-Tm)φ
 /// df/dφ = φ³ - φ - λ(T-Tm)
 /// Assembled as: M dφ/dt + L*κ*K*φ = -L*R(φ,T)
-/// where K is the diffusion stiffness and R is the reaction (bulk driving force).
+/// where K is the diffusion stiffness and R is the reaction (bulk driving
+/// force).
 template <class NumericType>
 class MeltingPhaseFieldFEM : public DiffusionModel<NumericType> {
 public:
-  MeltingPhaseFieldFEM() {
-    this->setName("MeltingPhaseFieldFEM");
-  }
+  MeltingPhaseFieldFEM() { this->setName("MeltingPhaseFieldFEM"); }
   void setMobility(NumericType L) { L_ = L; }
   void setGradientEnergy(NumericType kappa) { kappa_ = kappa; }
   void setMeltingPoint(NumericType Tm) { Tm_ = Tm; }
@@ -305,8 +300,8 @@ public:
         Tgf = it->second;
     }
     reactCoef_ = std::make_unique<AllenCahnReactionCoef>(
-        &speciesGF, Tgf, static_cast<double>(L_),
-        static_cast<double>(lambda_), static_cast<double>(Tm_));
+        &speciesGF, Tgf, static_cast<double>(L_), static_cast<double>(lambda_),
+        static_cast<double>(Tm_));
     R.AddDomainIntegrator(new mfem::DomainLFIntegrator(*reactCoef_));
   }
 
@@ -326,8 +321,8 @@ private:
   class AllenCahnReactionCoef : public mfem::Coefficient {
   public:
     AllenCahnReactionCoef(const mfem::ParGridFunction *phi,
-                          const mfem::ParGridFunction *T, double L, double lambda,
-                          double Tm)
+                          const mfem::ParGridFunction *T, double L,
+                          double lambda, double Tm)
         : phi_(phi), T_(T), L_(L), lambda_(lambda), Tm_(Tm) {}
     double Eval(mfem::ElementTransformation &tr,
                 const mfem::IntegrationPoint &ip) override {
@@ -357,9 +352,7 @@ private:
 template <class NumericType>
 class CrystallinityPhaseFieldFEM : public DiffusionModel<NumericType> {
 public:
-  CrystallinityPhaseFieldFEM() {
-    this->setName("CrystallinityPhaseFieldFEM");
-  }
+  CrystallinityPhaseFieldFEM() { this->setName("CrystallinityPhaseFieldFEM"); }
   void setMobility(NumericType L) { L_ = L; }
   void setGradientEnergy(NumericType kappa) { kappa_ = kappa; }
   void setSperVelocity(NumericType v0, NumericType Ea) {
@@ -402,9 +395,8 @@ public:
         Tgf = it->second;
     }
     reactCoef_ = std::make_unique<CrystReactionCoef>(
-        &speciesGF, Tgf, static_cast<double>(L_),
-        static_cast<double>(lambda_), static_cast<double>(v0_),
-        static_cast<double>(Ea_));
+        &speciesGF, Tgf, static_cast<double>(L_), static_cast<double>(lambda_),
+        static_cast<double>(v0_), static_cast<double>(Ea_));
     R.AddDomainIntegrator(new mfem::DomainLFIntegrator(*reactCoef_));
   }
 
@@ -437,8 +429,7 @@ private:
       if (T_)
         T = T_->GetValue(tr, ip);
       const double kB = 8.617333262145e-5;
-      const double vSper =
-          (T > 0) ? v0_ * std::exp(-Ea_ / (kB * T)) : v0_;
+      const double vSper = (T > 0) ? v0_ * std::exp(-Ea_ / (kB * T)) : v0_;
       // df/dφ = φ³ - φ - λ*v_SPER(T)*φ. Reaction = -L * df/dφ.
       return -L_ * (p * p * p - p - lambda_ * vSper * p);
     }
@@ -454,8 +445,84 @@ private:
 #endif
 };
 
+/// Solidification trapping: at the resolidification front (φ falling),
+/// mobile dopant is immobilized into the regrown lattice.
+/// R = -r * max(0, -∂φ/∂t) * C, with ∂φ/∂t = (φ_cur - φ_prev)/dt read
+/// from the registered MeltFraction species and the orchestrator-supplied
+/// previous-φ copy (same pattern as HeatTransfer::LatentHeatCoef).
+/// Approximate model (documented in GAP_ANALYSIS §4.10): the immobilized
+/// fraction leaves the mobile dopant field; r = 0 disables trapping.
 template <class NumericType>
-class FlashLaserAnneal {
+class SolidificationTrapping : public DiffusionModel<NumericType> {
+public:
+  explicit SolidificationTrapping(std::string species = "Boron")
+      : species_(std::move(species)) {
+    this->setName("SolidificationTrapping(" + species_ + ")");
+  }
+  void setTrappingStrength(NumericType r) { r_ = r; }
+  void setMeltSpecies(std::string m) { melt_ = std::move(m); }
+  void setPreviousPhi(const mfem::ParGridFunction *prev) {
+    previousPhi_ = prev;
+  }
+  void setDt(NumericType dt) { dt_ = dt; }
+
+  int numSpecies() const override { return 1; }
+  std::vector<std::string> speciesNames() const override { return {species_}; }
+
+#ifdef VIENNAPS_HAS_MFEM
+  void assembleReaction(
+      mfem::ParLinearForm &R, const mfem::ParGridFunction &speciesGF,
+      const std::map<std::string, mfem::ParGridFunction *> &allSpecies,
+      const mfem::ParGridFunction * /*temp*/) const override {
+    if (r_ == NumericType(0) || !previousPhi_ || dt_ <= NumericType(0))
+      return;
+    const mfem::ParGridFunction *phiCurr = nullptr;
+    auto it = allSpecies.find(melt_);
+    if (it != allSpecies.end())
+      phiCurr = it->second;
+    trapCoef_ = std::make_unique<TrappingCoef>(
+        &speciesGF, phiCurr, previousPhi_, static_cast<double>(r_),
+        static_cast<double>(dt_));
+    R.AddDomainIntegrator(new mfem::DomainLFIntegrator(*trapCoef_));
+  }
+#endif
+
+private:
+  std::string species_;
+  std::string melt_ = "MeltFraction";
+  NumericType r_ = NumericType(0);
+  NumericType dt_ = NumericType(0);
+  const mfem::ParGridFunction *previousPhi_ = nullptr;
+#ifdef VIENNAPS_HAS_MFEM
+  class TrappingCoef : public mfem::Coefficient {
+  public:
+    TrappingCoef(const mfem::ParGridFunction *C,
+                 const mfem::ParGridFunction *phiCurr,
+                 const mfem::ParGridFunction *phiPrev, double r, double dt)
+        : C_(C), phiCurr_(phiCurr), phiPrev_(phiPrev), r_(r), dt_(dt) {}
+    double Eval(mfem::ElementTransformation &tr,
+                const mfem::IntegrationPoint &ip) override {
+      if (!C_ || !phiCurr_ || !phiPrev_ || dt_ <= 0.0)
+        return 0.0;
+      const double c = std::max(0.0, C_->GetValue(tr, ip));
+      const double cur = phiCurr_->GetValue(tr, ip);
+      const double prev = phiPrev_->GetValue(tr, ip);
+      const double dphiDt = (cur - prev) / dt_;
+      // Only solidifying cells (∂φ/∂t < 0) trap; strength r.
+      return -r_ * std::max(0.0, -dphiDt) * c;
+    }
+
+  private:
+    const mfem::ParGridFunction *C_;
+    const mfem::ParGridFunction *phiCurr_;
+    const mfem::ParGridFunction *phiPrev_;
+    double r_, dt_;
+  };
+  mutable std::unique_ptr<TrappingCoef> trapCoef_;
+#endif
+};
+
+template <class NumericType> class FlashLaserAnneal {
 public:
   void setPulse(NumericType Tpeak, NumericType duration) {
     Tpeak_ = Tpeak;
@@ -477,8 +544,8 @@ public:
     std::vector<NumericType> Deff;
   };
 
-  Result runPulse(std::vector<NumericType> T0, NumericType dx,
-                  NumericType dt, int nSteps) {
+  Result runPulse(std::vector<NumericType> T0, NumericType dx, NumericType dt,
+                  int nSteps) {
     Result r;
     r.T = std::move(T0);
     r.phi.assign(r.T.size(), NumericType(0));
