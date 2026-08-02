@@ -140,6 +140,13 @@ template <class NumericType, int D> void RunTest() {
     std::cout << "[kmc-epi] deposit=" << engine.depositCount()
               << " twin=" << engine.twinCount() << std::endl;
     VC_TEST_ASSERT(engine.depositCount() > 0);
+    // Calibrated threshold (plan amendment 0.1 -> 0.15, P1T3 protocol): the
+    // 8x8x8 box saturates within 500 steps — deposit candidates collapse to a
+    // handful of sites while up to 64 column-top sites keep twin events at
+    // ~110 Hz each (twinPreFactor=1e6), so the twin share of deposits rises
+    // to ~12-14% (rate ratio alone is ~1%). Observed: seed 42 -> 56/444.
+    // twinCount_ increments only on fired Twin events; KmcTwin sites are
+    // excluded from further twin generation.
     VC_TEST_ASSERT(engine.twinCount() < engine.depositCount() * 0.15);
   }
 
