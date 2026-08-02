@@ -35,10 +35,11 @@ class CmpVelocityField : public VelocityField<NumericType, D> {
   const std::vector<Material> &hardStop_;
 
 public:
-  CmpVelocityField(NumericType prestonRate, NumericType alpha,
-                   NumericType planarizationLength, NumericType refHeight,
-                   const std::vector<std::pair<Material, NumericType>> &materials,
-                   const std::vector<Material> &hardStop)
+  CmpVelocityField(
+      NumericType prestonRate, NumericType alpha,
+      NumericType planarizationLength, NumericType refHeight,
+      const std::vector<std::pair<Material, NumericType>> &materials,
+      const std::vector<Material> &hardStop)
       : prestonRate_(prestonRate), alpha_(alpha),
         planarizationLength_(planarizationLength), refHeight_(refHeight),
         materials_(materials), hardStop_(hardStop) {}
@@ -69,8 +70,7 @@ public:
     const NumericType h = coordinate[D - 1];
     NumericType patternFactor = NumericType(1);
     if (planarizationLength_ > NumericType(0)) {
-      patternFactor +=
-          alpha_ * (h - refHeight_) / planarizationLength_;
+      patternFactor += alpha_ * (h - refHeight_) / planarizationLength_;
       patternFactor =
           std::clamp(patternFactor, NumericType(0.1), NumericType(2.0));
     }
@@ -144,10 +144,9 @@ private:
   void refreshRate() { prestonRate_ = prestonK_ * pressure_ * velocity_; }
 
   void refreshField() {
-    auto velField =
-        SmartPointer<impl::CmpVelocityField<NumericType, D>>::New(
-            prestonRate_, alpha_, planarizationLength_, refHeight_,
-            polishMaterials_, hardStop_);
+    auto velField = SmartPointer<impl::CmpVelocityField<NumericType, D>>::New(
+        prestonRate_, alpha_, planarizationLength_, refHeight_,
+        polishMaterials_, hardStop_);
     this->setVelocityField(velField);
   }
 
