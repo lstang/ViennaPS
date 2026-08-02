@@ -23,6 +23,7 @@
 
 #include <models/psAnalyticImplant.hpp>
 #include <models/psCF4O2Etching.hpp>
+#include <models/psCMP.hpp>
 #include <models/psCSVFileProcess.hpp>
 #include <models/psDirectionalProcess.hpp>
 #include <models/psFaradayCageEtching.hpp>

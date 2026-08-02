@@ -128,9 +128,9 @@ The engine is no longer a toy: `DiffusionEngine` runs on `ParMesh`/`ParFiniteEle
 - `psSilicidation.hpp` is still a demo model (thickness proxy, stress/dose injection) — not a multi-phase Ni-silicide model.
 - `psSelectiveEpitaxy.hpp` provides continuum level-set growth; `fields/SPERKernel.hpp` covers solid-phase epitaxial regrowth.
 
-### 4.5 CMP – Completely Missing
+### 4.5 CMP – Implemented (psCMP.hpp)
 
-Neither `models/` nor `fields/` contains a CMP or polishing model. ATHENA's `POLISH` / `RATE.POLISH` and SProcess's `polish` / `cmp` commands are absent. Note: `psPlanarize.hpp` performs a geometric boolean plane-cut (`RELATIVE_COMPLEMENT`), which is **not** a polish model — no removal-rate physics, pad/slurry parameters, or planarization length scale. This remains a **significant functional gap** for modern front-end/back-end planarization flows.
+`include/viennaps/models/psCMP.hpp` provides `CMP<NumericType, D>` implementing the Preston removal law: $V(x) = K_p \cdot P \cdot v_{\text{rel}} \cdot s(\text{material}) \cdot f_{\text{pattern}}(h)$, with pattern-density modulation $f_{\text{pattern}}(h) = \text{clamp}(1 + \alpha \cdot (h - h_{\text{ref}})/L_p, 0.1, 2.0)$, per-material selectivity, hard stops, and process metadata. Exposed via `viennaps.hpp` and verified by `testCmp`. (Distinct from geometric `psPlanarize.hpp`).
 
 ### 4.6 Stress / Thermomechanics – Kernels Exist, Coupling Incomplete
 
@@ -203,7 +203,7 @@ Remaining gaps: TDR/DF-ISE database output, defect/cluster-size histograms, inte
 
 ### Medium Term (6–18 months)
 
-1. **Implement a basic CMP model.** A simple Preston-equation / removal-rate planarization model would cover most user needs (do not confuse with the geometric `psPlanarize`).
+1. **Implement a basic CMP model.** (DONE — `psCMP.hpp` Preston law planarization model, pattern density modulation, selectivity, hard stops, `testCmp`).
 2. **Production-harden the atomistic KMC engine**: calibrated hop/recombine rates, cluster-size histograms, `KmcReport` output, and validated `KmcDeatomize` round-trips against continuum Fermi results.
 3. **Complete LKMC epitaxy** (`KmcEpitaxyModel`): facet growth, twin formation on {111}, SiGe segregation, visibility — moving Ch. 6 from skeleton to usable.
 4. **Flash/laser anneal**: finish melt phase-field (Allen-Cahn), couple `HeatTransfer` latent heat to SPER and liquid-phase diffusion.
