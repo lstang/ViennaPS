@@ -52,12 +52,12 @@ public:
           if (s.occupied)
             continue;
           int z = 0;
-          const int nbr[6][3] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0},
-                                 {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+          const int nbr[6][3] = {{1, 0, 0},  {-1, 0, 0}, {0, 1, 0},
+                                 {0, -1, 0}, {0, 0, 1},  {0, 0, -1}};
           for (auto &d : nbr) {
             const int i1 = i + d[0], j1 = j + d[1], k1 = k + d[2];
-            if (i1 < 0 || j1 < 0 || k1 < 0 || i1 >= lat.nx() || j1 >= lat.ny() ||
-                k1 >= lat.nz())
+            if (i1 < 0 || j1 < 0 || k1 < 0 || i1 >= lat.nx() ||
+                j1 >= lat.ny() || k1 >= lat.nz())
               continue;
             if (lat.at(i1, j1, k1).occupied)
               ++z;
@@ -124,13 +124,9 @@ public:
   }
 
   /// Ge mole-fraction dependent growth rate factor.
-  double geGrowthFactor() const {
-    return 1.0 - 0.3 * xGe_;
-  }
+  double geGrowthFactor() const { return 1.0 - 0.3 * xGe_; }
 
-  double effectiveGrowthRate() const {
-    return growthRate_ * geGrowthFactor();
-  }
+  double effectiveGrowthRate() const { return growthRate_ * geGrowthFactor(); }
 
   /// Rate-based parity: run the BKL KmcAtomisticEngine epitaxy path with
   /// this model's growth rate and Ge fraction. Returns the number of

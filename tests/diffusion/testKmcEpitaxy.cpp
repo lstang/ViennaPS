@@ -7,8 +7,8 @@
 #include <fields/kmc/KmcLattice.hpp>
 #include <vcTestAsserts.hpp>
 
-#include <cstdio>
 #include <algorithm>
+#include <cstdio>
 #include <iostream>
 
 namespace viennacore {
@@ -116,7 +116,7 @@ template <class NumericType, int D> void RunTest() {
     std::cout << "[kmc-epi] Test 5 start" << std::endl;
     auto engine = makeEngine(17);
     KmcParameters p;
-    p.attachPreFactor = 1e6; // ~1.05e4 Hz at 1273 K
+    p.attachPreFactor = 1e6;  // ~1.05e4 Hz at 1273 K
     p.desorbPreFactor = 1e13; // ~1.1e7 Hz — dominates attachment
     p.twinPreFactor = 0;
     engine.setParameters(p);
@@ -153,7 +153,8 @@ template <class NumericType, int D> void RunTest() {
     model.setGrowthRate(1.0);
     model.setGeFraction(0.0);
     const int deposits = model.runRateBased(lat, 64);
-    std::cout << "[kmc-epi] model.runRateBased deposits=" << deposits << std::endl;
+    std::cout << "[kmc-epi] model.runRateBased deposits=" << deposits
+              << std::endl;
     VC_TEST_ASSERT(deposits > 0);
     VC_TEST_ASSERT(lat.countSpecies(KmcSi) > 64);
   }

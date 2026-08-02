@@ -124,7 +124,7 @@ The engine is no longer a toy: `DiffusionEngine` runs on `ParMesh`/`ParFiniteEle
 ### 4.4 KMC, Silicidation and Epitaxy – Atomistic Engine Present, LKMC a Skeleton
 
 - **Atomistic KMC (SProcess Ch. 5):** `fields/kmc/KmcAtomisticEngine.hpp` is a real BKL (rejection-free) engine: Fenwick-tree O(log N) site selection with O(1)-per-event incremental rebuild, Si diamond lattice (`KmcLattice`), events Hop/Recombine/Cluster/Dissociate (`KmcEventType`), amorphous pockets (`KmcAmorphousPocket`), continuum coupling (`KmcAtomize`/`KmcDeatomize`/`KmcContinuumCoupler`), and defect-activity reporting (`KmcReport`). This is a substantial partial implementation of the Ch. 5 capability — the previous "not implemented" classification was stale.
-- **Lattice KMC epitaxy (SProcess Ch. 6):** `KmcEpitaxy.hpp` provides `KmcEpitaxyModel` (planar growth, coordination-based growth, surface segregation, twin formation, Ge-fraction-dependent rates) and `KmcVisibility`, but it is explicitly a Phase-8 skeleton — not production facet physics.
+- **Lattice KMC epitaxy (SProcess Ch. 6):** production-hardened in `KmcAtomisticEngine.hpp` and `KmcEpitaxy.hpp` (`runRateBased` parity API, coordination-dependent attachment scaling, SiGe composition `xGe`, z-buffer `KmcVisibility`, desorption balance, rare twin formation on {111}); verified by `testKmcEpitaxy`.
 - `psSilicidation.hpp` is still a demo model (thickness proxy, stress/dose injection) — not a multi-phase Ni-silicide model.
 - `psSelectiveEpitaxy.hpp` provides continuum level-set growth; `fields/SPERKernel.hpp` covers solid-phase epitaxial regrowth.
 
@@ -205,7 +205,7 @@ Remaining gaps: TDR/DF-ISE database output, defect/cluster-size histograms, inte
 
 1. **Implement a basic CMP model.** (DONE — `psCMP.hpp` Preston law planarization model, pattern density modulation, selectivity, hard stops, `testCmp`).
 2. **Production-harden the atomistic KMC engine**: calibrated hop/recombine rates, cluster-size histograms, `KmcReport` output, and validated `KmcDeatomize` round-trips against continuum Fermi results.
-3. **Complete LKMC epitaxy** (`KmcEpitaxyModel`): facet growth, twin formation on {111}, SiGe segregation, visibility — moving Ch. 6 from skeleton to usable.
+3. **Complete LKMC epitaxy** (DONE — `KmcAtomisticEngine` coordination rates, SiGe `xGe`, z-buffer `KmcVisibility`, rate-based parity API `KmcEpitaxyModel::runRateBased`, `testKmcEpitaxy`).
 4. **Flash/laser anneal** (DONE — `FlashAnnealFlow` FEM heat-melt-dopant-trapping flow + `SolidificationTrapping` + `testFlashAnneal`).
 5. **Expand the material/parameter database.** Add calibrated Si, SiO₂, SiGe, poly-Si, common metals, and dopant data; continue the III-V (GaAs/InP) entries.
 6. **Layout-driven example.** Demonstrate GDS → mask → lithography → etch workflow end-to-end, using `ProcessOrchestrator` as the scaffold.

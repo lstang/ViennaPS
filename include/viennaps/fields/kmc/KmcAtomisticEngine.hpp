@@ -40,7 +40,8 @@ public:
     return sum;
   }
 
-  /// 0-indexed lower bound: returns smallest 0-based index whose prefix sum >= val.
+  /// 0-indexed lower bound: returns smallest 0-based index whose prefix sum >=
+  /// val.
   std::size_t lower_bound(Real val) const {
     if (n_ == 0)
       return 0;
@@ -158,8 +159,7 @@ public:
   }
 
 private:
-  template <class Fn>
-  void forEachNeighbor(int i, int j, int k, Fn &&fn) const {
+  template <class Fn> void forEachNeighbor(int i, int j, int k, Fn &&fn) const {
     if (diamond_) {
       // Diamond A-B only: neighbors are opposite sublattice via body diagonals
       // (2-FCC approximation on a cubic grid).
@@ -172,8 +172,8 @@ private:
       }
       return;
     }
-    static const int cubic[6][3] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0},
-                                    {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+    static const int cubic[6][3] = {{1, 0, 0},  {-1, 0, 0}, {0, 1, 0},
+                                    {0, -1, 0}, {0, 0, 1},  {0, 0, -1}};
     for (const auto &d : cubic) {
       const int i1 = i + d[0], j1 = j + d[1], k1 = k + d[2];
       if (inBounds(i1, j1, k1))
@@ -187,8 +187,8 @@ private:
   }
 
   std::size_t linearIndex(int i, int j, int k) const {
-    return static_cast<std::size_t>(
-        (k * lattice_.ny() + j) * lattice_.nx() + i);
+    return static_cast<std::size_t>((k * lattice_.ny() + j) * lattice_.nx() +
+                                    i);
   }
 
   int coordinatedNeighbors(int i, int j, int k) const {
@@ -232,8 +232,12 @@ private:
             return;
           KmcEvent ev;
           ev.type = KmcEventType::Dissociate;
-          ev.i0 = i;  ev.j0 = j;  ev.k0 = k;
-          ev.i1 = i1; ev.j1 = j1; ev.k1 = k1;
+          ev.i0 = i;
+          ev.j0 = j;
+          ev.k0 = k;
+          ev.i1 = i1;
+          ev.j1 = j1;
+          ev.k1 = k1;
           ev.rate = rDi;
           evList.push_back(ev);
           totalRate += rDi;
@@ -246,8 +250,12 @@ private:
           if (s.species == KmcInterstitial || s.species == KmcVacancy) {
             KmcEvent ev;
             ev.type = KmcEventType::Hop;
-            ev.i0 = i;  ev.j0 = j;  ev.k0 = k;
-            ev.i1 = i1; ev.j1 = j1; ev.k1 = k1;
+            ev.i0 = i;
+            ev.j0 = j;
+            ev.k0 = k;
+            ev.i1 = i1;
+            ev.j1 = j1;
+            ev.k1 = k1;
             ev.rate = rHop;
             evList.push_back(ev);
             totalRate += rHop;
@@ -258,8 +266,12 @@ private:
             n.species == KmcVacancy) {
           KmcEvent ev;
           ev.type = KmcEventType::Recombine;
-          ev.i0 = i;  ev.j0 = j;  ev.k0 = k;
-          ev.i1 = i1; ev.j1 = j1; ev.k1 = k1;
+          ev.i0 = i;
+          ev.j0 = j;
+          ev.k0 = k;
+          ev.i1 = i1;
+          ev.j1 = j1;
+          ev.k1 = k1;
           ev.rate = rRec;
           evList.push_back(ev);
           totalRate += rRec;
@@ -271,8 +283,12 @@ private:
           if (a < b) {
             KmcEvent ev;
             ev.type = KmcEventType::Cluster;
-            ev.i0 = i;  ev.j0 = j;  ev.k0 = k;
-            ev.i1 = i1; ev.j1 = j1; ev.k1 = k1;
+            ev.i0 = i;
+            ev.j0 = j;
+            ev.k0 = k;
+            ev.i1 = i1;
+            ev.j1 = j1;
+            ev.k1 = k1;
             ev.rate = rCl;
             evList.push_back(ev);
             totalRate += rCl;
@@ -298,8 +314,7 @@ private:
           ev.i0 = i;
           ev.j0 = j;
           ev.k0 = k;
-          ev.rate =
-              params_.attachRate() * coordFactor * (1.0 - 0.3 * xGe_);
+          ev.rate = params_.attachRate() * coordFactor * (1.0 - 0.3 * xGe_);
           evList.push_back(ev);
           totalRate += ev.rate;
         }
@@ -317,7 +332,9 @@ private:
           const double coordFactor = static_cast<double>(c) / maxCoord;
           KmcEvent ev;
           ev.type = KmcEventType::Desorb;
-          ev.i0 = i;  ev.j0 = j;  ev.k0 = kTop;
+          ev.i0 = i;
+          ev.j0 = j;
+          ev.k0 = kTop;
           // Weakly bonded atoms desorb faster (fewer bonds → higher rate).
           ev.rate = params_.desorbRate() * (1.0 - 0.5 * coordFactor);
           evList.push_back(ev);
@@ -325,7 +342,9 @@ private:
           if (s.species != KmcTwin) {
             KmcEvent ev2;
             ev2.type = KmcEventType::Twin;
-            ev2.i0 = i;  ev2.j0 = j;  ev2.k0 = kTop;
+            ev2.i0 = i;
+            ev2.j0 = j;
+            ev2.k0 = kTop;
             // Twins form preferentially on well-coordinated {111}-like sites.
             ev2.rate = params_.twinRate() * (c >= 3 ? 1.0 : 0.2);
             evList.push_back(ev2);
@@ -352,8 +371,8 @@ private:
       forEachNeighbor(ci, cj, ck, [&](int ni, int nj, int nk) {
         sites.push_back(linearIndex(ni, nj, nk));
       });
-      // In epitaxy mode, changing any site in column (ci, cj) alters kTop for that column,
-      // so rebuild all sites in column (ci, cj).
+      // In epitaxy mode, changing any site in column (ci, cj) alters kTop for
+      // that column, so rebuild all sites in column (ci, cj).
       if (epitaxy_) {
         for (int kk = 0; kk < lattice_.nz(); ++kk) {
           sites.push_back(linearIndex(ci, cj, kk));
@@ -419,7 +438,8 @@ private:
       a.species = 0;
       ++desorbCount_;
     } else if (e.type == KmcEventType::Twin) {
-      // Twin-defect formation: mark the surface site as a twin (stacking fault).
+      // Twin-defect formation: mark the surface site as a twin (stacking
+      // fault).
       auto &a = lattice_.at(e.i0, e.j0, e.k0);
       a.species = KmcTwin;
       ++twinCount_;
