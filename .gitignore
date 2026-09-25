@@ -24,8 +24,10 @@ output/
 *.ptx
 *.optixir
 .cache/
-modeldb/
+modeldb_backup_local/
 _viennals/
+graphify*
+
 3rdparty/
 
 # Local reference manuals (proprietary Silvaco/Synopsys docs, not for commit)
