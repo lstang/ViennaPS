@@ -1,0 +1,59 @@
+diff --git a/include/viennaray/rayTraceKernel.hpp b/include/viennaray/rayTraceKernel.hpp
+index 6819acb..2dbf588 100644
+--- a/include/viennaray/rayTraceKernel.hpp
++++ b/include/viennaray/rayTraceKernel.hpp
+@@ -69,13 +69,15 @@ public:
+       }
+     }
+ 
++    // Per-thread statistics, aggregated after the region (no OpenMP reduction
++    // clause: abort with "OMP: Error #132" on MSVC libomp when the team spans
++    // all hardware threads).
++    std::vector<std::array<size_t, 9>> threadCounters(numThreads);
++
+     Timer timer;
+     timer.start();
+ 
+-#pragma omp parallel reduction(                                                \
+-        + : geoHits, nonGeoHits, particleHits, totalTraces, totalBoundaryHits, \
+-            totalReflections, totalBackfaceHits, raysTerminated,               \
+-            totalDiskHits) shared(threadLocalData)
++#pragma omp parallel shared(threadLocalData, threadCounters)
+     {
+       alignas(128) auto rayHit =
+           RTCRayHit{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+@@ -83,6 +85,9 @@ public:
+       int threadID = 0;
+ #ifdef _OPENMP
+       threadID = omp_get_thread_num();
++      size_t geoHits = 0, nonGeoHits = 0, particleHits = 0;
++      size_t totalTraces = 0, totalBoundaryHits = 0, totalReflections = 0;
++      size_t totalBackfaceHits = 0, totalDiskHits = 0, raysTerminated = 0;
+ #endif
+       unsigned int seed = config_.runNumber + config_.rngSeed;
+       if (config_.useRandomSeed) {
+@@ -332,8 +337,24 @@ public:
+         totalReflections += numReflections;
+         totalBackfaceHits += backfaceHits;
+       } // end ray tracing for loop
++      threadCounters[threadID] = {
++          geoHits,           nonGeoHits,        particleHits,
++          totalTraces,       totalBoundaryHits, totalReflections,
++          totalBackfaceHits, totalDiskHits,     raysTerminated};
+     } // end parallel section
+ 
++    for (const auto &c : threadCounters) {
++      geoHits += c[0];
++      nonGeoHits += c[1];
++      particleHits += c[2];
++      totalTraces += c[3];
++      totalBoundaryHits += c[4];
++      totalReflections += c[5];
++      totalBackfaceHits += c[6];
++      totalDiskHits += c[7];
++      raysTerminated += c[8];
++    }
++
+     timer.finish();
+ 
+     // Merge all thread-local output arrays in one parallel region.

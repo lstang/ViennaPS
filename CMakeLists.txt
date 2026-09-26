@@ -170,6 +170,7 @@ target_include_directories(
 # --------------------------------------------------------------------------------------------------------
 include("cmake/cpm.cmake")
 include("cmake/vtk.cmake")
+include("cmake/viennaray.cmake")
 
 CPMAddPackage(
   NAME ViennaCore
@@ -190,6 +191,8 @@ CPMAddPackage(
   GIT_REPOSITORY "https://github.com/ViennaTools/ViennaRay"
   EXCLUDE_FROM_ALL ${VIENNAPS_BUILD_PYTHON}
   OPTIONS "VIENNARAY_USE_GPU ${VIENNAPS_USE_GPU}")
+
+viennaps_patch_viennaray_openmp_reduction("${ViennaRay_SOURCE_DIR}")
 
 # --------------------------------------------------------------------------------------------------------
 # Pre-resolve common transitive dependencies that VTK/HDF5 pull in (ZLIB etc.)
